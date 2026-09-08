@@ -1,10 +1,10 @@
 {
-  "_comment": "Screenpipe runtime settings that this experiment depends on. Captured from ~/.screenpipe/store.bin. Secrets redacted - set those in the Screenpipe UI, not here.",
+  "_comment": "Screenpipe runtime settings this experiment depends on. Captured from ~/.screenpipe/store.bin. Secrets redacted - set those in the Screenpipe UI, not here.",
   "_screenpipe_version": "2.7.27",
   "_captured": "2026-09-08",
   "settings": {
     "audioCaptureMode": "always",
-    "audioChunkDuration": 10,
+    "audioChunkDuration": 5,
     "audioDevices": [
       "the owner\u2019s AirPods Pro (input)",
       "MacBook Pro Microphone (input)",
