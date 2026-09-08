@@ -1,0 +1,41 @@
+{
+  "_comment": "Screenpipe runtime settings that this experiment depends on. Captured from ~/.screenpipe/store.bin. Secrets redacted - set those in the Screenpipe UI, not here.",
+  "_screenpipe_version": "2.7.27",
+  "_captured": "2026-09-08",
+  "settings": {
+    "audioCaptureMode": "always",
+    "audioChunkDuration": 10,
+    "audioDevices": [
+      "the owner\u2019s AirPods Pro (input)",
+      "MacBook Pro Microphone (input)",
+      "System Audio (output)"
+    ],
+    "audioTranscriptionEngine": "whisper-tiny-quantized",
+    "batchMaxDurationSecs": null,
+    "coreaudioTapMigrationV2": true,
+    "coreaudioTapMigrationV3": true,
+    "disableAudio": false,
+    "disableClickCapture": false,
+    "disableClipboardCapture": true,
+    "disableKeyboardCapture": "***REDACTED***",
+    "disableMeetingDetector": false,
+    "disableScreenshots": false,
+    "disableSnapshotCompaction": false,
+    "disableTimeline": false,
+    "disableVision": false,
+    "disabledShortcuts": [],
+    "experimentalCoreaudioSystemAudio": true,
+    "meetingLiveTranscriptionEnabled": true,
+    "meetingLiveTranscriptionProvider": "selected-engine",
+    "monitorIds": [
+      "default"
+    ],
+    "openaiCompatibleModel": null,
+    "openaiCompatibleRawAudio": false,
+    "startAudioShortcut": "Super+Ctrl+A",
+    "stopAudioShortcut": "Super+Ctrl+Z",
+    "transcriptionMode": "realtime",
+    "useAllMonitors": true,
+    "useSystemDefaultAudio": true
+  }
+}
