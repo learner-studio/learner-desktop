@@ -1,0 +1,22 @@
+# --- Secrets -----------------------------------------------------------------
+.env
+
+# --- Confidential source data ------------------------------------------------
+# Real customer meeting transcripts and everything derived from them.
+# These contain named client conversations and must never be committed.
+Past Call Transcripts/
+data/
+logs/
+
+# --- Build artifacts ---------------------------------------------------------
+node_modules/
+menu-bar-app/AI Aggregator.app/
+menu-bar-app/ai-aggregator-menubar
+/main
+
+# --- OS ----------------------------------------------------------------------
+.DS_Store
+
+# --- Python ------------------------------------------------------------------
+__pycache__/
+*.pyc
