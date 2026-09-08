@@ -63,18 +63,28 @@ Run the parser tests:
 python3 -m unittest discover -s tests -p 'test_transcript_parsing.py'
 ```
 
-## Dependency: screenpipe
+## screenpipe
 
-screenpipe is an upstream application, installed separately — it is not vendored here.
+Transcription comes from screenpipe, vendored in-tree at `vendor/screenpipe`
+(mediar-ai/screenpipe `main` @ `a3eae78`, desktop app version 2.7.27).
 
-- Tested against **screenpipe 2.7.27** (`/Applications/screenpipe.app`).
 - The app reads `audio_transcriptions` via `POST http://localhost:3030/raw_sql`.
-- **Transcription must run in low-latency mode.** screenpipe batches transcription writes;
-  when it does, several segments land with one write `timestamp` and the app's wall-clock
-  turn timing is distorted — turns merge or split wrongly and the on-screen warning fires
-  late. Each turn now records `metadata.ingest_lag_sec_max`, and any turn whose lag exceeds
+- **Transcription latency drives warning latency.** screenpipe cannot write a transcription
+  until its audio chunk completes, so `audioChunkDuration` sets a floor on how late the
+  on-screen warning can fire. When lag is high, several segments land with one write
+  `timestamp` and the app's wall-clock turn timing is distorted — turns merge or split
+  wrongly. Every turn records `metadata.ingest_lag_sec_max`; anything above
   `maxTrustedIngestLagSec` (10 s) is tagged `metadata.data_quality = "suspect_ingest_lag"`.
   Filter those out of analysis.
+- Settings this experiment depends on are captured in `config/screenpipe-settings.json`.
+
+To re-sync the vendored copy:
+
+```bash
+rm -rf vendor/screenpipe
+git clone --depth 1 https://github.com/mediar-ai/screenpipe.git vendor/screenpipe
+rm -rf vendor/screenpipe/.git
+```
 
 ## Experiment design
 
