@@ -8,8 +8,8 @@ const REMOTE_PG_URL = process.env.HABITS_PG_URL ?? "";
 
 export async function syncHabits() {
   if (!REMOTE_PG_URL) {
-    console.error("[HabitSync] HABITS_PG_URL is not set; skipping sync. See .env.example.");
-    return 0;
+    // Fail loudly: a silent skip here strands rows in the local sqlite indefinitely.
+    throw new Error("HABITS_PG_URL is not set (cwd must be the project root so .env loads). See .env.example.");
   }
 
   const localDb = new Database(LOCAL_DB_PATH);
