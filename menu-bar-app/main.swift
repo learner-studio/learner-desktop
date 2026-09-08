@@ -1188,6 +1188,8 @@ func syncHabitsToServer(completion: ((Bool) -> Void)? = nil) {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/Users/benpollack/.bun/bin/bun")
         task.arguments = ["run", "/Users/benpollack/Documents/AI aggregator logger project/src/sync-habits.ts"]
+        // Run from the project root so bun loads .env (HABITS_PG_URL) from there.
+        task.currentDirectoryURL = URL(fileURLWithPath: "/Users/benpollack/Documents/AI aggregator logger project")
         let pipe = Pipe()
         task.standardOutput = pipe
         task.standardError = pipe
