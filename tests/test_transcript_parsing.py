@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Unit tests for Read AI transcript turn-merging, duration capping and speaker matching."""
+"""Fast lane: Read AI transcript turn-merging, duration capping and speaker matching.
+
+Pure functions only -- no docx files, no network, no database. The .docx corpus is
+exercised separately in tests/heavy/test_transcript_corpus.py.
+"""
 
 import os
 import sys
@@ -46,21 +50,18 @@ class DuplicateExportOrderingTest(unittest.TestCase):
         ordered = order_transcript_files(list(counts), line_counter=counts.get)
         return [os.path.basename(f) for f in ordered]
 
-    def test_prefers_the_copy_with_more_transcript_lines(self):
-        order = self.order({
-            "/t/report discovery.docx": 2,
-            "/t/report discovery(1).docx": 74,
-        })
-
-        self.assertEqual(order[0], "report discovery(1).docx")
-
-    def test_keeps_the_original_first_when_it_is_the_fuller_recording(self):
-        order = self.order({
-            "/t/demo training.docx": 108,
-            "/t/demo training(1).docx": 68,
-        })
-
-        self.assertEqual(order[0], "demo training.docx")
+    def test_ranks_colliding_exports_by_transcript_length(self):
+        # The winner must be chosen on line count, not on which name came first --
+        # assert both directions so a "always prefer the (1) copy" or "always prefer
+        # the original" implementation cannot pass.
+        self.assertEqual(
+            self.order({"/t/report discovery.docx": 2, "/t/report discovery(1).docx": 74})[0],
+            "report discovery(1).docx",
+        )
+        self.assertEqual(
+            self.order({"/t/demo training.docx": 108, "/t/demo training(1).docx": 68})[0],
+            "demo training.docx",
+        )
 
     def test_breaks_a_tie_in_favour_of_the_original_export(self):
         order = self.order({
@@ -87,17 +88,14 @@ class DuplicateExportOrderingTest(unittest.TestCase):
 class WordCountTest(unittest.TestCase):
     """Words are whitespace-separated tokens, matching the server transcript rebuild."""
 
-    def test_counts_whitespace_separated_words(self):
-        self.assertEqual(count_words("one two three"), 3)
-
     def test_keeps_contractions_and_hyphenated_words_whole(self):
+        # The live capture path used to split on punctuation too, counting "don't" as
+        # two words and inflating its counts relative to imported turns.
         self.assertEqual(count_words("don't stop"), 2)
         self.assertEqual(count_words("sign-ups dropped"), 2)
 
     def test_ignores_surrounding_and_repeated_whitespace(self):
         self.assertEqual(count_words("  one   two  "), 2)
-
-    def test_counts_nothing_in_empty_text(self):
         self.assertEqual(count_words("   "), 0)
 
 
@@ -166,30 +164,26 @@ class DurationTest(unittest.TestCase):
         self.assertEqual(turns[0]["duration_sec"], 1.0)
 
 
-class SyntheticTranscriptTest(unittest.TestCase):
-    """Short synthetic transcript exercising merging and capping together."""
+class MergeThenDurationTest(unittest.TestCase):
+    """The one thing the unit tests above cannot see: the cap is applied to the
+    COMBINED word count of a merged streak, over the gap spanning the whole streak."""
 
-    def test_merged_monologue_is_one_capped_turn(self):
+    def test_cap_uses_the_whole_merged_streak_not_its_last_line(self):
         turns = assign_durations(merge_consecutive_lines([
             line(0, "Rob", words(10)),
             line(30, "Ben Pollack", words(20)),
             line(60, "Ben Pollack", words(20)),
             line(90, "Ben Pollack", words(20)),
             line(300, "Rob", words(10)),
-            line(320, "Ben Pollack", words(200)),
         ]))
 
-        self.assertEqual([t["lines_merged"] for t in turns], [1, 3, 1, 1])
-
         monologue = turns[1]
-        # 60 words over a 270 s gap -> capped at 60/2.0
+        self.assertEqual(monologue["lines_merged"], 3)
+        # gap runs from the FIRST line of the streak (30s) to the next speaker (300s)
         self.assertEqual(monologue["gap_sec"], 270.0)
+        # 60 merged words / 2.0, not the final line's 20 words / 2.0
         self.assertEqual(monologue["duration_sec"], 30.0)
         self.assertEqual(monologue["duration_basis"], "words_cap")
-
-        # 30 s is not a breach: comparison is strictly greater than
-        self.assertEqual(turns[-1]["duration_basis"], "words_last")
-        self.assertEqual(turns[-1]["duration_sec"], 80.0)
 
 
 if __name__ == "__main__":
