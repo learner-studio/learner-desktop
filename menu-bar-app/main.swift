@@ -952,6 +952,20 @@ class PavlokController: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
 }
 
+/// Version of the screenpipe capture engine currently feeding transcriptions.
+///
+/// Stamped onto every turn so a change of measuring instrument shows up in the analysis
+/// instead of silently shifting turn counts and durations mid-experiment.
+enum CaptureEnvironment {
+    private static let lock = NSLock()
+    private static var storedVersion: String?
+
+    static var screenpipeVersion: String? {
+        get { lock.lock(); defer { lock.unlock() }; return storedVersion }
+        set { lock.lock(); storedVersion = newValue; lock.unlock() }
+    }
+}
+
 // MARK: - Habit Experiment Manager (Cluster Randomized Trial)
 enum HabitTreatmentArm: String, CaseIterable {
     /// The only arm keys ever written to habit_events.treatment_arm.
@@ -1646,6 +1660,7 @@ class TalkTimeMonitor: NSObject {
                 "interventions": turn.interventions,
                 "intervention_confirmed": confirmedDelivery,
                 // Screenpipe batch delivery distorts wall-clock turn timing; surface it.
+                "screenpipe_version": CaptureEnvironment.screenpipeVersion as Any? ?? NSNull(),
                 "ingest_lag_sec_max": turn.maxIngestLagSec,
                 "data_quality": turn.maxIngestLagSec > maxTrustedIngestLagSec ? "suspect_ingest_lag" : "ok",
                 "toast_shown": turn.interventions.contains { ($0["modality"] as? String) == "toast" }
@@ -2705,6 +2720,10 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     self.screenpipeDetail = "Port 3030 closed"
                     self.updateTrayButton()
                     return
+                }
+
+                if let reportedVersion = json["version"] as? String {
+                    CaptureEnvironment.screenpipeVersion = reportedVersion
                 }
 
                 let status = json["status"] as? String ?? "unknown"

@@ -57,11 +57,38 @@ python3 scripts/parse_readai_transcripts.py
 bun scripts/ingest_to_postgres.ts
 ```
 
-Run the parser tests:
+## Tests
+
+Two lanes, stdlib `unittest` only — no pytest, no dependencies.
 
 ```bash
-python3 -m unittest discover -s tests -p 'test_transcript_parsing.py'
+./scripts/test.sh          # fast lane (default), ~11s
+./scripts/test.sh heavy    # heavy lane, opt-in
+./scripts/test.sh all
 ```
+
+**Fast lane** (`tests/*.py`) is pure and hermetic: no network, no database, no
+launchd, no `.docx` corpus, no Swift compile. It covers the Read AI transcript
+functions and both capture scripts. The capture-script tests run the real
+`stop-capture.sh` / `start-capture.sh`, but inside a sandbox where every
+state-changing command (`launchctl`, `pkill`, `curl`, `osascript`, `open`, `nc`,
+`sqlite3`, `bun`) is a recording stub on `PATH` and `HOME` points at a throwaway
+directory — they assert the ordering and flag handling without touching the real
+capture stack. Run this on every change.
+
+**Heavy lane** (`tests/heavy/*.py`) needs the real world: screenpipe on `:3030`,
+the 209-file `.docx` corpus, `swiftc`. Each suite skips rather than fails when its
+dependency is missing.
+
+One heavy test really does stop and restart the capture stack, and stays skipped
+even in the heavy lane unless you opt in a second time:
+
+```bash
+AIAGG_HEAVY=1 AIAGG_HEAVY_DESTRUCTIVE=1 \
+  python3 -m unittest discover -s tests/heavy -p 'test_capture_scripts_live.py'
+```
+
+Nothing is recorded while it runs. Do not run it during a call.
 
 ## screenpipe
 
@@ -77,6 +104,42 @@ Transcription comes from screenpipe, vendored in-tree at `vendor/screenpipe`
   `maxTrustedIngestLagSec` (10 s) is tagged `metadata.data_quality = "suspect_ingest_lag"`.
   Filter those out of analysis.
 - Settings this experiment depends on are captured in `config/screenpipe-settings.json`.
+
+### Version pinning and the preflight check
+
+screenpipe is the experiment's measuring instrument. Changing it mid-phase makes any shift
+in turn counts or durations impossible to attribute to the intervention, so:
+
+- **Auto-update is off** (`autoUpdate` and `autoUpdatePipes` are `false`). Upgrade
+  deliberately *between* phases, never during one.
+- **Every turn records `metadata.screenpipe_version`**, read from `/health` by the app. An
+  instrument change therefore shows up as a column you can segment on rather than as an
+  invisible confound.
+- **Treat a version change as a phase boundary** in GrowthBook: end the phase, upgrade,
+  re-run the preflight, start the next phase. Analyses should not span versions.
+
+Run the preflight before a session that matters:
+
+```bash
+./scripts/preflight-capture.sh
+```
+
+It compares the live `~/.screenpipe/store.bin` against `config/screenpipe-settings.json` and
+checks that `/raw_sql` still returns the columns the app polls. It exists because
+`TranscriptionMode::Batch` is screenpipe's `#[default]`: a settings reset, migration or
+reinstall silently reintroduces up to two minutes of deferred transcription — which is what
+corrupted the 2026-09-08 data — and nothing errors when it happens. Exit codes: `0` fine,
+`1` drift, `2` screenpipe unreachable.
+
+When a settings change is deliberate, re-capture the expectations so it lands in git:
+
+```bash
+./scripts/preflight-capture.sh          # shows exactly what drifted
+# ...then update config/screenpipe-settings.json and commit it
+```
+
+**Note:** screenpipe rewrites `store.bin` from memory while it is running, so editing that
+file with the app up does not stick. Stop screenpipe first, or change the setting in its UI.
 
 To re-sync the vendored copy:
 

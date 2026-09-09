@@ -1,6 +1,7 @@
 {
-  "_comment": "Screenpipe runtime settings this experiment depends on. Captured from ~/.screenpipe/store.bin. Secrets redacted - set those in the Screenpipe UI, not here.",
-  "_screenpipe_version": "2.7.27",
+  "_comment": "Screenpipe runtime settings this experiment depends on, checked by scripts/preflight-capture.sh. Captured from ~/.screenpipe/store.bin. Secrets redacted - set those in the Screenpipe UI, not here.",
+  "_screenpipe_app_version": "2.7.28",
+  "_screenpipe_engine_version": "0.4.50",
   "_captured": "2026-09-09",
   "settings": {
     "audioCaptureMode": "always",
@@ -11,6 +12,9 @@
       "System Audio (output)"
     ],
     "audioTranscriptionEngine": "whisper-large-v3-turbo-quantized",
+    "autoStartEnabled": true,
+    "autoUpdate": false,
+    "autoUpdatePipes": false,
     "batchMaxDurationSecs": null,
     "coreaudioTapMigrationV2": true,
     "coreaudioTapMigrationV3": true,
@@ -35,6 +39,7 @@
     "startAudioShortcut": "Super+Ctrl+A",
     "stopAudioShortcut": "Super+Ctrl+Z",
     "transcriptionMode": "realtime",
+    "updateChannel": "stable",
     "useAllMonitors": true,
     "useSystemDefaultAudio": true
   }
