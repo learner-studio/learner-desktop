@@ -1279,11 +1279,23 @@ class TalkTimeMonitor: NSObject {
     // not on when rows happened to arrive, so batch delivery cannot distort them.
     private var turnAudioStart: Date?
     private var lastSegmentAudioEnd: Date?
-    static let screenpipeDateFormatter: ISO8601DateFormatter = {
+    // screenpipe emits both "…T16:10:12-04:00" and "…T15:12:11.241-04:00"; a formatter
+    // configured for one returns nil for the other, which silently drops the audio clock.
+    private static let plainDateFormatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime]
         return f
     }()
+
+    private static let fractionalDateFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    static func parseScreenpipeDate(_ value: String) -> Date? {
+        return fractionalDateFormatter.date(from: value) ?? plainDateFormatter.date(from: value)
+    }
 
     var isSimulating: Bool = false
     private var simulatedSeconds: TimeInterval = 0.0
@@ -1542,7 +1554,7 @@ class TalkTimeMonitor: NSObject {
                     let text = row["transcription"] as? String ?? ""
                     let startTime = (row["start_time"] as? NSNumber)?.doubleValue ?? 0.0
                     let endTime = (row["end_time"] as? NSNumber)?.doubleValue ?? 0.0
-                    let writtenAt = (row["timestamp"] as? String).flatMap { TalkTimeMonitor.screenpipeDateFormatter.date(from: $0) }
+                    let writtenAt = (row["timestamp"] as? String).flatMap { TalkTimeMonitor.parseScreenpipeDate($0) }
 
                     self.handleTranscriptionRow(rowId: id, chunkId: chunkId, isInput: isInput, text: text, startTime: startTime, endTime: endTime, writtenAt: writtenAt)
                 }
