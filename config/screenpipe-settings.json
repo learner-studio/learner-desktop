@@ -1,7 +1,7 @@
 {
   "_comment": "Screenpipe runtime settings this experiment depends on. Captured from ~/.screenpipe/store.bin. Secrets redacted - set those in the Screenpipe UI, not here.",
   "_screenpipe_version": "2.7.27",
-  "_captured": "2026-09-08",
+  "_captured": "2026-09-09",
   "settings": {
     "audioCaptureMode": "always",
     "audioChunkDuration": 5,
@@ -10,7 +10,7 @@
       "MacBook Pro Microphone (input)",
       "System Audio (output)"
     ],
-    "audioTranscriptionEngine": "whisper-tiny-quantized",
+    "audioTranscriptionEngine": "whisper-large-v3-turbo-quantized",
     "batchMaxDurationSecs": null,
     "coreaudioTapMigrationV2": true,
     "coreaudioTapMigrationV3": true,
