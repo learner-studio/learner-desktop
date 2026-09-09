@@ -1259,6 +1259,12 @@ class TalkTimeMonitor: NSObject {
     // with one arrival time and the wall-clock turn timing below is distorted. Track the
     // worst lag seen in a turn so affected rows are identifiable instead of silently wrong.
     private var maxIngestLagSec: Double = 0.0
+    private var lastObservedIngestLagSec: Double = 0.0
+    // Absolute audio-clock positions, derived from screenpipe's chunk timestamp plus the
+    // segment's offset within that chunk. Turn boundaries are measured on this timeline,
+    // not on when rows happened to arrive, so batch delivery cannot distort them.
+    private var turnAudioStart: Date?
+    private var lastSegmentAudioEnd: Date?
     static let screenpipeDateFormatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime]
@@ -1530,7 +1536,9 @@ class TalkTimeMonitor: NSObject {
                 // Check if user stopped speaking (silence timeout)
                 if self.currentStreak > 0, let lastWallClock = self.lastSpeechWallClock {
                     let elapsed = Date().timeIntervalSince(lastWallClock)
-                    if elapsed > self.silenceTimeout {
+                    // A transcription cannot arrive until its chunk closes, so silence is
+                    // only real once we have waited out the delivery lag as well.
+                    if elapsed > self.silenceTimeout + self.lastObservedIngestLagSec {
                         print("[SpeakingCoach] Silence detected (\(Int(elapsed))s since last spoken word). Resetting monologue streak.")
                         fflush(stdout)
                         self.resetStreak()
@@ -1580,6 +1588,7 @@ class TalkTimeMonitor: NSObject {
         let shockedAtStreakSec: Double?
         let interventions: [[String: Any]]
         let maxIngestLagSec: Double
+        let audioClock: Bool
     }
 
     private func finishTurnAndLog(_ turn: FinishedTurn) {
@@ -1629,6 +1638,7 @@ class TalkTimeMonitor: NSObject {
                 "simulated": isSimulating,
                 "source": HabitEventLogger.liveSource,
                 "measurement": "voiced",
+                "turn_clock": turn.startedAt != nil && turn.audioClock ? "audio" : "arrival",
                 "call_title": activeCallTitle ?? "",
                 "voiced_duration_sec": turn.streak,
                 "gap_duration_sec": gapDurationValue,
@@ -1661,6 +1671,7 @@ class TalkTimeMonitor: NSObject {
 
         if let writtenAt = writtenAt {
             let lag = Date().timeIntervalSince(writtenAt)
+            lastObservedIngestLagSec = lag
             if lag > maxIngestLagSec { maxIngestLagSec = lag }
             if lag > maxTrustedIngestLagSec {
                 print("[SpeakingCoach] ⚠️ Screenpipe ingest lag \(String(format: "%.1f", lag))s on row \(rowId) - turn timing for this turn is marked suspect.")
@@ -1670,7 +1681,13 @@ class TalkTimeMonitor: NSObject {
 
         let deviceLabel = isInput ? "User Mic" : "Other Participant"
         let segmentDuration = max(0, endTime - startTime)
-        let words = text.split { $0.isWhitespace || $0.isPunctuation }.count
+        // screenpipe's row timestamp is the audio chunk's start; start_time/end_time are
+        // offsets within that chunk. Together they give an absolute audio clock.
+        let segmentAudioStart = writtenAt.map { $0.addingTimeInterval(startTime) }
+        let segmentAudioEnd = writtenAt.map { $0.addingTimeInterval(endTime) }
+        // Whitespace-separated, matching the transcript importer's count_words(). Splitting
+        // on punctuation too counted "don't" as two words and inflated live word counts.
+        let words = text.split { $0.isWhitespace }.count
         let wordEstimate = Double(words) * 0.35
         let effectiveDuration = segmentDuration > 0.4 ? segmentDuration : max(1.0, min(wordEstimate, 4.0))
 
@@ -1691,10 +1708,24 @@ class TalkTimeMonitor: NSObject {
         let now = Date()
         if let lastClock = lastSpeechWallClock {
             let wallGap = now.timeIntervalSince(lastClock)
-            // Check if there was a large pause in audio timestamps or between chunks
-            let audioGap = (chunkId == lastChunkId && lastAudioEndTime > 0.0) ? max(0, startTime - lastAudioEndTime) : 0.0
+            // Prefer the audio clock: it spans chunks correctly and is immune to how late
+            // screenpipe delivered the row. Fall back to arrival wall-clock only when the
+            // row carried no usable timestamp.
+            let audioGap: Double
+            let gapIsAudioBased: Bool
+            if let segStart = segmentAudioStart, let lastEnd = lastSegmentAudioEnd {
+                audioGap = max(0, segStart.timeIntervalSince(lastEnd))
+                gapIsAudioBased = true
+            } else {
+                audioGap = (chunkId == lastChunkId && lastAudioEndTime > 0.0) ? max(0, startTime - lastAudioEndTime) : 0.0
+                gapIsAudioBased = false
+            }
 
-            if wallGap > silenceTimeout || audioGap > maxBreathingPause {
+            // Widen the arrival-clock fallback by the lag we actually observed, so batched
+            // delivery is not mistaken for the speaker having stopped.
+            let wallGapBroke = !gapIsAudioBased && wallGap > (silenceTimeout + lastObservedIngestLagSec)
+
+            if wallGapBroke || audioGap > maxBreathingPause {
                 print("[SpeakingCoach] Conversational pause detected (gap: \(String(format: "%.1f", max(wallGap, audioGap)))s). Starting fresh streak.")
                 fflush(stdout)
                 let previousStreak = currentStreak
@@ -1705,6 +1736,7 @@ class TalkTimeMonitor: NSObject {
                 let previousShockStreak = shockFiredStreakSec
                 let previousInterventions = drainInterventions()
                 let previousLag = maxIngestLagSec
+                let previousAudioClock = turnAudioStart != nil && lastSegmentAudioEnd != nil
 
                 hasWarnedPavlokThisMonologue = false
                 hasShockedPavlokThisMonologue = false
@@ -1717,30 +1749,35 @@ class TalkTimeMonitor: NSObject {
                 toastLoggedThisTurn = false
                 maxIngestLagSec = 0.0
 
-                let previousStart = turnStartWallClock
+                let previousStart = turnAudioStart ?? turnStartWallClock
+                let previousEnd = lastSegmentAudioEnd ?? now
 
                 currentStreak = effectiveDuration
                 currentTurnWords = words
                 turnStartWallClock = now
+                turnAudioStart = segmentAudioStart
 
                 finishTurnAndLog(FinishedTurn(
                     streak: previousStreak, words: previousWords,
-                    startedAt: previousStart, endedAt: now,
+                    startedAt: previousStart, endedAt: previousEnd,
                     warnedAt: previousWarnedAt, shockedAt: previousShockedAt,
                     warnedAtStreakSec: previousWarnStreak, shockedAtStreakSec: previousShockStreak,
                     interventions: previousInterventions,
-                    maxIngestLagSec: previousLag))
+                    maxIngestLagSec: previousLag,
+                    audioClock: previousAudioClock))
             } else {
                 currentStreak += effectiveDuration
             }
         } else {
             currentStreak = effectiveDuration
             turnStartWallClock = now
+            turnAudioStart = segmentAudioStart
         }
 
         lastSpeechWallClock = now
         lastChunkId = chunkId
         lastAudioEndTime = endTime
+        if let segEnd = segmentAudioEnd { lastSegmentAudioEnd = segEnd }
 
         print("[SpeakingCoach] User speaking streak now: \(formattedDuration) (warn: \(isWarningActive), alert: \(isAlertActive))")
         fflush(stdout)
@@ -1749,18 +1786,22 @@ class TalkTimeMonitor: NSObject {
     func resetStreak() {
         let finishedStreak = currentStreak
         let finishedWords = currentTurnWords
-        let startedAt = turnStartWallClock
+        let startedAt = turnAudioStart ?? turnStartWallClock
+        let endedAt = lastSegmentAudioEnd ?? Date()
         let warnedAt = warningFiredWallClock
         let shockedAt = shockFiredWallClock
         let warnedAtStreak = warningFiredStreakSec
         let shockedAtStreak = shockFiredStreakSec
         let interventions = drainInterventions()
         let turnLag = maxIngestLagSec
+        let audioClock = turnAudioStart != nil && lastSegmentAudioEnd != nil
 
         currentStreak = 0.0
         currentTurnWords = 0
         lastSpeechWallClock = nil
         turnStartWallClock = nil
+        turnAudioStart = nil
+        lastSegmentAudioEnd = nil
         lastChunkId = 0
         lastAudioEndTime = 0.0
         hasWarnedPavlokThisMonologue = false
@@ -1778,11 +1819,12 @@ class TalkTimeMonitor: NSObject {
 
         finishTurnAndLog(FinishedTurn(
             streak: finishedStreak, words: finishedWords,
-            startedAt: startedAt, endedAt: Date(),
+            startedAt: startedAt, endedAt: endedAt,
             warnedAt: warnedAt, shockedAt: shockedAt,
             warnedAtStreakSec: warnedAtStreak, shockedAtStreakSec: shockedAtStreak,
             interventions: interventions,
-            maxIngestLagSec: turnLag))
+            maxIngestLagSec: turnLag,
+            audioClock: audioClock))
     }
 
     func startSimulation(seconds: TimeInterval) {
