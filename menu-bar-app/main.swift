@@ -1088,6 +1088,7 @@ class HabitEventLogger {
     }
 
     func logTurn(
+        occurredAt: Date? = nil,
         sessionId: String,
         callApp: String?,
         callCategory: String = "work",
@@ -1105,7 +1106,10 @@ class HabitEventLogger {
         queue.async {
             guard let db = self.db else { return }
             let eventId = UUID().uuidString.lowercased()
-            let isoTimestamp = ISO8601DateFormatter().string(from: Date())
+            // When the app drains a backlog of transcriptions, many turns finish within the
+            // same wall-clock second. Stamp the row with when the turn was actually spoken
+            // (audio clock where available), not when it happened to be written.
+            let isoTimestamp = ISO8601DateFormatter().string(from: occurredAt ?? Date())
             let metaJson = (try? JSONSerialization.data(withJSONObject: metadata)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
 
             let sql = """
@@ -1269,6 +1273,12 @@ class TalkTimeMonitor: NSObject {
     private var interventionLog: [[String: Any]] = []
     private let interventionLock = NSLock()
     private var toastLoggedThisTurn = false
+    // Was the intervention able to fire at any point during this turn? A turn where it
+    // could not (solo speech, with alertOnlyDuringCalls on) is not an experimental unit:
+    // no cue can be delivered, so it cannot respond to treatment, and counting it only
+    // dilutes the arms. Tracked rather than derived from call_category so it stays correct
+    // if "Alert Only During Calls" is ever turned off.
+    private var turnWasAlertable = false
     // Screenpipe writes transcriptions in batches; when it lags, several segments arrive
     // with one arrival time and the wall-clock turn timing below is distorted. Track the
     // worst lag seen in a turn so affected rows are identifiable instead of silently wrong.
@@ -1615,6 +1625,7 @@ class TalkTimeMonitor: NSObject {
         let interventions: [[String: Any]]
         let maxIngestLagSec: Double
         let audioClock: Bool
+        let wasAlertable: Bool
     }
 
     private func finishTurnAndLog(_ turn: FinishedTurn) {
@@ -1647,6 +1658,7 @@ class TalkTimeMonitor: NSObject {
         let confirmedDelivery = turn.interventions.contains { ($0["delivered"] as? Bool) == true }
 
         HabitEventLogger.shared.logTurn(
+            occurredAt: turn.startedAt,
             sessionId: activeSessionId,
             callApp: activeCallApp,
             callCategory: category,
@@ -1671,6 +1683,9 @@ class TalkTimeMonitor: NSObject {
                 // Confirmation of what actually fired, per modality, including failures.
                 "interventions": turn.interventions,
                 "intervention_confirmed": confirmedDelivery,
+                // False => the intervention could not fire, so this turn is not an
+                // experimental unit. The analysis layer filters on this.
+                "experiment_eligible": turn.wasAlertable,
                 // Screenpipe batch delivery distorts wall-clock turn timing; surface it.
                 "screenpipe_version": CaptureEnvironment.screenpipeVersion as Any? ?? NSNull(),
                 "ingest_lag_sec_max": turn.maxIngestLagSec,
@@ -1731,6 +1746,7 @@ class TalkTimeMonitor: NSObject {
         }
 
         // User spoke on microphone
+        if canAlert { turnWasAlertable = true }
         currentTurnWords += words
         let now = Date()
         if let lastClock = lastSpeechWallClock {
@@ -1764,6 +1780,7 @@ class TalkTimeMonitor: NSObject {
                 let previousInterventions = drainInterventions()
                 let previousLag = maxIngestLagSec
                 let previousAudioClock = turnAudioStart != nil && lastSegmentAudioEnd != nil
+                let previousAlertable = turnWasAlertable
 
                 hasWarnedPavlokThisMonologue = false
                 hasShockedPavlokThisMonologue = false
@@ -1775,6 +1792,7 @@ class TalkTimeMonitor: NSObject {
                 shockFiredStreakSec = nil
                 toastLoggedThisTurn = false
                 maxIngestLagSec = 0.0
+                turnWasAlertable = canAlert
 
                 let previousStart = turnAudioStart ?? turnStartWallClock
                 let previousEnd = lastSegmentAudioEnd ?? now
@@ -1791,7 +1809,8 @@ class TalkTimeMonitor: NSObject {
                     warnedAtStreakSec: previousWarnStreak, shockedAtStreakSec: previousShockStreak,
                     interventions: previousInterventions,
                     maxIngestLagSec: previousLag,
-                    audioClock: previousAudioClock))
+                    audioClock: previousAudioClock,
+                    wasAlertable: previousAlertable))
             } else {
                 currentStreak += effectiveDuration
             }
@@ -1822,6 +1841,7 @@ class TalkTimeMonitor: NSObject {
         let interventions = drainInterventions()
         let turnLag = maxIngestLagSec
         let audioClock = turnAudioStart != nil && lastSegmentAudioEnd != nil
+        let wasAlertable = turnWasAlertable
 
         currentStreak = 0.0
         currentTurnWords = 0
@@ -1841,6 +1861,7 @@ class TalkTimeMonitor: NSObject {
         shockFiredStreakSec = nil
         toastLoggedThisTurn = false
         maxIngestLagSec = 0.0
+        turnWasAlertable = false
         MonologueToastController.shared.hide()
         onStreakUpdated?(0.0)
 
@@ -1851,7 +1872,8 @@ class TalkTimeMonitor: NSObject {
             warnedAtStreakSec: warnedAtStreak, shockedAtStreakSec: shockedAtStreak,
             interventions: interventions,
             maxIngestLagSec: turnLag,
-            audioClock: audioClock))
+            audioClock: audioClock,
+            wasAlertable: wasAlertable))
     }
 
     func startSimulation(seconds: TimeInterval) {
