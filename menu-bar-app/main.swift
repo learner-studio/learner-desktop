@@ -1341,10 +1341,13 @@ class TalkTimeMonitor: NSObject {
         return isSimulating || !alertOnlyDuringCalls || (activeCallApp != nil)
     }
 
-    /// The control arm is documented as silent / observational, so it gets no visual cue
-    /// either. Without this the toast fired in every arm and baseline was not a true control.
+    /// The visual toast is the common floor across every arm, including baseline. The
+    /// arms differ only in the stimulus added on top of it (audio, shock, vibe), so the
+    /// experiment measures what each adds over the visual cue -- and the tool keeps
+    /// working in every meeting. Briefly gated to non-baseline arms in Sept 2026; that
+    /// silenced 25% of meetings for a purer control, which was the wrong trade.
     var armShowsToast: Bool {
-        return HabitExperimentManager.shared.resolveArm(for: activeSessionId) != "baseline"
+        return true
     }
 
     private func recordIntervention(_ entry: [String: Any]) {
