@@ -79,6 +79,24 @@ class AutomaticSyncStaysOutOfDocumentsTest(unittest.TestCase):
         self.assertIn("launchctl bootstrap", build)
 
 
+class NoUnrequestedPrivacyPromptsTest(unittest.TestCase):
+    """Each TCC prompt (Bluetooth, Documents) is re-asked after every rebuild because the
+    binary is ad-hoc signed. So the app must not touch a protected resource unless the
+    feature that needs it is actually on."""
+
+    def test_bluetooth_is_not_initialised_until_pavlok_is_enabled(self):
+        src = read(SWIFT)
+        init_start = src.index("class PavlokController")
+        init_body = src[init_start:src.index("func startBleScan(", init_start)]
+
+        # Creating a CBCentralManager is the act that triggers the Bluetooth prompt.
+        self.assertNotIn("CBCentralManager(", init_body,
+                         "CBCentralManager is created in init, before Pavlok is known to be enabled")
+        self.assertEqual(src.count("CBCentralManager(delegate:"), 1)
+        scan = src[src.index("func startBleScan("):src.index("func disconnectBle(")]
+        self.assertIn("CBCentralManager(delegate:", scan)
+
+
 class ShutdownSequenceTest(unittest.TestCase):
     def test_every_exit_path_reaches_the_terminate_delegate(self):
         src = read(SWIFT)
