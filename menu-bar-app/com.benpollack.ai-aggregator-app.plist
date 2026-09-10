@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.benpollack.ai-aggregator-app</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/benpollack/Applications/AI Aggregator.app/Contents/MacOS/ai-aggregator-menubar</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <!--
+      Restart only after a crash (non-zero exit). A clean quit (menu Quit, Cmd-Q, or
+      SIGTERM from launchctl / stop-capture.sh) exits 0 and stays down. The previous
+      unconditional KeepAlive=true respawned the app within a second of any exit, which
+      made the Quit item a restart button and skipped the habit-row flush.
+    -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/benpollack/.ai-aggregator/logs/menubar.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/benpollack/.ai-aggregator/logs/menubar.log</string>
+</dict>
+</plist>

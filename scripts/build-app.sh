@@ -52,7 +52,41 @@ echo "Installing to ~/Applications/..."
 rm -rf "${TARGET_APP}"
 cp -R "${BUNDLE_DIR}" "${TARGET_APP}"
 
-echo "Restarting AI Aggregator LaunchAgent..."
-launchctl kickstart -k "gui/$(id -u)/com.benpollack.ai-aggregator-app" 2>/dev/null || true
+echo "Installing runtime files to ~/.ai-aggregator (keeps the app out of ~/Documents)..."
+# The app's automatic habit sync runs from here so an ad-hoc-signed rebuild never
+# re-triggers the "access files in your Documents folder" prompt.
+RUNTIME_DIR="${HOME}/.ai-aggregator"
+mkdir -p "${RUNTIME_DIR}"
+cp "${PROJECT_DIR}/src/sync-habits.ts" "${RUNTIME_DIR}/sync-habits.ts"
+if [ -f "${PROJECT_DIR}/.env" ]; then
+  cp "${PROJECT_DIR}/.env" "${RUNTIME_DIR}/.env"
+  chmod 600 "${RUNTIME_DIR}/.env"
+else
+  echo "  ! no .env in project - habit sync will have no HABITS_PG_URL" >&2
+fi
+
+AGENT_LABEL="com.benpollack.ai-aggregator-app"
+AGENT_SRC="${PROJECT_DIR}/menu-bar-app/${AGENT_LABEL}.plist"
+AGENT_DST="${HOME}/Library/LaunchAgents/${AGENT_LABEL}.plist"
+
+if cmp -s "${AGENT_SRC}" "${AGENT_DST}" 2>/dev/null; then
+  # Plist unchanged: restart in place. kickstart -k delivers SIGTERM, which the app
+  # handles as a clean shutdown, and does not re-register the login item -- so macOS
+  # does not show the "App Background Activity" notification.
+  echo "Restarting AI Aggregator (LaunchAgent unchanged)..."
+  launchctl kickstart -k "gui/$(id -u)/${AGENT_LABEL}" 2>/dev/null \
+    || launchctl bootstrap "gui/$(id -u)" "${AGENT_DST}"
+else
+  echo "Installing updated LaunchAgent (KeepAlive only on crash, so Quit stays quit)..."
+  cp "${AGENT_SRC}" "${AGENT_DST}"
+  launchctl bootout "gui/$(id -u)/${AGENT_LABEL}" 2>/dev/null || true
+  # bootout returns before the job is fully torn down; bootstrapping too early fails
+  # with "Input/output error" (5). Wait for the label to leave the domain first.
+  for _ in $(seq 1 30); do
+    launchctl print "gui/$(id -u)/${AGENT_LABEL}" >/dev/null 2>&1 || break
+    sleep 0.5
+  done
+  launchctl bootstrap "gui/$(id -u)" "${AGENT_DST}"
+fi
 
 echo "Successfully built and installed ${TARGET_APP}!"
