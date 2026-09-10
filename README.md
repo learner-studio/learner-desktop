@@ -152,8 +152,10 @@ rm -rf vendor/screenpipe/.git
 ## Experiment design
 
 Four arms, assigned per session (`treatment_arm`): `baseline`, `caw_audio`, `pavlok_shock`,
-`haptic_vibe`. `baseline` is silent and observational — it receives no stimulus **and no
-visual toast**, so it is a true control.
+`haptic_vibe`. **The visual toast shows in every arm, including `baseline`.** The arms differ
+only in the stimulus added on top of it, so the experiment measures what audio, shock or
+vibration adds over the visual cue — and the coach keeps working in every meeting. Each
+toast is recorded in `metadata.interventions[]` with `modality: "toast"`.
 
 - Warning at 30 s, hard stop at 60 s.
 - `breached_30s` / `breached_60s` are strict (`> 30`, `> 60`).
