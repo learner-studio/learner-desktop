@@ -568,7 +568,10 @@ class PavlokController: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         if defaults.object(forKey: kPavlokEnabled) == nil {
             defaults.set(false, forKey: kPavlokEnabled)
         }
-        centralManager = CBCentralManager(delegate: self, queue: DispatchQueue.global(qos: .userInitiated), options: [CBCentralManagerOptionShowPowerAlertKey: false])
+        // Bluetooth is only touched once Pavlok is actually enabled. Creating a
+        // CBCentralManager is what triggers macOS's "would like to use Bluetooth" prompt,
+        // and with an ad-hoc-signed binary that prompt returned after every rebuild --
+        // for a feature that was switched off.
         if isEnabled {
             startBleScan()
         }
@@ -576,6 +579,12 @@ class PavlokController: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
 
     func startBleScan(force: Bool = false) {
+        if centralManager == nil {
+            // Lazily created on first use. The scan itself starts from
+            // centralManagerDidUpdateState once the radio reports poweredOn.
+            centralManager = CBCentralManager(delegate: self, queue: DispatchQueue.global(qos: .userInitiated), options: [CBCentralManagerOptionShowPowerAlertKey: false])
+            return
+        }
         guard let central = centralManager, central.state == .poweredOn else { return }
         if central.isScanning && !force { return }
         central.stopScan()
