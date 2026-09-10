@@ -1104,7 +1104,10 @@ class HabitEventLogger {
         metadata: [String: Any] = [:]
     ) {
         queue.async {
-            guard let db = self.db else { return }
+            guard let db = self.db else {
+                print("[HabitLogger] Dropped a turn logged after shutdown (DB closed).")
+                return
+            }
             let eventId = UUID().uuidString.lowercased()
             // When the app drains a backlog of transcriptions, many turns finish within the
             // same wall-clock second. Stamp the row with when the turn was actually spoken
@@ -1170,6 +1173,24 @@ class HabitEventLogger {
         }
     }
 
+    /// Block until every queued insert has been written. Used by clean shutdown so the
+    /// in-flight turn is on disk before the sync runs and the DB is closed.
+    func waitUntilIdle() {
+        queue.sync {}
+    }
+
+    /// Close the SQLite handle. Further logTurn calls become no-ops rather than crashes.
+    func close() {
+        queue.sync {
+            if let db = self.db {
+                sqlite3_close(db)
+                self.db = nil
+                print("[HabitLogger] SQLite closed cleanly.")
+                fflush(stdout)
+            }
+        }
+    }
+
     func getUnsyncedCount() -> Int {
         var count = 0
         queue.sync {
@@ -1205,9 +1226,13 @@ func syncHabitsToServer(completion: ((Bool) -> Void)? = nil) {
     DispatchQueue.global(qos: .utility).async {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/Users/benpollack/.bun/bin/bun")
-        task.arguments = ["run", "/Users/benpollack/Documents/AI aggregator logger project/src/sync-habits.ts"]
-        // Run from the project root so bun loads .env (HABITS_PG_URL) from there.
-        task.currentDirectoryURL = URL(fileURLWithPath: "/Users/benpollack/Documents/AI aggregator logger project")
+        // The sync runs automatically (every 8s and at shutdown), so it must not touch
+        // ~/Documents: the app is ad-hoc signed, its identity changes on every rebuild,
+        // and macOS would re-prompt for Documents access after each build. build-app.sh
+        // installs sync-habits.ts and .env into ~/.ai-aggregator, which needs no grant.
+        let runtimeDir = FileManager.default.homeDirectoryForCurrentUser.path + "/.ai-aggregator"
+        task.arguments = ["run", runtimeDir + "/sync-habits.ts"]
+        task.currentDirectoryURL = URL(fileURLWithPath: runtimeDir)   // bun loads .env from cwd
         let pipe = Pipe()
         task.standardOutput = pipe
         task.standardError = pipe
@@ -2309,6 +2334,8 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusMenu: NSMenu!
     var backgroundTimer: Timer?
     var speechTimer: Timer?
+    private var isShuttingDown = false
+    private var signalSources: [DispatchSourceSignal] = []
 
     let projectDir = "/Users/benpollack/Documents/AI aggregator logger project"
     let homeDir = NSHomeDirectory()
@@ -2327,6 +2354,24 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var isHindsightHealthy: Bool = false
     var hindsightSyncedCount: String = "--"
     var hindsightBank: String = "learning-transcript-archive-v1"
+
+    /// launchctl bootout / kickstart -k and stop-capture.sh deliver SIGTERM. Route it
+    /// through NSApplication.terminate so it takes the same clean path as menu Quit
+    /// instead of killing the process mid-write.
+    ///
+    /// Called from the entrypoint BEFORE app.run(): a SIGTERM that lands in the window
+    /// between process start and applicationDidFinishLaunching would otherwise take the
+    /// default action (instant kill, no flush). A DispatchSource registered early simply
+    /// queues the event until the run loop starts.
+    func installSignalHandlers() {
+        for sig in [SIGTERM, SIGINT] {
+            signal(sig, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            source.setEventHandler { NSApplication.shared.terminate(nil) }
+            source.resume()
+            signalSources.append(source)
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Setup System Tray Status Item in macOS Menu Bar
@@ -3172,6 +3217,56 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSWorkspace.shared.open(URL(fileURLWithPath: homeDir + "/.ai-aggregator/logs/watcher.log"))
     }
 
+    /// Clean shutdown. Every exit path (menu Quit, SIGTERM from launchctl, Cmd-Q) lands
+    /// here. We finalise the in-flight turn, push everything unsynced to Postgres while
+    /// the tunnel is still up, close SQLite, and only then let the process exit.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if isShuttingDown { return .terminateNow }
+        isShuttingDown = true
+
+        // Stop generating new work first.
+        speechTimer?.invalidate()
+        backgroundTimer?.invalidate()
+
+        // Done synchronously on the main thread and bounded to ~90s. The app is quitting,
+        // so blocking its UI is fine, and this avoids the .terminateLater/reply handshake,
+        // which was observed to complete the work and then never actually exit.
+        print("[Shutdown] Finalising in-flight turn...")
+        fflush(stdout)
+        talkMonitor.resetStreak()
+
+        let logger = HabitEventLogger.shared
+        logger.waitUntilIdle()
+
+        // sync-habits.ts pushes at most 100 rows per run, so loop until drained. Stop
+        // early if a run makes no progress (tunnel down): rows are safe in SQLite and
+        // will sync on next launch.
+        let deadline = Date().addingTimeInterval(90)
+        var previous = -1
+        var attempts = 0
+        while Date() < deadline && attempts < 30 {
+            let remaining = logger.getUnsyncedCount()
+            if remaining == 0 { break }
+            if remaining == previous {
+                print("[Shutdown] No progress syncing (\(remaining) left) - leaving them for next launch.")
+                break
+            }
+            previous = remaining
+            print("[Shutdown] Syncing \(remaining) unsynced turn(s) to Postgres...")
+            fflush(stdout)
+            let done = DispatchSemaphore(value: 0)
+            syncHabitsToServer { _ in done.signal() }
+            _ = done.wait(timeout: .now() + 20)
+            attempts += 1
+        }
+        print("[Shutdown] Unsynced turns remaining: \(logger.getUnsyncedCount())")
+
+        logger.close()
+        print("[Shutdown] Clean shutdown complete.")
+        fflush(stdout)
+        return .terminateNow
+    }
+
     @objc func quitApp() {
         NSApplication.shared.terminate(nil)
     }
@@ -3507,6 +3602,7 @@ if CommandLine.arguments.contains("--test-pavlok-e2e") {
 let app = NSApplication.shared
 let delegate = TrayAppManager()
 app.delegate = delegate
+delegate.installSignalHandlers()
 // .accessory activation policy places the app in the system tray / menu bar without taking up Dock space
 app.setActivationPolicy(.accessory)
 app.run()
