@@ -84,6 +84,14 @@ class NoUnrequestedPrivacyPromptsTest(unittest.TestCase):
     binary is ad-hoc signed. So the app must not touch a protected resource unless the
     feature that needs it is actually on."""
 
+    def test_build_signs_with_a_stable_apple_identity_not_ad_hoc(self):
+        # TCC keys its grants to the designated requirement, which for an ad-hoc
+        # signature (-) is the code hash and changes every build.
+        build = read(BUILD)
+        self.assertRegex(build, r'SIGN_IDENTITY="Apple Development: [^"]+ \([A-Z0-9]{10}\)"')
+        self.assertRegex(build, r'codesign --force --sign "\$\{SIGN_IDENTITY\}"')
+        self.assertIn('codesign --verify --strict', build)
+
     def test_bluetooth_is_not_initialised_until_pavlok_is_enabled(self):
         src = read(SWIFT)
         init_start = src.index("class PavlokController")

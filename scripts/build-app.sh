@@ -48,6 +48,20 @@ cat << 'EOF' > "${BUNDLE_DIR}/Contents/Info.plist"
 </plist>
 EOF
 
+# Sign with a real Apple-issued identity so the app keeps the same identity across
+# rebuilds. Ad-hoc signing (-) changes the code hash every build, and macOS TCC keys
+# its grants (Bluetooth, Documents, ...) to that identity -- so every rebuild re-prompted.
+# Referenced by name, not hash, so the annual certificate renewal does not break this.
+SIGN_IDENTITY="Apple Development: <owner> (TTR89UH3PK)"
+echo "Code-signing with: ${SIGN_IDENTITY}"
+if security find-identity -v -p codesigning | grep -q "${SIGN_IDENTITY}"; then
+  codesign --force --sign "${SIGN_IDENTITY}" --timestamp=none "${BUNDLE_DIR}"
+  codesign --verify --strict "${BUNDLE_DIR}"
+else
+  echo "  ! signing identity not found in Keychain; falling back to ad-hoc (TCC will re-prompt per build)" >&2
+  codesign --force --sign - "${BUNDLE_DIR}"
+fi
+
 echo "Installing to ~/Applications/..."
 rm -rf "${TARGET_APP}"
 cp -R "${BUNDLE_DIR}" "${TARGET_APP}"
