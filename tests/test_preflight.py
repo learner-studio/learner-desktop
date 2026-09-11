@@ -28,7 +28,7 @@ BASELINE = {
 }
 
 
-def run_preflight(settings, expected=None, health=HEALTHY, rows=ROW_OK):
+def run_preflight(settings, expected=None, health=HEALTHY, rows=ROW_OK, pins=None):
     """Run the real script against a synthetic store.bin and a stubbed curl."""
     sandbox = tempfile.mkdtemp(prefix="preflight-")
     try:
@@ -38,7 +38,7 @@ def run_preflight(settings, expected=None, health=HEALTHY, rows=ROW_OK):
 
         exp_path = os.path.join(sandbox, "expected.json")
         with open(exp_path, "w") as fh:
-            json.dump({"settings": BASELINE if expected is None else expected}, fh)
+            json.dump(dict(pins or {}, settings=BASELINE if expected is None else expected), fh)
 
         stub_bin = os.path.join(sandbox, "bin")
         os.makedirs(stub_bin)
@@ -92,6 +92,20 @@ class PreflightTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1)
         self.assertIn("raw_sql", result.stdout)
+
+    def test_fails_when_the_engine_version_moves_off_the_pin(self):
+        # The vendor force-enables auto-update via remote policy, so the flag cannot be
+        # trusted; a version change is the instrument changing and must fail loudly.
+        result = run_preflight(dict(BASELINE), pins={"_screenpipe_engine_version": "0.4.49"})
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("version changed", result.stdout)
+        self.assertIn("phase boundary", result.stdout)
+
+    def test_passes_when_the_engine_version_matches_the_pin(self):
+        result = run_preflight(dict(BASELINE), pins={"_screenpipe_engine_version": "0.4.50"})
+
+        self.assertEqual(result.returncode, 0, result.stdout)
 
     def test_ignores_redacted_expectations_rather_than_reporting_drift(self):
         expected = dict(BASELINE, deepgramApiKey="***REDACTED***")

@@ -90,7 +90,23 @@ fi
 
 VERSION="$(printf '%s' "$HEALTH" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("version",""))' 2>/dev/null)"
 STATUS="$(printf '%s' "$HEALTH" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status",""))' 2>/dev/null)"
-[ -n "$VERSION" ] && note "screenpipe engine version ${VERSION} (stamped onto every turn as metadata.screenpipe_version)"
+
+# The vendor force-enables auto-update via remote policy, so the flag cannot be relied on.
+# A version change is the thing that matters: it is a change of measuring instrument and
+# must be treated as a phase boundary, so fail loudly when either version moves.
+PINNED_ENGINE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("_screenpipe_engine_version",""))' "$EXPECTED" 2>/dev/null)"
+PINNED_APP="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("_screenpipe_app_version",""))' "$EXPECTED" 2>/dev/null)"
+APP_VERSION="$(defaults read "${SCREENPIPE_APP:-/Applications/screenpipe.app}/Contents/Info.plist" CFBundleShortVersionString 2>/dev/null)"
+if [ -n "$PINNED_ENGINE" ] && [ "$VERSION" != "$PINNED_ENGINE" ]; then
+  bad "screenpipe engine version changed: pinned ${PINNED_ENGINE}, running ${VERSION:-unknown} — treat as a phase boundary"
+else
+  ok "screenpipe engine version ${VERSION} (pinned; stamped onto every turn as metadata.screenpipe_version)"
+fi
+if [ -n "$PINNED_APP" ] && [ -n "$APP_VERSION" ] && [ "$APP_VERSION" != "$PINNED_APP" ]; then
+  bad "screenpipe app version changed: pinned ${PINNED_APP}, installed ${APP_VERSION} — treat as a phase boundary"
+elif [ -n "$APP_VERSION" ]; then
+  ok "screenpipe app version ${APP_VERSION} (pinned)"
+fi
 if [ "$STATUS" = "healthy" ]; then ok "health: ${STATUS}"; else bad "health: ${STATUS:-unknown}"; fi
 
 # The menu-bar app polls these exact columns; if a screenpipe upgrade changes them the
