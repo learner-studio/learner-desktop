@@ -110,8 +110,11 @@ Transcription comes from screenpipe, vendored in-tree at `vendor/screenpipe`
 screenpipe is the experiment's measuring instrument. Changing it mid-phase makes any shift
 in turn counts or durations impossible to attribute to the intervention, so:
 
-- **Auto-update is off** (`autoUpdate` and `autoUpdatePipes` are `false`). Upgrade
-  deliberately *between* phases, never during one.
+- **Auto-update cannot be turned off.** screenpipe pushes a remote control policy
+  (`settings.remoteControlPolicy.autoUpdate.forceEnabled = true`) that re-enables it on
+  every launch and greys out the toggle. Setting `autoUpdate: false` in `store.bin` is
+  reverted within seconds. So the guard is detection, not prevention: the preflight pins
+  both the app and engine versions and fails when either moves.
 - **Every turn records `metadata.screenpipe_version`**, read from `/health` by the app. An
   instrument change therefore shows up as a column you can segment on rather than as an
   invisible confound.

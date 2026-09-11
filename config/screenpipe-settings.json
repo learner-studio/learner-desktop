@@ -14,7 +14,6 @@
     ],
     "audioTranscriptionEngine": "whisper-tiny-quantized",
     "autoStartEnabled": true,
-    "autoUpdate": false,
     "autoUpdatePipes": false,
     "batchMaxDurationSecs": null,
     "coreaudioTapMigrationV2": true,
@@ -43,5 +42,6 @@
     "updateChannel": "stable",
     "useAllMonitors": true,
     "useSystemDefaultAudio": true
-  }
+  },
+  "_auto_update_note": "autoUpdate is NOT asserted: screenpipe's remote control policy (settings.remoteControlPolicy.autoUpdate.forceEnabled=true, pushed from the vendor) re-enables it on every launch and greys out the UI toggle. The version assertions below are the real guard: a version change fails preflight and must be treated as a GrowthBook phase boundary."
 }
