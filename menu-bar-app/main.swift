@@ -1281,6 +1281,18 @@ class TalkTimeMonitor: NSObject {
 
     private var lastCheckedTranscriptionId: Int64 = 0
     private var isInitialized = false
+    // Live meeting transcription is a SEPARATE screenpipe pipeline. While a meeting
+    // stream is active screenpipe sets background_suppressed, so audio_transcriptions
+    // (the table below) receives nothing until the meeting ends and reconciliation
+    // back-fills it. Polling only that table left the coach blind during meetings --
+    // exactly when it is supposed to fire. So we read the live table too.
+    private var lastCheckedLiveSegmentId: Int64 = 0
+    private var liveIsInitialized = false
+    // Audio already accounted for via the live path. The post-meeting back-fill
+    // replays the same speech into audio_transcriptions; without this the whole
+    // meeting would be counted twice.
+    private var liveCoveredUntil: Date?
+    private var turnUsedLivePath = false
 
     private(set) var currentStreak: TimeInterval = 0.0
     private var lastSpeechWallClock: Date?
@@ -1443,6 +1455,71 @@ class TalkTimeMonitor: NSObject {
         return words.count >= 2
     }
 
+    /// Poll screenpipe's live meeting transcript stream.
+    ///
+    /// Rows carry `captured_at` (when the audio happened) and `device_type`
+    /// (input = Ben, output = everyone else), which is everything the coach needs.
+    /// This path is also markedly faster than the background one: measured
+    /// created_at - captured_at is ~2.4s, against 5-12s for chunked background STT.
+    func checkLiveMeetingSegments() {
+        guard let url = URL(string: "http://localhost:3030/raw_sql") else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // Until the watermark is set, ask only for MAX(id). Selecting `id > 0 ORDER BY id
+        // ASC LIMIT 50` returns the OLDEST rows, which would walk the coach forward through
+        // the entire history of past meetings one page at a time.
+        let query = self.liveIsInitialized
+            ? "SELECT id, device_type, transcript, captured_at FROM meeting_transcript_segments WHERE id > \(self.lastCheckedLiveSegmentId) ORDER BY id ASC LIMIT 50;"
+            : "SELECT COALESCE(MAX(id), 0) AS id FROM meeting_transcript_segments LIMIT 1;"
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["query": query])
+        req.timeoutInterval = 2.0
+
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+            guard let self = self, let data = data,
+                  let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
+
+            DispatchQueue.main.async {
+                // First poll only establishes the watermark; never replay history.
+                if !self.liveIsInitialized {
+                    if let first = rows.first,
+                       let id = (first["id"] as? NSNumber)?.int64Value ?? (first["id"] as? Int64) {
+                        self.lastCheckedLiveSegmentId = id
+                        print("[SpeakingCoach] Live meeting transcript stream connected (lastCheckedLiveSegmentId: \(id))")
+                        fflush(stdout)
+                    }
+                    self.liveIsInitialized = true
+                    return
+                }
+
+                for row in rows {
+                    guard let id = (row["id"] as? NSNumber)?.int64Value ?? (row["id"] as? Int64),
+                          id > self.lastCheckedLiveSegmentId else { continue }
+                    self.lastCheckedLiveSegmentId = max(self.lastCheckedLiveSegmentId, id)
+
+                    let text = row["transcript"] as? String ?? ""
+                    let isInput = (row["device_type"] as? String)?.lowercased() == "input"
+                    guard let capturedAt = (row["captured_at"] as? String)
+                        .flatMap({ TalkTimeMonitor.parseScreenpipeDate($0) }) else { continue }
+
+                    // The live stream gives no segment length, so estimate it from the
+                    // word count the same way the background path does for short segments.
+                    let words = text.split { $0.isWhitespace }.count
+                    let estimated = max(1.0, min(Double(words) * 0.35, 4.0))
+
+                    self.turnUsedLivePath = true
+                    let segmentEnd = capturedAt.addingTimeInterval(estimated)
+                    if segmentEnd > (self.liveCoveredUntil ?? .distantPast) {
+                        self.liveCoveredUntil = segmentEnd
+                    }
+
+                    self.handleTranscriptionRow(rowId: id, chunkId: 0, isInput: isInput, text: text,
+                                                startTime: 0, endTime: estimated, writtenAt: capturedAt)
+                }
+            }
+        }.resume()
+    }
+
     func checkActiveCall() {
         guard let url = URL(string: "http://localhost:3030/meetings") else { return }
         var req = URLRequest(url: url)
@@ -1564,6 +1641,9 @@ class TalkTimeMonitor: NSObject {
 
         checkActiveCall()
 
+        // Live meeting transcripts land in a different table; read both every tick.
+        checkLiveMeetingSegments()
+
         // Fetch latest audio transcriptions via Screenpipe raw_sql endpoint
         guard let url = URL(string: "http://localhost:3030/raw_sql") else { return }
         var req = URLRequest(url: url)
@@ -1602,6 +1682,14 @@ class TalkTimeMonitor: NSObject {
                     let startTime = (row["start_time"] as? NSNumber)?.doubleValue ?? 0.0
                     let endTime = (row["end_time"] as? NSNumber)?.doubleValue ?? 0.0
                     let writtenAt = (row["timestamp"] as? String).flatMap { TalkTimeMonitor.parseScreenpipeDate($0) }
+
+                    // When a meeting ends, screenpipe back-fills audio_transcriptions with
+                    // the same speech the live stream already delivered. Drop anything at or
+                    // before the live watermark so a meeting is not counted twice.
+                    if let covered = self.liveCoveredUntil, let audioStart = writtenAt?.addingTimeInterval(startTime),
+                       audioStart <= covered {
+                        continue
+                    }
 
                     self.handleTranscriptionRow(rowId: id, chunkId: chunkId, isInput: isInput, text: text, startTime: startTime, endTime: endTime, writtenAt: writtenAt)
                 }
@@ -1663,6 +1751,7 @@ class TalkTimeMonitor: NSObject {
         let maxIngestLagSec: Double
         let audioClock: Bool
         let wasAlertable: Bool
+        let usedLivePath: Bool
     }
 
     private func finishTurnAndLog(_ turn: FinishedTurn) {
@@ -1723,6 +1812,9 @@ class TalkTimeMonitor: NSObject {
                 // False => the intervention could not fire, so this turn is not an
                 // experimental unit. The analysis layer filters on this.
                 "experiment_eligible": turn.wasAlertable,
+                // Which screenpipe pipeline measured this turn. The live meeting stream is
+                // ~2.4s behind the audio; chunked background STT is 5-12s.
+                "transcription_path": turn.usedLivePath ? "live_meeting" : "background",
                 // Screenpipe batch delivery distorts wall-clock turn timing; surface it.
                 "screenpipe_version": CaptureEnvironment.screenpipeVersion as Any? ?? NSNull(),
                 "ingest_lag_sec_max": turn.maxIngestLagSec,
@@ -1818,6 +1910,7 @@ class TalkTimeMonitor: NSObject {
                 let previousLag = maxIngestLagSec
                 let previousAudioClock = turnAudioStart != nil && lastSegmentAudioEnd != nil
                 let previousAlertable = turnWasAlertable
+                let previousUsedLive = turnUsedLivePath
 
                 hasWarnedPavlokThisMonologue = false
                 hasShockedPavlokThisMonologue = false
@@ -1830,6 +1923,7 @@ class TalkTimeMonitor: NSObject {
                 toastLoggedThisTurn = false
                 maxIngestLagSec = 0.0
                 turnWasAlertable = canAlert
+                turnUsedLivePath = false
 
                 let previousStart = turnAudioStart ?? turnStartWallClock
                 let previousEnd = lastSegmentAudioEnd ?? now
@@ -1847,7 +1941,8 @@ class TalkTimeMonitor: NSObject {
                     interventions: previousInterventions,
                     maxIngestLagSec: previousLag,
                     audioClock: previousAudioClock,
-                    wasAlertable: previousAlertable))
+                    wasAlertable: previousAlertable,
+                    usedLivePath: previousUsedLive))
             } else {
                 currentStreak += effectiveDuration
             }
@@ -1879,6 +1974,7 @@ class TalkTimeMonitor: NSObject {
         let turnLag = maxIngestLagSec
         let audioClock = turnAudioStart != nil && lastSegmentAudioEnd != nil
         let wasAlertable = turnWasAlertable
+        let usedLivePath = turnUsedLivePath
 
         currentStreak = 0.0
         currentTurnWords = 0
@@ -1899,6 +1995,7 @@ class TalkTimeMonitor: NSObject {
         toastLoggedThisTurn = false
         maxIngestLagSec = 0.0
         turnWasAlertable = false
+        turnUsedLivePath = false
         MonologueToastController.shared.hide()
         onStreakUpdated?(0.0)
 
@@ -1910,7 +2007,8 @@ class TalkTimeMonitor: NSObject {
             interventions: interventions,
             maxIngestLagSec: turnLag,
             audioClock: audioClock,
-            wasAlertable: wasAlertable))
+            wasAlertable: wasAlertable,
+            usedLivePath: usedLivePath))
     }
 
     func startSimulation(seconds: TimeInterval) {
