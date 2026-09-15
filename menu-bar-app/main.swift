@@ -3127,20 +3127,6 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
             statusMenu.addItem(resetItem)
         }
 
-        statusMenu.addItem(NSMenuItem.separator())
-
-        let testWarnItem = NSMenuItem(title: "   🧪 Test 30s Warning (Simulate)", action: #selector(simulate30sWarning), keyEquivalent: "")
-        testWarnItem.target = self
-        statusMenu.addItem(testWarnItem)
-
-        let testToastItem = NSMenuItem(title: "   🧪 Test 1m Toast (Preview Window)", action: #selector(simulate1mToast), keyEquivalent: "")
-        testToastItem.target = self
-        statusMenu.addItem(testToastItem)
-
-        let testGoodItem = NSMenuItem(title: "   🧪 Test Concise Turn (<30s Reward Vibe)", action: #selector(simulateConciseTurn), keyEquivalent: "")
-        testGoodItem.target = self
-        statusMenu.addItem(testGoodItem)
-
         if talkMonitor.isSimulating {
             let stopSimItem = NSMenuItem(title: "   ⏹️ Stop Simulation / Reset", action: #selector(stopSimulation), keyEquivalent: "")
             stopSimItem.target = self
