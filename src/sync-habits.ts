@@ -6,13 +6,15 @@ import { join } from "path";
 const LOCAL_DB_PATH = join(homedir(), ".ai-aggregator", "behavior_experiments.sqlite");
 const REMOTE_PG_URL = process.env.HABITS_PG_URL ?? "";
 
-export async function syncHabits() {
+// Tests can exercise the actual uploader against an isolated fixture database.
+// The installed app continues to use the normal local database by default.
+export async function syncHabits({ localDbPath = LOCAL_DB_PATH }: { localDbPath?: string } = {}) {
   if (!REMOTE_PG_URL) {
     // Fail loudly: a silent skip here strands rows in the local sqlite indefinitely.
     throw new Error("HABITS_PG_URL is not set (cwd must be the project root so .env loads). See .env.example.");
   }
 
-  const localDb = new Database(LOCAL_DB_PATH);
+  const localDb = new Database(localDbPath);
 
   // Ensure local schema exists
   localDb.run(`

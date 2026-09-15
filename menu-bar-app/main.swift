@@ -199,12 +199,39 @@ class PavlokController: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     let kPavlokWarningBeepEnabled = "pavlok_warning_beep_enabled"
     let kPavlokRewardGoodBehavior = "pavlok_reward_good_behavior"
     let kPavlokCustomApiUrl = "pavlok_custom_api_url"
+    // Manual bench-test intensities. Deliberately separate from the warning/alert keys
+    // above: those are the experiment's stimuli and changing them mid-trial would
+    // silently change the treatment. These only ever fire when a human asks them to.
+    let kPavlokTestVibeIntensity = "pavlok_test_vibe_intensity"
+    let kPavlokTestBeepIntensity = "pavlok_test_beep_intensity"
+    let kPavlokTestZapIntensity = "pavlok_test_zap_intensity"
+
+    var keepConnected: Bool {
+        get { defaults.bool(forKey: "pavlok_keep_connected") }
+        set {
+            defaults.set(newValue, forKey: "pavlok_keep_connected")
+            if connectionRequested { startBleScan(force: true) } else { disconnectBle() }
+            onStatusChanged?()
+        }
+    }
+    var connectionRequested: Bool { isEnabled || keepConnected }
+    var canTestFire: Bool { connectionRequested }
+    private var reconnectWork: DispatchWorkItem?
+    private let lastDeviceKey = "pavlok_last_device_id"
+
+    private func scheduleReconnect() {
+        reconnectWork?.cancel()
+        guard connectionRequested else { return }
+        let work = DispatchWorkItem { [weak self] in self?.startBleScan(force: true) }
+        reconnectWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: work)
+    }
 
     var isEnabled: Bool {
         get { defaults.bool(forKey: kPavlokEnabled) } // Defaults to false
         set {
             defaults.set(newValue, forKey: kPavlokEnabled)
-            if newValue {
+            if connectionRequested {
                 startBleScan(force: true)
             } else {
                 disconnectBle()
@@ -327,6 +354,232 @@ class PavlokController: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         }
     }
 
+    // --- Manual Test-Fire Intensities (bench check that the wristband is alive) ---
+    //
+    // Each modality carries its own persisted 0-100% level. They are read only by
+    // testFire(type:) below, which is only ever reached from a human clicking a menu
+    // item or running --pavlok-test-fire; nothing automatic touches them.
+
+    var testVibeIntensity: Int {
+        get {
+            if defaults.object(forKey: kPavlokTestVibeIntensity) == nil { return 40 }
+            return max(0, min(100, defaults.integer(forKey: kPavlokTestVibeIntensity)))
+        }
+        set {
+            defaults.set(max(0, min(100, newValue)), forKey: kPavlokTestVibeIntensity)
+            onStatusChanged?()
+        }
+    }
+
+    var testBeepIntensity: Int {
+        get {
+            if defaults.object(forKey: kPavlokTestBeepIntensity) == nil { return 40 }
+            return max(0, min(100, defaults.integer(forKey: kPavlokTestBeepIntensity)))
+        }
+        set {
+            defaults.set(max(0, min(100, newValue)), forKey: kPavlokTestBeepIntensity)
+            onStatusChanged?()
+        }
+    }
+
+    var testZapIntensity: Int {
+        get {
+            // Low by default. This one hurts, and the first thing a new user does with a
+            // test button is press it.
+            if defaults.object(forKey: kPavlokTestZapIntensity) == nil { return 10 }
+            return max(0, min(100, defaults.integer(forKey: kPavlokTestZapIntensity)))
+        }
+        set {
+            defaults.set(max(0, min(100, newValue)), forKey: kPavlokTestZapIntensity)
+            onStatusChanged?()
+        }
+    }
+
+    func testIntensity(for type: String) -> Int {
+        switch type {
+        case "vibe": return testVibeIntensity
+        case "beep": return testBeepIntensity
+        case "zap": return testZapIntensity
+        default: return 0
+        }
+    }
+
+    func setTestIntensity(_ value: Int, for type: String) {
+        switch type {
+        case "vibe": testVibeIntensity = value
+        case "beep": testBeepIntensity = value
+        case "zap": testZapIntensity = value
+        default: break
+        }
+    }
+
+    static func testFireLabel(for type: String) -> String {
+        switch type {
+        case "vibe": return "📳 Vibration"
+        case "beep": return "🔔 Beep"
+        case "zap": return "⚡ Zap"
+        default: return type
+        }
+    }
+
+    /// Outcome of the most recent manual test fire, for display in the menu. Held in
+    /// memory only -- a stale "delivered" line from three days ago is worse than none.
+    struct TestFireResult {
+        let type: String
+        let intensity: Int
+        let success: Bool
+        let detail: String
+        let at: Date
+
+        var transport: String {
+            if detail.contains("BLE") { return "Direct Bluetooth" }
+            if detail.hasPrefix("HTTP") { return "Pavlok Cloud" }
+            return "not sent"
+        }
+
+        var menuLine: String {
+            let stamp = TestFireResult.stampFormatter.string(from: at)
+            let mark = success ? "✅" : "❌"
+            let label = PavlokController.testFireLabel(for: type)
+            return "\(mark) \(label) \(intensity)% • \(transport) • \(detail) • \(stamp)"
+        }
+
+        private static let stampFormatter: DateFormatter = {
+            let f = DateFormatter()
+            f.dateFormat = "HH:mm:ss"
+            return f
+        }()
+    }
+
+    private(set) var isTestFiring = false
+    private(set) var lastTestFire: TestFireResult?
+
+    var lastTestFireSummary: String {
+        guard let r = lastTestFire else { return "no test fired yet this session" }
+        return r.menuLine
+    }
+
+    var testFireSummary: String {
+        func part(_ emoji: String, _ level: Int) -> String {
+            return level > 0 ? "\(emoji) \(level)%" : "\(emoji) off"
+        }
+        return [part("📳", testVibeIntensity), part("🔔", testBeepIntensity), part("⚡", testZapIntensity)]
+            .joined(separator: " • ")
+    }
+
+    func interventionAudit(type: String, intensity: Int, reason: String,
+                                   id: String, manual: Bool) -> (String, Bool?, String?) -> Void {
+        let session = manual ? "manual_test_" + id : TalkTimeMonitor.shared.activeSessionId
+        let arm = manual ? "manual_test" : HabitExperimentManager.shared.resolveArm(for: session)
+        let callApp = manual ? "Manual device test" : TalkTimeMonitor.shared.activeCallApp
+        let started = Date()
+        return { phase, success, detail in
+            let acknowledged = success == true && detail == "BLE acknowledged by wristband"
+            HabitEventLogger.shared.logTurn(
+                habitType: "pavlok_intervention", sessionId: session, callApp: callApp,
+                callCategory: manual ? "device_test" : "work", treatmentArm: arm,
+                turnDurationSec: 0, wordsSpoken: 0, warningFiredAt: nil,
+                shockFiredAt: nil, latencyToYieldSec: nil, breached30s: false,
+                breached60s: false, wasRewarded: false,
+                metadata: [
+                    "source": "pavlok_controller_v1", "operation_id": id,
+                    "manual_test": manual, "phase": phase, "modality": type,
+                    "intensity_percent": intensity, "reason": reason,
+                    "requested_at": ISO8601DateFormatter().string(from: started),
+                    "elapsed_ms": Date().timeIntervalSince(started) * 1000,
+                    "success": success as Any? ?? NSNull(),
+                    "device_acknowledged": acknowledged,
+                    "detail": detail as Any? ?? NSNull(),
+                    "device_name": self.bleDeviceName as Any? ?? NSNull(),
+                    "device_id": self.activePeripheral?.identifier.uuidString as Any? ?? NSNull(),
+                    "battery_percent": self.batteryLevel as Any? ?? NSNull(),
+                    "bluetooth_connected": self.isBleConnected,
+                    "transport": (detail?.contains("BLE") == true ? "bluetooth" :
+                        (detail?.hasPrefix("HTTP") == true ? "cloud" : "none"))
+                ])
+            // Persist before handing completion back or exiting a headless test.
+            HabitEventLogger.shared.waitUntilIdle()
+        }
+    }
+
+    /// Fire one stimulus at its configured test intensity, right now, because a human
+    /// asked. Reports back on the main thread so the caller can put the outcome on screen.
+    func testFire(type: String, operationID: String? = nil, intensityOverride: Int? = nil, completion: ((Bool, String) -> Void)? = nil) {
+        let auditID = operationID ?? UUID().uuidString.lowercased()
+        let audit = interventionAudit(type: type, intensity: intensityOverride ?? testIntensity(for: type),
+                                      reason: "Manual test fire", id: auditID, manual: true)
+        audit("requested", nil, nil)
+        guard !isTestFiring else {
+            audit("result", false, "A test is already in progress")
+            completion?(false, "A test is already in progress")
+            return
+        }
+        let intensity = max(0, min(100, intensityOverride ?? testIntensity(for: type)))
+        let label = PavlokController.testFireLabel(for: type)
+
+        func finish(_ ok: Bool, _ detail: String) {
+            audit("result", ok, detail)
+            let result = TestFireResult(type: type, intensity: intensity, success: ok,
+                                        detail: detail, at: Date())
+            DispatchQueue.main.async {
+                self.isTestFiring = false
+                self.lastTestFire = result
+                print("[Pavlok TestFire] \(result.menuLine)")
+                fflush(stdout)
+                completion?(ok, detail)
+                self.onStatusChanged?()
+            }
+        }
+
+        guard canTestFire else {
+            finish(false, "Bluetooth connection is switched off")
+            return
+        }
+        guard intensity > 0 else {
+            // 0% is "off" everywhere else in this controller; sendStimulus would clamp it
+            // up to 1% and buzz the wrist anyway.
+            finish(false, "\(label) intensity is 0%")
+            return
+        }
+
+        isTestFiring = true
+        onStatusChanged?()
+        if !isBleConnected && !isBleScanning {
+            startBleScan(force: true)
+        }
+        // Wait for the selected characteristic, not merely the connection callback.
+        // Common modes keep discovery/test feedback moving while an NSMenu is open.
+        let deadline = Date().addingTimeInterval(15)
+        let timer = Timer(timeInterval: 0.15, repeats: true) { timer in
+            guard self.canTestFire else {
+                timer.invalidate()
+                finish(false, "Bluetooth connection is switched off")
+                return
+            }
+            if self.isReadyForStimulus(type) {
+                timer.invalidate()
+                self.sendStimulus(type: type, value: intensity,
+                                  reason: "Manual test fire from AI Aggregator menu", allowCloud: false, auditID: auditID) { ok, msg in
+                    finish(ok, msg ?? "no response")
+                }
+            } else if Date() >= deadline {
+                timer.invalidate()
+                finish(false, "Bluetooth connection not ready; reconnecting in background.")
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    func isReadyForStimulus(_ type: String) -> Bool {
+        guard isBleConnected else { return false }
+        switch type {
+        case "vibe": return vibeCharacteristic != nil
+        case "beep": return beepCharacteristic != nil
+        case "zap": return shockCharacteristic != nil
+        default: return false
+        }
+    }
+
     // Backward-compatibility bridge for existing references to shockIntensity
     var shockIntensity: Int {
         get { alertShockIntensity }
@@ -434,6 +687,8 @@ class PavlokController: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         }
     }
 
+    let rewardVibeIntensity = 30
+
     // Good behavior: deliver gentle vibration reward when yielding floor under 30s
     var rewardGoodBehavior: Bool {
         get {
@@ -526,6 +781,12 @@ class PavlokController: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         return "https://api.pavlok.com/api/v5/user/"
     }
 
+    /// Log every advertising peripheral the discovery filter rejects. Off by default --
+    /// at a busy desk this is dozens of lines a second -- and turned on by
+    /// `--pavlok-test-fire ... --trace-ble` when a connection will not come up.
+    static var traceBleDiscovery = false
+    private var tracedPeripherals = Set<UUID>()
+
     // CoreBluetooth Low Energy State
     private var centralManager: CBCentralManager?
     private(set) var activePeripheral: CBPeripheral?
@@ -543,7 +804,7 @@ class PavlokController: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     var onStatusChanged: (() -> Void)?
 
     var connectionStatusText: String {
-        if !isEnabled {
+        if !connectionRequested {
             return "⚪ Disabled (Safe Default)"
         }
         if isBleConnected {
@@ -572,17 +833,21 @@ class PavlokController: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         // CBCentralManager is what triggers macOS's "would like to use Bluetooth" prompt,
         // and with an ad-hoc-signed binary that prompt returned after every rebuild --
         // for a feature that was switched off.
-        if isEnabled {
+        if connectionRequested {
             startBleScan()
         }
         updateConnectionStatus()
     }
 
     func startBleScan(force: Bool = false) {
+        guard connectionRequested else { return }
+        if let peripheral = activePeripheral,
+           peripheral.state == .connected || peripheral.state == .connecting { return }
+        reconnectWork?.cancel()
         if centralManager == nil {
             // Lazily created on first use. The scan itself starts from
             // centralManagerDidUpdateState once the radio reports poweredOn.
-            centralManager = CBCentralManager(delegate: self, queue: DispatchQueue.global(qos: .userInitiated), options: [CBCentralManagerOptionShowPowerAlertKey: false])
+            centralManager = CBCentralManager(delegate: self, queue: .main, options: [CBCentralManagerOptionShowPowerAlertKey: false])
             return
         }
         guard let central = centralManager, central.state == .poweredOn else { return }
@@ -591,6 +856,19 @@ class PavlokController: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         isBleScanning = true
         print("[Pavlok BLE] Scanning for Pavlok Bluetooth devices...")
         fflush(stdout)
+        let service = CBUUID(string: "156E1000-A300-4FEA-897B-86F698D74461")
+        if let connected = central.retrieveConnectedPeripherals(withServices: [service]).first {
+            centralManager(central, didDiscover: connected,
+                           advertisementData: [CBAdvertisementDataServiceUUIDsKey: [service]], rssi: 0)
+            return
+        }
+        if let stored = defaults.string(forKey: lastDeviceKey), let id = UUID(uuidString: stored),
+           let known = central.retrievePeripherals(withIdentifiers: [id]).first {
+            print("[Pavlok BLE] Reconnecting to remembered wristband \(id)")
+            centralManager(central, didDiscover: known,
+                           advertisementData: [CBAdvertisementDataServiceUUIDsKey: [service]], rssi: 0)
+            return
+        }
         central.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
         DispatchQueue.main.async { [weak self] in
             self?.onStatusChanged?()
@@ -598,6 +876,9 @@ class PavlokController: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
 
     func disconnectBle() {
+        reconnectWork?.cancel()
+        failPendingWrites("BLE disconnected")
+        centralManager?.stopScan()
         if let p = activePeripheral {
             centralManager?.cancelPeripheralConnection(p)
         }
@@ -641,8 +922,33 @@ class PavlokController: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     // MARK: - CBCentralManagerDelegate
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        // Without this line an unauthorised or powered-off radio is indistinguishable
+        // from a wristband that is simply out of range: both just never connect.
+        let described: String
+        switch central.state {
+        case .poweredOn: described = "poweredOn"
+        case .poweredOff: described = "poweredOff (turn Bluetooth on)"
+        case .unauthorized: described = "unauthorized (grant Bluetooth in System Settings > Privacy & Security)"
+        case .unsupported: described = "unsupported"
+        case .resetting: described = "resetting"
+        case .unknown: described = "unknown"
+        @unknown default: described = "state \(central.state.rawValue)"
+        }
+        // A poweredOn radio with no TCC grant still scans -- it just never reports
+        // anything -- so the authorisation has to be logged separately from the state.
+        let auth: String
+        switch CBCentralManager.authorization {
+        case .allowedAlways: auth = "allowed"
+        case .denied: auth = "DENIED in System Settings > Privacy & Security > Bluetooth"
+        case .restricted: auth = "restricted by policy"
+        case .notDetermined: auth = "not yet granted (macOS will prompt on first scan)"
+        @unknown default: auth = "unknown"
+        }
+        print("[Pavlok BLE] Radio state: \(described) • permission: \(auth)")
+        fflush(stdout)
+
         if central.state == .poweredOn {
-            if isEnabled {
+            if connectionRequested {
                 startBleScan(force: true)
             }
         } else {
@@ -659,6 +965,9 @@ class PavlokController: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
 
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String: Any], rssi RSSI: NSNumber) {
+        guard connectionRequested else { return }
+        if let active = activePeripheral, active !== peripheral,
+           active.state == .connected || active.state == .connecting { return }
         let name = peripheral.name ?? (advertisementData[CBAdvertisementDataLocalNameKey] as? String) ?? ""
         let lower = name.lowercased()
         let serviceUUIDs = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID]) ?? []
@@ -667,6 +976,16 @@ class PavlokController: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             return s.contains("1000") || s.contains("6E9D")
         }
         let isPavlok = lower.contains("pavlok") || lower.contains("shock") || lower.contains("sc3") || lower.contains("sc2") || lower == "p3" || lower.contains("p3-") || hasPavlokService
+
+        if PavlokController.traceBleDiscovery && !isPavlok && !tracedPeripherals.contains(peripheral.identifier) {
+            // "It never connects" has two very different causes: the band is asleep and
+            // advertising nothing, or it is advertising under a name this filter does not
+            // recognise. Only the trace tells them apart.
+            tracedPeripherals.insert(peripheral.identifier)
+            let services = serviceUUIDs.map { $0.uuidString }.joined(separator: ",")
+            print("[Pavlok BLE][trace] ignored \"\(name.isEmpty ? "(no name)" : name)\" \(peripheral.identifier) RSSI \(RSSI) services [\(services)]")
+            fflush(stdout)
+        }
 
         if isPavlok {
             print("[Pavlok BLE] Discovered candidate Pavlok 3 / wristband: \"\(name)\" (RSSI: \(RSSI)). Connecting...")
@@ -677,6 +996,13 @@ class PavlokController: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             activePeripheral = peripheral
             peripheral.delegate = self
             central.connect(peripheral, options: [CBConnectPeripheralOptionNotifyOnDisconnectionKey: true])
+            DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self, weak peripheral] in
+                guard let self = self, let peripheral = peripheral,
+                      self.activePeripheral === peripheral, peripheral.state == .connecting else { return }
+                print("[Pavlok BLE] Connection attempt timed out; retrying")
+                central.cancelPeripheralConnection(peripheral)
+                self.scheduleReconnect()
+            }
             DispatchQueue.main.async { [weak self] in
                 self?.onStatusChanged?()
             }
@@ -686,6 +1012,11 @@ class PavlokController: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         print("[Pavlok BLE] ⚡ Direct Bluetooth connection established with \"\(peripheral.name ?? "device")\"!")
         fflush(stdout)
+        guard connectionRequested else {
+            central.cancelPeripheralConnection(peripheral)
+            return
+        }
+        defaults.set(peripheral.identifier.uuidString, forKey: lastDeviceKey)
         isBleConnected = true
         isBleScanning = false
         peripheral.delegate = self
@@ -699,7 +1030,7 @@ class PavlokController: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         print("[Pavlok BLE] ❌ Failed to connect: \(error?.localizedDescription ?? "Unknown")")
         fflush(stdout)
         isBleConnected = false
-        if isEnabled { startBleScan() }
+        scheduleReconnect()
         DispatchQueue.main.async { [weak self] in
             self?.onStatusChanged?()
         }
@@ -708,13 +1039,14 @@ class PavlokController: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         print("[Pavlok BLE] ⚠️ Disconnected from \"\(peripheral.name ?? "device")\": \(error?.localizedDescription ?? "Link dropped")")
         fflush(stdout)
+        failPendingWrites("BLE disconnected")
         isBleConnected = false
         shockCharacteristic = nil
         vibeCharacteristic = nil
         beepCharacteristic = nil
         batteryCharacteristic = nil
         batteryLevel = nil
-        if isEnabled { startBleScan() }
+        scheduleReconnect()
         DispatchQueue.main.async { [weak self] in
             self?.onStatusChanged?()
         }
@@ -777,13 +1109,44 @@ class PavlokController: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         }
     }
 
-    func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
-        if let error = error {
-            print("[Pavlok BLE] ❌ Characteristic write failed: \(error.localizedDescription)")
-        } else {
-            print("[Pavlok BLE] ✅ Hardware acknowledged direct stimulus write (<15ms)!")
+    private var pendingWrites: [CBUUID: (id: UUID, completion: (Bool, String?) -> Void)] = [:]
+
+    private func failPendingWrites(_ detail: String) {
+        let writes = pendingWrites.values.map { $0.completion }
+        pendingWrites.removeAll()
+        for completion in writes { completion(false, detail) }
+    }
+
+    private func writeStimulus(_ data: Data, to characteristic: CBCharacteristic,
+                               on peripheral: CBPeripheral, completion: ((Bool, String?) -> Void)?) {
+        let key = characteristic.uuid
+        guard pendingWrites[key] == nil else {
+            completion?(false, "BLE stimulus still awaiting acknowledgement")
+            return
         }
+        guard characteristic.properties.contains(.write) else {
+            // A test cannot verify delivery without a device acknowledgement.
+            completion?(false, "BLE characteristic does not support acknowledged writes")
+            return
+        }
+        let id = UUID()
+        pendingWrites[key] = (id, completion ?? { _, _ in })
+        peripheral.writeValue(data, for: characteristic, type: .withResponse)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self = self, self.pendingWrites[key]?.id == id else { return }
+            self.failPendingWrites("BLE acknowledgement timed out")
+            self.disconnectBle()
+            self.scheduleReconnect()
+        }
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        guard peripheral === activePeripheral,
+              let pending = pendingWrites.removeValue(forKey: characteristic.uuid) else { return }
+        let detail = error.map { "BLE write failed: \($0.localizedDescription)" } ?? "BLE acknowledged by wristband"
+        print("[Pavlok BLE] \(detail)")
         fflush(stdout)
+        pending.completion(error == nil, detail)
     }
 
     // MARK: - Binary BLE Stimulus Encoder
@@ -810,19 +1173,23 @@ class PavlokController: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         }
     }
 
-    static func encodeBleBeep(count: Int = 1, isPavlok2: Bool = true) -> Data {
-        let cnt = max(1, min(5, count))
-        if isPavlok2 {
-            // Pavlok 2/3 beep: [0x81, 0x0C, count, duration_on (0x18), gap (0x18)]
-            return Data([0x81, 0x0C, UInt8(cnt), 0x18, 0x18])
-        } else {
-            return Data([UInt8(cnt), 0x32, 0x32, 0x32])
-        }
+    // Pavlok 2/3 shares the vibration packet layout: byte 2 is intensity,
+    // while byte 0 requests a single pulse. See ztrayl3/PyPav2, beep().
+    static func encodeBleBeep(intensity: Int = 1, isPavlok2: Bool = true) -> Data {
+        return encodeBleVibe(intensity: intensity, isPavlok2: isPavlok2)
     }
 
     // MARK: - Send Stimulus (Direct Bluetooth First, Cloud Backup)
-    func sendStimulus(type: String, value: Int, reason: String, completion: ((Bool, String?) -> Void)? = nil) {
-        guard isEnabled else {
+    func sendStimulus(type: String, value: Int, reason: String, allowCloud: Bool = true, auditID: String? = nil, completion: ((Bool, String?) -> Void)? = nil) {
+        let audit = interventionAudit(type: type, intensity: value, reason: reason,
+                                      id: auditID ?? UUID().uuidString.lowercased(), manual: auditID != nil)
+        audit("dispatch_requested", nil, nil)
+        let callerCompletion = completion
+        let completion: ((Bool, String?) -> Void)? = { ok, detail in
+            audit("transport_result", ok, detail)
+            callerCompletion?(ok, detail)
+        }
+        guard isEnabled || (!allowCloud && keepConnected) else {
             completion?(false, "Pavlok is disabled in settings")
             return
         }
@@ -834,31 +1201,30 @@ class PavlokController: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             if type == "zap", let char = shockCharacteristic {
                 let isP2 = char.uuid.uuidString.uppercased().contains("1003")
                 let data = PavlokController.encodeBleShock(intensity: intensity, isPavlok2: isP2)
-                let writeType: CBCharacteristicWriteType = char.properties.contains(.write) ? .withResponse : .withoutResponse
-                peripheral.writeValue(data, for: char, type: writeType)
+                writeStimulus(data, to: char, on: peripheral, completion: completion)
                 print("[Pavlok BLE] ⚡ DIRECT BLUETOOTH SHOCK DISPATCHED (<15ms latency)! Intensity: \(intensity)% | \"\(reason)\"")
                 fflush(stdout)
-                completion?(true, "Direct BLE shock (<15ms)")
                 return
             } else if type == "vibe", let char = vibeCharacteristic {
                 let isP2 = char.uuid.uuidString.uppercased().contains("1001")
                 let data = PavlokController.encodeBleVibe(intensity: intensity, isPavlok2: isP2)
-                let writeType: CBCharacteristicWriteType = char.properties.contains(.write) ? .withResponse : .withoutResponse
-                peripheral.writeValue(data, for: char, type: writeType)
+                writeStimulus(data, to: char, on: peripheral, completion: completion)
                 print("[Pavlok BLE] 📳 DIRECT BLUETOOTH VIBRATION DISPATCHED (<15ms latency)! Intensity: \(intensity)% | \"\(reason)\"")
                 fflush(stdout)
-                completion?(true, "Direct BLE vibe (<15ms)")
                 return
             } else if type == "beep", let char = beepCharacteristic {
                 let isP2 = char.uuid.uuidString.uppercased().contains("1002")
-                let data = PavlokController.encodeBleBeep(count: intensity, isPavlok2: isP2)
-                let writeType: CBCharacteristicWriteType = char.properties.contains(.write) ? .withResponse : .withoutResponse
-                peripheral.writeValue(data, for: char, type: writeType)
-                print("[Pavlok BLE] 🔔 DIRECT BLUETOOTH BEEP DISPATCHED (<15ms latency)! Count: \(intensity) | \"\(reason)\"")
+                let data = PavlokController.encodeBleBeep(intensity: intensity, isPavlok2: isP2)
+                writeStimulus(data, to: char, on: peripheral, completion: completion)
+                print("[Pavlok BLE] 🔔 DIRECT BLUETOOTH BEEP DISPATCHED (<15ms latency)! Intensity: \(intensity)% | \"\(reason)\"")
                 fflush(stdout)
-                completion?(true, "Direct BLE beep (<15ms)")
                 return
             }
+        }
+
+        guard allowCloud else {
+            completion?(false, "BLE disconnected or stimulus unavailable")
+            return
         }
 
         // 2. Cloud Relay Fallback (if Bluetooth is not currently connected)
@@ -1068,6 +1434,7 @@ class HabitEventLogger {
                 print("[HabitLogger] ❌ Failed to open SQLite DB at \(self.dbPath)")
                 return
             }
+            sqlite3_busy_timeout(self.db, 5000)
             let createSql = """
             CREATE TABLE IF NOT EXISTS habit_events (
                 event_id TEXT PRIMARY KEY,
@@ -1098,6 +1465,7 @@ class HabitEventLogger {
 
     func logTurn(
         occurredAt: Date? = nil,
+        habitType: String = "monologue_streak",
         sessionId: String,
         callApp: String?,
         callCategory: String = "work",
@@ -1141,7 +1509,7 @@ class HabitEventLogger {
                 sqlite3_bind_text(stmt, 3, ((callApp ?? "Solo Mic") as NSString).utf8String, -1, SQLITE_TRANSIENT)
                 sqlite3_bind_text(stmt, 4, (callCategory as NSString).utf8String, -1, SQLITE_TRANSIENT)
                 sqlite3_bind_text(stmt, 5, (isoTimestamp as NSString).utf8String, -1, SQLITE_TRANSIENT)
-                sqlite3_bind_text(stmt, 6, ("monologue_streak" as NSString).utf8String, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 6, (habitType as NSString).utf8String, -1, SQLITE_TRANSIENT)
                 sqlite3_bind_text(stmt, 7, (treatmentArm as NSString).utf8String, -1, SQLITE_TRANSIENT)
                 sqlite3_bind_double(stmt, 8, turnDurationSec)
                 sqlite3_bind_int(stmt, 9, Int32(wordsSpoken))
@@ -1170,7 +1538,7 @@ class HabitEventLogger {
                 sqlite3_bind_text(stmt, 16, (metaJson as NSString).utf8String, -1, SQLITE_TRANSIENT)
 
                 if sqlite3_step(stmt) == SQLITE_DONE {
-                    print("[HabitLogger] ✅ Logged trial: arm=\(treatmentArm), dur=\(String(format: "%.1f", turnDurationSec))s, yieldLatency=\(latencyToYieldSec.map { String(format: "%.1f", $0) + "s" } ?? "none"), 30s=\(breached30s)")
+                    print("[HabitLogger] ✅ Logged \(habitType): arm=\(treatmentArm), dur=\(String(format: "%.1f", turnDurationSec))s, yieldLatency=\(latencyToYieldSec.map { String(format: "%.1f", $0) + "s" } ?? "none"), 30s=\(breached30s)")
                 } else {
                     print("[HabitLogger] ❌ sqlite3_step failed: \(String(cString: sqlite3_errmsg(db)))")
                 }
@@ -1220,7 +1588,7 @@ class HabitEventLogger {
         queue.sync {
             guard let db = self.db else { return }
             var stmt: OpaquePointer?
-            if sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM habit_events;", -1, &stmt, nil) == SQLITE_OK {
+            if sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM habit_events WHERE habit_type = 'monologue_streak';", -1, &stmt, nil) == SQLITE_OK {
                 if sqlite3_step(stmt) == SQLITE_ROW {
                     count = Int(sqlite3_column_int(stmt, 0))
                 }
@@ -1272,7 +1640,6 @@ class TalkTimeMonitor: NSObject {
     let rewardMinSec: TimeInterval = 5.0        // A turn shorter than this is a grunt, not a yield
     let warningThreshold: TimeInterval = 30.0   // 30 seconds
     let alertThreshold: TimeInterval = 60.0     // 60 seconds (1 minute)
-    let maxBreathingPause: TimeInterval = 5.0   // Max conversational pause in audio before reset
     let silenceTimeout: TimeInterval = 14.0     // Max silence timeout (10s chunk + Whisper margin)
     // Above this arrival lag, screenpipe was batching and the turn's wall-clock timing
     // (and therefore any latency-to-yield derived from it) cannot be trusted.
@@ -1300,6 +1667,7 @@ class TalkTimeMonitor: NSObject {
     private var turnStartWallClock: Date?
     private var lastChunkId: Int64 = 0
     private var lastAudioEndTime: Double = 0.0
+    private var lastTurnBoundaryAt: Date?
     private(set) var activeCallApp: String?
     private(set) var activeCallTitle: String?
     private(set) var activeSessionId: String = "solo_" + UUID().uuidString.prefix(8).lowercased()
@@ -1325,6 +1693,47 @@ class TalkTimeMonitor: NSObject {
     // dilutes the arms. Tracked rather than derived from call_category so it stays correct
     // if "Alert Only During Calls" is ever turned off.
     private var turnWasAlertable = false
+    private var turnTreatmentSettings: [String: Any]?
+    private var turnSettingsChanged = false
+
+    /// Assignment and configurable factors are distinct: these switches are not randomized.
+    private func treatmentSettings() -> [String: Any] {
+        let p = PavlokController.shared
+        let arm = HabitExperimentManager.shared.resolveArm(for: activeSessionId)
+        func cue(_ warning: Bool) -> String {
+            if arm == "baseline" { return "toast_only" }
+            if arm == "caw_audio" { return warning ? "toast+macos_Frog" : "toast+macos_Sosumi" }
+            if !p.isEnabled { return "toast_only" }
+            if arm == "haptic_vibe" { return warning ? "toast+vibe_35" : "toast+vibe_80" }
+            var parts = ["toast"]
+            let zap = warning ? p.warningShockIntensity : p.alertShockIntensity
+            let vibe = warning ? p.warningVibeIntensity : p.alertVibeIntensity
+            if zap > 0 { parts.append("zap_\(zap)") }
+            if vibe > 0 { parts.append("vibe_\(vibe)") }
+            if warning && p.warningBeepEnabled { parts.append("beep") }
+            return parts.count == 1 ? "toast_only" : parts.joined(separator: "+")
+        }
+        return ["assignment_mode": HabitExperimentManager.shared.currentMode.rawValue,
+                "arm": arm, "wearable_enabled": p.isEnabled,
+                "warning_shock_percent": p.warningShockIntensity,
+                "warning_vibe_percent": p.warningVibeIntensity,
+                "warning_beep_enabled": p.warningBeepEnabled,
+                "hard_stop_shock_percent": p.alertShockIntensity,
+                "hard_stop_vibe_percent": p.alertVibeIntensity,
+                "reward_enabled": p.rewardGoodBehavior && p.isEnabled,
+                "reward_setting_enabled": p.rewardGoodBehavior,
+                "reward_vibe_percent": p.rewardVibeIntensity,
+                "reward_min_sec": rewardMinSec, "reward_max_exclusive_sec": warningThreshold,
+                "warning_sec": warningThreshold, "hard_stop_sec": alertThreshold,
+                "only_during_calls": alertOnlyDuringCalls,
+                "cue_30": cue(true), "cue_60": cue(false)]
+    }
+
+    private func settingsKey(_ settings: [String: Any]) -> String {
+        let data = try! JSONSerialization.data(withJSONObject: settings, options: [.sortedKeys])
+        return String(data: data, encoding: .utf8)!
+    }
+
     // Screenpipe writes transcriptions in batches; when it lags, several segments arrive
     // with one arrival time and the wall-clock turn timing below is distorted. Track the
     // worst lag seen in a turn so affected rows are identifiable instead of silently wrong.
@@ -1457,8 +1866,8 @@ class TalkTimeMonitor: NSObject {
 
     /// Poll screenpipe's live meeting transcript stream.
     ///
-    /// Rows carry `captured_at` (when the audio happened) and `device_type`
-    /// (input = the owner, output = everyone else), which is everything the coach needs.
+    /// Rows carry the capture start `captured_at` and `device_type`
+    /// (input = the owner, output = everyone else), but no exact spoken-word end time.
     /// This path is also markedly faster than the background one: measured
     /// created_at - captured_at is ~2.4s, against 5-12s for chunked background STT.
     func checkLiveMeetingSegments() {
@@ -1502,20 +1911,17 @@ class TalkTimeMonitor: NSObject {
                     guard let capturedAt = (row["captured_at"] as? String)
                         .flatMap({ TalkTimeMonitor.parseScreenpipeDate($0) }) else { continue }
 
-                    // The live stream gives no segment length, so estimate it from the
-                    // word count the same way the background path does for short segments.
-                    let words = text.split { $0.isWhitespace }.count
-                    let estimated = max(1.0, min(Double(words) * 0.35, 4.0))
-
-                    self.turnUsedLivePath = true
-                    let segmentEnd = capturedAt.addingTimeInterval(estimated)
-                    if segmentEnd > (self.liveCoveredUntil ?? .distantPast) {
-                        self.liveCoveredUntil = segmentEnd
+                    // The live schema exposes capture START, not word-end timestamps.
+                    // Use this confirmed audio point conservatively; never turn a word
+                    // count into seconds or extend the turn into unobserved silence.
+                    if capturedAt > (self.liveCoveredUntil ?? .distantPast) {
+                        self.liveCoveredUntil = capturedAt
                     }
-
                     self.handleTranscriptionRow(rowId: id, chunkId: 0, isInput: isInput, text: text,
-                                                startTime: 0, endTime: estimated, writtenAt: capturedAt)
+                                                startTime: 0, endTime: 0, writtenAt: capturedAt,
+                                                usedLivePath: true)
                 }
+                self.updatePresentation()
             }
         }.resume()
     }
@@ -1639,6 +2045,7 @@ class TalkTimeMonitor: NSObject {
             return
         }
 
+        updatePresentation()
         checkActiveCall()
 
         // Live meeting transcripts land in a different table; read both every tick.
@@ -1694,47 +2101,56 @@ class TalkTimeMonitor: NSObject {
                     self.handleTranscriptionRow(rowId: id, chunkId: chunkId, isInput: isInput, text: text, startTime: startTime, endTime: endTime, writtenAt: writtenAt)
                 }
 
-                // Check if user stopped speaking (silence timeout)
-                if self.currentStreak > 0, let lastWallClock = self.lastSpeechWallClock {
-                    let elapsed = Date().timeIntervalSince(lastWallClock)
-                    // A transcription cannot arrive until its chunk closes, so silence is
-                    // only real once we have waited out the delivery lag as well.
-                    if elapsed > self.silenceTimeout + self.lastObservedIngestLagSec {
-                        print("[SpeakingCoach] Silence detected (\(Int(elapsed))s since last spoken word). Resetting monologue streak.")
-                        fflush(stdout)
-                        self.resetStreak()
-                    }
-                }
-
-                // Show toast only when in alert/warning threshold AND canAlert is enabled
-                if self.canAlert && self.currentStreak >= self.warningThreshold && self.armShowsToast {
-                    self.noteToastShown()
-                    MonologueToastController.shared.show(self.currentStreak, callApp: self.activeCallApp)
-                } else {
-                    MonologueToastController.shared.hide()
-                }
-
-                // Stimulus trigger (debounced one-shot per monologue streak)
-                if self.canAlert {
-                    if self.currentStreak >= self.warningThreshold && !self.hasDeliveredStimulusAt30s {
-                        self.hasDeliveredStimulusAt30s = true
-                        self.hasWarnedPavlokThisMonologue = true
-                        self.warningFiredWallClock = Date()
-                        self.warningFiredStreakSec = self.currentStreak
-                        self.deliverStimulusForThreshold(isWarning: true)
-                    }
-                    if self.currentStreak >= self.alertThreshold && !self.hasDeliveredStimulusAt60s {
-                        self.hasDeliveredStimulusAt60s = true
-                        self.hasShockedPavlokThisMonologue = true
-                        self.shockFiredWallClock = Date()
-                        self.shockFiredStreakSec = self.currentStreak
-                        self.deliverStimulusForThreshold(isWarning: false)
-                    }
-                }
-
-                self.onStreakUpdated?(self.currentStreak)
+                self.updatePresentation()
             }
         }.resume()
+    }
+
+    /// A timer can expire a turn, but only confirmed audio advances its clock.
+    /// Calling this from the live callback avoids depending on background SQL.
+    private func updatePresentation() {
+        if let initial = turnTreatmentSettings, settingsKey(initial) != settingsKey(treatmentSettings()) {
+            turnSettingsChanged = true
+        }
+        // Check if user stopped speaking (silence timeout)
+        if let lastWallClock = self.lastSpeechWallClock {
+            let elapsed = Date().timeIntervalSince(lastWallClock)
+            // A transcription cannot arrive until its chunk closes, so silence is
+            // only real once we have waited out the delivery lag as well.
+            if elapsed > self.silenceTimeout + self.lastObservedIngestLagSec {
+                print("[SpeakingCoach] Silence detected (\(Int(elapsed))s since last spoken word). Resetting monologue streak.")
+                fflush(stdout)
+                self.resetStreak()
+            }
+        }
+
+        // Show toast only when in alert/warning threshold AND canAlert is enabled
+        if self.canAlert && self.currentStreak >= self.warningThreshold && self.armShowsToast {
+            self.noteToastShown()
+            MonologueToastController.shared.show(self.currentStreak, callApp: self.activeCallApp)
+        } else {
+            MonologueToastController.shared.hide()
+        }
+
+        // Stimulus trigger (debounced one-shot per monologue streak)
+        if self.canAlert {
+            if self.currentStreak >= self.warningThreshold && !self.hasDeliveredStimulusAt30s {
+                self.hasDeliveredStimulusAt30s = true
+                self.hasWarnedPavlokThisMonologue = true
+                self.warningFiredWallClock = Date()
+                self.warningFiredStreakSec = self.currentStreak
+                self.deliverStimulusForThreshold(isWarning: true)
+            }
+            if self.currentStreak >= self.alertThreshold && !self.hasDeliveredStimulusAt60s {
+                self.hasDeliveredStimulusAt60s = true
+                self.hasShockedPavlokThisMonologue = true
+                self.shockFiredWallClock = Date()
+                self.shockFiredStreakSec = self.currentStreak
+                self.deliverStimulusForThreshold(isWarning: false)
+            }
+        }
+
+        self.onStreakUpdated?(self.currentStreak)
     }
 
     /// Everything about a finished turn, captured before the live counters are cleared.
@@ -1752,6 +2168,8 @@ class TalkTimeMonitor: NSObject {
         let audioClock: Bool
         let wasAlertable: Bool
         let usedLivePath: Bool
+        let settings: [String: Any]
+        let settingsChanged: Bool
     }
 
     private func finishTurnAndLog(_ turn: FinishedTurn) {
@@ -1764,11 +2182,13 @@ class TalkTimeMonitor: NSObject {
         // Time from the warning firing to the speaker actually yielding. This used to be
         // computed after warningFiredWallClock had already been cleared, so it was always
         // null -- the experiment's primary behavioural outcome was never recorded.
-        let latency: Double? = turn.warnedAt.map { max(0, turn.endedAt.timeIntervalSince($0)) }
+        let latency: Double? = turn.warnedAt.flatMap { fired in
+            let elapsed = turn.endedAt.timeIntervalSince(fired)
+            return elapsed > 0 ? elapsed : nil
+        }
 
-        // A live turn is a run of voiced segments (median ~7.5 s); an imported turn is the
-        // gap between transcript lines (median ~13 s). Record the wall-clock span of the
-        // turn as well so the two measurements can be compared like for like.
+        // First-to-last confirmed speech: internal pauses count, trailing silence does
+        // not. Version the measurement so historical word-estimated turns stay distinct.
         let gapDurationSec = turn.startedAt.map { max(turn.streak, turn.endedAt.timeIntervalSince($0)) }
         let gapDurationValue: Any = gapDurationSec.map { $0 as Any } ?? NSNull()
 
@@ -1801,10 +2221,19 @@ class TalkTimeMonitor: NSObject {
             metadata: [
                 "simulated": isSimulating,
                 "source": HabitEventLogger.liveSource,
-                "measurement": "voiced",
+                "measurement": "turn_gap",
+                "timing_version": "confirmed_speech_span_v1",
+                "design_version": "speech_coach_settings_v1",
+                "treatment_settings": turn.settings,
+                "settings_changed_during_turn": turn.settingsChanged,
+                "reward_eligible": turn.streak >= rewardMinSec && turn.streak < warningThreshold && turn.shockedAt == nil,
+                "reward_requested": canAlert && PavlokController.shared.isEnabled && PavlokController.shared.rewardGoodBehavior && turn.streak >= rewardMinSec && turn.streak < warningThreshold && turn.shockedAt == nil,
+                "yield_latency_observed": latency != nil,
+
+                "duration_basis": "first_to_last_confirmed_speech",
+                "live_timestamp_precision": turn.usedLivePath ? "segment_start" : "segment_end",
                 "turn_clock": turn.startedAt != nil && turn.audioClock ? "audio" : "arrival",
                 "call_title": activeCallTitle ?? "",
-                "voiced_duration_sec": turn.streak,
                 "gap_duration_sec": gapDurationValue,
                 // Confirmation of what actually fired, per modality, including failures.
                 "interventions": turn.interventions,
@@ -1831,141 +2260,82 @@ class TalkTimeMonitor: NSObject {
             fflush(stdout)
             PavlokController.shared.sendStimulus(
                 type: "vibe",
-                value: 30,
+                value: PavlokController.shared.rewardVibeIntensity,
                 reason: "Good behavior reward: Concise turn (\(Int(streak))s) yielded cleanly"
             )
         }
     }
 
-    private func handleTranscriptionRow(rowId: Int64, chunkId: Int64, isInput: Bool, text: String, startTime: Double, endTime: Double, writtenAt: Date? = nil) {
+    private func handleTranscriptionRow(rowId: Int64, chunkId: Int64, isInput: Bool, text: String, startTime: Double, endTime: Double, writtenAt: Date? = nil, usedLivePath: Bool = false) {
         guard isValidSpokenText(text) else { return }
-
-        if let writtenAt = writtenAt {
-            let lag = Date().timeIntervalSince(writtenAt)
-            lastObservedIngestLagSec = lag
-            if lag > maxIngestLagSec { maxIngestLagSec = lag }
-            if lag > maxTrustedIngestLagSec {
-                print("[SpeakingCoach] ⚠️ Screenpipe ingest lag \(String(format: "%.1f", lag))s on row \(rowId) - turn timing for this turn is marked suspect.")
-                fflush(stdout)
-            }
-        }
-
-        let deviceLabel = isInput ? "User Mic" : "Other Participant"
-        let segmentDuration = max(0, endTime - startTime)
-        // screenpipe's row timestamp is the audio chunk's start; start_time/end_time are
-        // offsets within that chunk. Together they give an absolute audio clock.
+        let now = Date()
         let segmentAudioStart = writtenAt.map { $0.addingTimeInterval(startTime) }
-        let segmentAudioEnd = writtenAt.map { $0.addingTimeInterval(endTime) }
-        // Whitespace-separated, matching the transcript importer's count_words(). Splitting
-        // on punctuation too counted "don't" as two words and inflated live word counts.
-        let words = text.split { $0.isWhitespace }.count
-        let wordEstimate = Double(words) * 0.35
-        let effectiveDuration = segmentDuration > 0.4 ? segmentDuration : max(1.0, min(wordEstimate, 4.0))
+        let segmentAudioEnd = writtenAt.map { $0.addingTimeInterval(max(startTime, endTime)) }
+        let speechStart = segmentAudioStart ?? now
+        let speechEnd = segmentAudioEnd ?? now
 
-        print("[SpeakingCoach] Transcription [\(rowId)] (\(deviceLabel)): \"\(text.prefix(35))...\" (\(String(format: "%.1f", effectiveDuration))s)")
-        fflush(stdout)
-
+        // Late rows from the previous floor holder must not reopen an ended turn.
+        if let boundary = lastTurnBoundaryAt, speechStart <= boundary { return }
         if !isInput {
-            // Remote participant spoke on system audio!
-            // Instantly break the monologue streak.
+            // A detected handoff ends the turn at the last confirmed mic word,
+            // or earlier if speech overlapped. The wait before the reply is excluded.
             print("[SpeakingCoach] Other participant spoke. Resetting monologue streak.")
             fflush(stdout)
-            resetStreak()
+            resetStreak(endedAt: speechStart)
             return
         }
 
-        // User spoke on microphone
-        if canAlert { turnWasAlertable = true }
-        currentTurnWords += words
-        let now = Date()
-        if let lastClock = lastSpeechWallClock {
-            let wallGap = now.timeIntervalSince(lastClock)
-            // Prefer the audio clock: it spans chunks correctly and is immune to how late
-            // screenpipe delivered the row. Fall back to arrival wall-clock only when the
-            // row carried no usable timestamp.
-            let audioGap: Double
-            let gapIsAudioBased: Bool
-            if let segStart = segmentAudioStart, let lastEnd = lastSegmentAudioEnd {
-                audioGap = max(0, segStart.timeIntervalSince(lastEnd))
-                gapIsAudioBased = true
-            } else {
-                audioGap = (chunkId == lastChunkId && lastAudioEndTime > 0.0) ? max(0, startTime - lastAudioEndTime) : 0.0
-                gapIsAudioBased = false
-            }
+        // Breathing pauses remain inside a turn. Long silence abandons it; neither
+        // that trailing silence nor the delay waiting for ASR is added to its length.
+        if let lastEnd = lastSegmentAudioEnd, speechStart.timeIntervalSince(lastEnd) > silenceTimeout {
+            print("[SpeakingCoach] Long speech gap detected. Starting fresh turn.")
+            resetStreak()
+        } else if segmentAudioStart == nil, let received = lastSpeechWallClock,
+                  now.timeIntervalSince(received) > silenceTimeout + max(0, lastObservedIngestLagSec) {
+            resetStreak()
+        }
 
-            // Widen the arrival-clock fallback by the lag we actually observed, so batched
-            // delivery is not mistaken for the speaker having stopped.
-            let wallGapBroke = !gapIsAudioBased && wallGap > (silenceTimeout + lastObservedIngestLagSec)
-
-            if wallGapBroke || audioGap > maxBreathingPause {
-                print("[SpeakingCoach] Conversational pause detected (gap: \(String(format: "%.1f", max(wallGap, audioGap)))s). Starting fresh streak.")
-                fflush(stdout)
-                let previousStreak = currentStreak
-                let previousWords = currentTurnWords - words
-                let previousWarnedAt = warningFiredWallClock
-                let previousShockedAt = shockFiredWallClock
-                let previousWarnStreak = warningFiredStreakSec
-                let previousShockStreak = shockFiredStreakSec
-                let previousInterventions = drainInterventions()
-                let previousLag = maxIngestLagSec
-                let previousAudioClock = turnAudioStart != nil && lastSegmentAudioEnd != nil
-                let previousAlertable = turnWasAlertable
-                let previousUsedLive = turnUsedLivePath
-
-                hasWarnedPavlokThisMonologue = false
-                hasShockedPavlokThisMonologue = false
-                hasDeliveredStimulusAt30s = false
-                hasDeliveredStimulusAt60s = false
-                warningFiredWallClock = nil
-                shockFiredWallClock = nil
-                warningFiredStreakSec = nil
-                shockFiredStreakSec = nil
-                toastLoggedThisTurn = false
-                maxIngestLagSec = 0.0
-                turnWasAlertable = canAlert
-                turnUsedLivePath = false
-
-                let previousStart = turnAudioStart ?? turnStartWallClock
-                let previousEnd = lastSegmentAudioEnd ?? now
-
-                currentStreak = effectiveDuration
-                currentTurnWords = words
-                turnStartWallClock = now
-                turnAudioStart = segmentAudioStart
-
-                finishTurnAndLog(FinishedTurn(
-                    streak: previousStreak, words: previousWords,
-                    startedAt: previousStart, endedAt: previousEnd,
-                    warnedAt: previousWarnedAt, shockedAt: previousShockedAt,
-                    warnedAtStreakSec: previousWarnStreak, shockedAtStreakSec: previousShockStreak,
-                    interventions: previousInterventions,
-                    maxIngestLagSec: previousLag,
-                    audioClock: previousAudioClock,
-                    wasAlertable: previousAlertable,
-                    usedLivePath: previousUsedLive))
-            } else {
-                currentStreak += effectiveDuration
-            }
-        } else {
-            currentStreak = effectiveDuration
+        if turnStartWallClock == nil {
+            turnTreatmentSettings = treatmentSettings()
             turnStartWallClock = now
             turnAudioStart = segmentAudioStart
         }
-
+        if canAlert { turnWasAlertable = true }
+        turnUsedLivePath = turnUsedLivePath || usedLivePath
+        currentTurnWords += text.split { $0.isWhitespace }.count
         lastSpeechWallClock = now
         lastChunkId = chunkId
         lastAudioEndTime = endTime
-        if let segEnd = segmentAudioEnd { lastSegmentAudioEnd = segEnd }
+        lastSegmentAudioEnd = max(lastSegmentAudioEnd ?? speechEnd, speechEnd)
 
+        let firstSpeech = turnAudioStart ?? turnStartWallClock ?? now
+        currentStreak = max(0, (lastSegmentAudioEnd ?? now).timeIntervalSince(firstSpeech))
+        if let writtenAt = writtenAt {
+            let lag = max(0, now.timeIntervalSince(writtenAt))
+            lastObservedIngestLagSec = lag
+            maxIngestLagSec = max(maxIngestLagSec, lag)
+            if lag > maxTrustedIngestLagSec {
+                print("[SpeakingCoach] Screenpipe ingest lag \(String(format: "%.1f", lag))s on row \(rowId) - turn timing is marked suspect.")
+            }
+        }
+        print("[SpeakingCoach] Transcription [\(rowId)] (User Mic): \"\(text.prefix(35))...\" (confirmed turn span \(String(format: "%.1f", currentStreak))s)")
         print("[SpeakingCoach] User speaking streak now: \(formattedDuration) (warn: \(isWarningActive), alert: \(isAlertActive))")
         fflush(stdout)
     }
 
-    func resetStreak() {
-        let finishedStreak = currentStreak
+    func resetStreak(endedAt requestedEnd: Date? = nil) {
+        let finishedSettings = turnTreatmentSettings ?? treatmentSettings()
+        let settingsChanged = turnSettingsChanged || settingsKey(finishedSettings) != settingsKey(treatmentSettings())
+        turnSettingsChanged = false
+        turnTreatmentSettings = nil
         let finishedWords = currentTurnWords
         let startedAt = turnAudioStart ?? turnStartWallClock
-        let endedAt = lastSegmentAudioEnd ?? Date()
+        let confirmedEnd = lastSegmentAudioEnd ?? Date()
+        let endedAt = requestedEnd.map { min($0, confirmedEnd) } ?? confirmedEnd
+        let finishedStreak = isSimulating ? currentStreak : startedAt.map { max(0, endedAt.timeIntervalSince($0)) } ?? currentStreak
+        if let boundary = requestedEnd ?? lastSegmentAudioEnd {
+            lastTurnBoundaryAt = max(lastTurnBoundaryAt ?? boundary, boundary)
+        }
         let warnedAt = warningFiredWallClock
         let shockedAt = shockFiredWallClock
         let warnedAtStreak = warningFiredStreakSec
@@ -2008,7 +2378,7 @@ class TalkTimeMonitor: NSObject {
             maxIngestLagSec: turnLag,
             audioClock: audioClock,
             wasAlertable: wasAlertable,
-            usedLivePath: usedLivePath))
+            usedLivePath: usedLivePath, settings: finishedSettings, settingsChanged: settingsChanged))
     }
 
     func startSimulation(seconds: TimeInterval) {
@@ -2023,9 +2393,9 @@ class TalkTimeMonitor: NSObject {
     }
 
     func stopSimulation() {
+        resetStreak()
         isSimulating = false
         simulatedSeconds = 0.0
-        resetStreak()
     }
 }
 
@@ -2298,6 +2668,146 @@ class Pavlok60sSubmenuView: NSView {
     }
 }
 
+/// Bench test panel: one intensity slider and one fire button per modality, plus a
+/// live result line. Lives in a view-based menu item so the menu stays open -- the
+/// whole point is to press, feel the wrist, adjust, press again.
+class PavlokTestFireSubmenuView: NSView {
+    /// (type, display label, caution row?) in the order they appear.
+    private static let rows: [(type: String, label: String, caution: Bool)] = [
+        ("vibe", "📳 Vibration", false),
+        ("beep", "🔔 Beep", false),
+        ("zap", "⚡ Zap (electric shock)", true)
+    ]
+
+    private var sliders: [String: NSSlider] = [:]
+    private var valueLabels: [String: NSTextField] = [:]
+    private var fireButtons: [String: NSButton] = [:]
+    private let resultLabel = NSTextField(wrappingLabelWithString: "")
+
+    var onStateChanged: (() -> Void)?
+    private var refreshTimer: Timer?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+        guard window != nil else { return }
+        let timer = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in
+            self?.syncFromModel()
+            self?.onStateChanged?()
+        }
+        refreshTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    init() {
+        super.init(frame: NSRect(x: 0, y: 0, width: 372, height: 288))
+        setupViews()
+        syncFromModel()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    private func setupViews() {
+        var y: CGFloat = 258
+
+        let titleLabel = NSTextField(labelWithString: "Test Fire Wristband (fires immediately)")
+        titleLabel.font = NSFont.boldSystemFont(ofSize: 11)
+        titleLabel.textColor = .secondaryLabelColor
+        titleLabel.frame = NSRect(x: 16, y: y, width: 340, height: 16)
+        addSubview(titleLabel)
+        y -= 24
+
+        for row in PavlokTestFireSubmenuView.rows {
+            let nameLabel = NSTextField(labelWithString: row.label)
+            nameLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+            nameLabel.textColor = row.caution ? .systemOrange : .labelColor
+            nameLabel.frame = NSRect(x: 16, y: y, width: 240, height: 16)
+            addSubview(nameLabel)
+
+            let valueLabel = NSTextField(labelWithString: "0%")
+            valueLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+            valueLabel.textColor = .secondaryLabelColor
+            valueLabel.alignment = .right
+            valueLabel.frame = NSRect(x: 256, y: y, width: 100, height: 16)
+            addSubview(valueLabel)
+            valueLabels[row.type] = valueLabel
+            y -= 24
+
+            let slider = NSSlider(value: 0, minValue: 0, maxValue: 100,
+                                  target: self, action: #selector(sliderMoved(_:)))
+            slider.frame = NSRect(x: 16, y: y, width: 224, height: 20)
+            slider.controlSize = .small
+            slider.isContinuous = true
+            slider.numberOfTickMarks = 0
+            slider.allowsTickMarkValuesOnly = false
+            slider.setAccessibilityLabel("\(row.label) intensity")
+            slider.identifier = NSUserInterfaceItemIdentifier(row.type)
+            addSubview(slider)
+            sliders[row.type] = slider
+
+            let button = NSButton(title: "Test fire", target: self, action: #selector(fireClicked(_:)))
+            button.bezelStyle = .rounded
+            button.controlSize = .small
+            button.font = NSFont.systemFont(ofSize: 11)
+            button.frame = NSRect(x: 248, y: y - 3, width: 108, height: 24)
+            button.setAccessibilityLabel("Test fire \(row.label)")
+            button.identifier = NSUserInterfaceItemIdentifier(row.type)
+            addSubview(button)
+            fireButtons[row.type] = button
+
+            y -= 32
+        }
+
+        y -= 4
+        resultLabel.font = NSFont.systemFont(ofSize: 10)
+        resultLabel.textColor = .secondaryLabelColor
+        resultLabel.frame = NSRect(x: 16, y: y - 16, width: 340, height: 30)
+        resultLabel.maximumNumberOfLines = 2
+        addSubview(resultLabel)
+        y -= 34
+
+        let tipLabel = NSTextField(labelWithString: "Bluetooth test • 0% is off • one pulse per click")
+        tipLabel.font = NSFont.systemFont(ofSize: 10)
+        tipLabel.textColor = .tertiaryLabelColor
+        tipLabel.alignment = .center
+        tipLabel.frame = NSRect(x: 16, y: y, width: 340, height: 14)
+        addSubview(tipLabel)
+    }
+
+    func syncFromModel() {
+        let p = PavlokController.shared
+        for row in PavlokTestFireSubmenuView.rows {
+            let value = p.testIntensity(for: row.type)
+            sliders[row.type]?.integerValue = value
+            valueLabels[row.type]?.stringValue = "\(value)%"
+            // 0% means off everywhere else in this controller; keep it meaning off here.
+            fireButtons[row.type]?.isEnabled = p.canTestFire && value > 0 && !p.isTestFiring
+        }
+        resultLabel.stringValue = p.canTestFire
+            ? (p.isTestFiring ? "Connecting / awaiting Bluetooth acknowledgement…" : "Last: \(p.lastTestFireSummary)")
+            : "Enable Keep Bluetooth Connected in the menu above."
+    }
+
+    @objc func sliderMoved(_ sender: NSSlider) {
+        guard let type = sender.identifier?.rawValue else { return }
+        PavlokController.shared.setTestIntensity(sender.integerValue, for: type)
+        syncFromModel()
+        onStateChanged?()
+    }
+
+    @objc func fireClicked(_ sender: NSButton) {
+        guard let type = sender.identifier?.rawValue else { return }
+        sender.isEnabled = false
+        resultLabel.stringValue = "Firing \(PavlokController.testFireLabel(for: type)) at \(PavlokController.shared.testIntensity(for: type))%…"
+        PavlokController.shared.testFire(type: type) { [weak self] _, _ in
+            guard let self = self else { return }
+            self.syncFromModel()
+            self.onStateChanged?()
+        }
+    }
+}
+
 // MARK: - Cute Dog Stick Figure Bluetooth Connection Icon
 class PavlokDogIcon {
     private static let connectedImage: NSImage = {
@@ -2483,7 +2993,28 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    private var handledPavlokRequests = Set<String>()
+
+    @objc func receivePavlokTest(_ notification: Notification) {
+        guard notification.object as? String == String(ProcessInfo.processInfo.processIdentifier),
+              let info = notification.userInfo,
+              let id = info["id"] as? String, UUID(uuidString: id) != nil,
+              let type = info["type"] as? String, ["vibe", "beep", "zap"].contains(type),
+              let level = info["intensity"] as? Int, (1...100).contains(level),
+              let sent = info["sent_at"] as? Double, abs(Date().timeIntervalSince1970 - sent) < 30,
+              !handledPavlokRequests.contains(id) else { return }
+        handledPavlokRequests.insert(id)
+        PavlokController.shared.testFire(type: type, operationID: id, intensityOverride: level) { ok, detail in
+            DistributedNotificationCenter.default().postNotificationName(
+                Notification.Name("com.benpollack.pavlok.test-result"), object: id,
+                userInfo: ["success": ok, "detail": detail], deliverImmediately: true)
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        DistributedNotificationCenter.default().addObserver(self, selector: #selector(receivePavlokTest(_:)),
+            name: Notification.Name("com.benpollack.pavlok.test-request"), object: nil)
+
         // Setup System Tray Status Item in macOS Menu Bar
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
@@ -2705,6 +3236,54 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         toggleReward.target = self
         statusMenu.addItem(toggleReward)
 
+        // 5. Manual Test Fire (independent intensity per modality, fires on demand)
+        let testFireMenu = NSMenu()
+        // Without this, AppKit re-enables any item whose target responds to the action,
+        // and the 0%/feature-off rows below would be clickable after all.
+        testFireMenu.autoenablesItems = false
+        let testFireView = PavlokTestFireSubmenuView()
+        let testFireParentItem = NSMenuItem(title: "   🧪 Test Fire Wristband: \(PavlokController.shared.testFireSummary)", action: nil, keyEquivalent: "")
+        let testFireCustomItem = NSMenuItem()
+        testFireCustomItem.view = testFireView
+        testFireMenu.addItem(testFireCustomItem)
+        testFireMenu.addItem(NSMenuItem.separator())
+
+        // Plain items as well as the sliders: they are keyboard- and VoiceOver-reachable,
+        // and their titles carry the last outcome after the menu has closed and reopened.
+        var plainFireItems: [String: NSMenuItem] = [:]
+        for type in ["vibe", "beep", "zap"] {
+            let label = PavlokController.testFireLabel(for: type)
+            let level = PavlokController.shared.testIntensity(for: type)
+            let item = NSMenuItem(title: "\(label) — Test fire at \(level)%", action: #selector(testFirePavlokStimulus(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = type
+            item.isEnabled = PavlokController.shared.canTestFire && level > 0 && !PavlokController.shared.isTestFiring
+            testFireMenu.addItem(item)
+            plainFireItems[type] = item
+        }
+        testFireParentItem.submenu = testFireMenu
+        statusMenu.addItem(testFireParentItem)
+
+        let testFireResultItem = NSMenuItem(title: "      └─ Last test: \(PavlokController.shared.lastTestFireSummary)", action: nil, keyEquivalent: "")
+        testFireResultItem.isEnabled = false
+        statusMenu.addItem(testFireResultItem)
+
+        testFireView.onStateChanged = { [weak self, weak testFireParentItem, weak testFireResultItem] in
+            let p = PavlokController.shared
+            testFireParentItem?.title = "   🧪 Test Fire Wristband: \(p.testFireSummary)"
+            testFireResultItem?.title = "      └─ Last test: \(p.lastTestFireSummary)"
+            for (type, item) in plainFireItems {
+                let level = p.testIntensity(for: type)
+                item.title = "\(PavlokController.testFireLabel(for: type)) — Test fire at \(level)%"
+                item.isEnabled = p.canTestFire && level > 0 && !p.isTestFiring
+            }
+            self?.updateTrayButton()
+        }
+
+        let keepItem = NSMenuItem(title: "   Keep Bluetooth Connected", action: #selector(togglePavlokConnection), keyEquivalent: "")
+        keepItem.target = self
+        keepItem.state = PavlokController.shared.keepConnected ? .on : .off
+        statusMenu.addItem(keepItem)
         let scanItem = NSMenuItem(title: "   🔍 Scan & Connect via Bluetooth", action: #selector(scanPavlokBluetooth), keyEquivalent: "")
         scanItem.target = self
         statusMenu.addItem(scanItem)
@@ -2713,20 +3292,6 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let tokenItem = NSMenuItem(title: tokenLabel, action: #selector(promptPavlokToken), keyEquivalent: "")
         tokenItem.target = self
         statusMenu.addItem(tokenItem)
-
-        statusMenu.addItem(NSMenuItem.separator())
-
-        let test30Item = NSMenuItem(title: "   ⚡ Test 30s Cue (\(PavlokController.shared.warningCueSummary))", action: #selector(testPavlok30sCue), keyEquivalent: "")
-        test30Item.target = self
-        statusMenu.addItem(test30Item)
-
-        let test60Item = NSMenuItem(title: "   ⚡ Test 60s Cue (\(PavlokController.shared.alertCueSummary))", action: #selector(testPavlok60sCue), keyEquivalent: "")
-        test60Item.target = self
-        statusMenu.addItem(test60Item)
-
-        let testVibeItem = NSMenuItem(title: "   📳 Test Good Behavior Reward (<15ms Vibe)", action: #selector(testPavlokVibe), keyEquivalent: "")
-        testVibeItem.target = self
-        statusMenu.addItem(testVibeItem)
 
         statusMenu.addItem(NSMenuItem.separator())
 
@@ -3077,7 +3642,14 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     // MARK: - Pavlok Actions
+    @objc func togglePavlokConnection() {
+        PavlokController.shared.keepConnected.toggle()
+        rebuildMenu()
+        updateTrayButton()
+    }
+
     @objc func scanPavlokBluetooth() {
+        PavlokController.shared.keepConnected = true
         PavlokController.shared.startBleScan(force: true)
         rebuildMenu()
         updateTrayButton()
@@ -3240,11 +3812,35 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func testPavlokVibe() {
-        PavlokController.shared.sendStimulus(type: "vibe", value: 40, reason: "Manual test from AI Aggregator menu")
+        performPavlokManualTest(type: "vibe", intensity: PavlokController.shared.rewardVibeIntensity)
     }
 
     @objc func testPavlokZap() {
-        PavlokController.shared.sendStimulus(type: "zap", value: PavlokController.shared.shockIntensity, reason: "Manual test from AI Aggregator menu")
+        performPavlokManualTest(type: "zap", intensity: PavlokController.shared.shockIntensity)
+    }
+
+    /// Plain-menu-item test fire. The menu closes on click, so a failure -- which is
+    /// silent on the wrist by definition -- is raised as an alert rather than being left
+    /// for the next time somebody opens the menu.
+    @objc func testFirePavlokStimulus(_ sender: NSMenuItem) {
+        guard let type = sender.representedObject as? String else { return }
+        performPavlokManualTest(type: type)
+    }
+
+    private func performPavlokManualTest(type: String, intensity: Int? = nil) {
+        PavlokController.shared.testFire(type: type, intensityOverride: intensity) { [weak self] ok, detail in
+            guard let self = self else { return }
+            self.rebuildMenu()
+            self.updateTrayButton()
+            guard !ok else { return }
+            let alert = NSAlert()
+            alert.messageText = "\(PavlokController.testFireLabel(for: type)) test fire did not reach the wristband"
+            alert.informativeText = "\(detail)\n\nStatus: \(PavlokController.shared.connectionStatusText)"
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "OK")
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+        }
     }
 
     @objc func restartScreenpipe() {
@@ -3445,8 +4041,8 @@ func runPavlokE2ETests() {
     assert(vibeDataP2 == Data([0x81, 0x0C, 0x1E, 0x18, 0x18]), "FAIL: Pavlok 2/3 vibe packet mismatch. Got: \(vibeDataP2)")
     print("  ✓ Pavlok 2/3 BLE Vibe packet: [0x81, 0x0C, 0x1E, 0x18, 0x18] (30% intensity)")
 
-    let beepDataP2 = PavlokController.encodeBleBeep(count: 1, isPavlok2: true)
-    assert(beepDataP2 == Data([0x81, 0x0C, 0x01, 0x18, 0x18]), "FAIL: Pavlok 2/3 beep packet mismatch. Got: \(beepDataP2)")
+    let beepDataP2 = PavlokController.encodeBleBeep(intensity: 1, isPavlok2: true)
+    assert(beepDataP2 == Data([0x81, 0x0C, 0x01, 0x18, 0x18]), "FAIL: Pavlok 2/3 beep intensity packet mismatch. Got: \(beepDataP2)")
     print("  ✓ Pavlok 2/3 BLE Beep packet: [0x81, 0x0C, 0x01, 0x18, 0x18] (1 chime)")
 
     let shockDataP1 = PavlokController.encodeBleShock(intensity: 35, isPavlok2: false)
@@ -3704,9 +4300,177 @@ func runPavlokE2ETests() {
     exit(0)
 }
 
+// MARK: - Headless Test Fire
+//
+// `--pavlok-test-fire <vibe|beep|zap> [intensity]` fires one stimulus and exits, so the
+// wristband can be exercised from a terminal or a script without opening the menu.
+// It borrows the feature for the length of one shot: whatever `pavlok_shock_enabled`
+// and the test intensities were before the process started, they are that again after.
+func runPavlokTestFireCLI() {
+    let args = CommandLine.arguments
+    guard let idx = args.firstIndex(of: "--pavlok-test-fire") else { return }
+
+    let usage = "usage: --pavlok-test-fire <vibe|beep|zap> [intensity 1-100] [--wait seconds] [--trace-ble]\n" +
+                "       the intensity argument applies to this shot only; the saved level is left alone\n" +
+                "       --wait     how long to look for the wristband (default 15s)\n" +
+                "       --trace-ble  log every advertising peripheral the filter rejects\n"
+    let type = (idx + 1 < args.count) ? args[idx + 1].lowercased() : ""
+    guard ["vibe", "beep", "zap"].contains(type) else {
+        FileHandle.standardError.write(Data(usage.utf8))
+        exit(2)
+    }
+    var override: Int? = nil
+    if idx + 2 < args.count, !args[idx + 2].hasPrefix("--") {
+        guard let parsed = Int(args[idx + 2]), parsed >= 1, parsed <= 100 else {
+            FileHandle.standardError.write(Data(usage.utf8))
+            exit(2)
+        }
+        override = parsed
+    }
+
+    PavlokController.traceBleDiscovery = args.contains("--trace-ble")
+    var connectWait: TimeInterval = 15.0
+    if let w = args.firstIndex(of: "--wait") {
+        guard w + 1 < args.count else {
+            FileHandle.standardError.write(Data(usage.utf8))
+            exit(2)
+        }
+        guard let seconds = Double(args[w + 1]), seconds > 0, seconds <= 300 else {
+            FileHandle.standardError.write(Data(usage.utf8))
+            exit(2)
+        }
+        connectWait = seconds
+    }
+
+    // Everything the controller prints goes to the log the LaunchAgent writes, so a fire
+    // from the terminal leaves its record next to one from the menu. The one-line verdict
+    // still reaches the terminal, through a descriptor saved before the redirect.
+    let terminalOut = dup(STDOUT_FILENO)
+    let logDir = NSHomeDirectory() + "/.ai-aggregator/logs"
+    try? FileManager.default.createDirectory(atPath: logDir, withIntermediateDirectories: true)
+    freopen(logDir + "/menubar.log", "a", stdout)
+    setvbuf(stdout, nil, _IOLBF, 0)
+
+    func verdict(_ line: String) {
+        print(line)
+        fflush(stdout)
+        if terminalOut >= 0 {
+            var bytes = Array((line + "\n").utf8)
+            _ = write(terminalOut, &bytes, bytes.count)
+        }
+    }
+
+    if let bundleID = Bundle.main.bundleIdentifier,
+       let resident = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+        .first(where: { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }) {
+        let id = UUID().uuidString.lowercased()
+        let level = override ?? UserDefaults.standard.object(forKey: "pavlok_test_\(type)_intensity") as? Int
+            ?? (type == "zap" ? 10 : 40)
+        guard (1...100).contains(level) else { verdict("[Pavlok TestFire] FAILED: intensity is off"); exit(1) }
+        let center = DistributedNotificationCenter.default()
+        let observer = center.addObserver(forName: Notification.Name("com.benpollack.pavlok.test-result"),
+                                           object: id, queue: .main) { note in
+            let ok = note.userInfo?["success"] as? Bool ?? false
+            let detail = note.userInfo?["detail"] as? String ?? "No result"
+            verdict("[Pavlok TestFire] \(ok ? "DELIVERED" : "FAILED"): \(type) \(level)% • \(detail) • resident connection retained")
+            exit(ok ? 0 : 1)
+        }
+        _ = observer
+        verdict("[Pavlok TestFire] requested \(type) at \(level)% through resident app")
+        center.postNotificationName(Notification.Name("com.benpollack.pavlok.test-request"),
+            object: String(resident.processIdentifier),
+            userInfo: ["id": id, "type": type, "intensity": level, "sent_at": Date().timeIntervalSince1970],
+            deliverImmediately: true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 25) {
+            verdict("[Pavlok TestFire] OUTCOME UNKNOWN: resident did not reply; not retrying")
+            exit(1)
+        }
+        RunLoop.main.run()
+        return
+    }
+
+    // This process has no window and is never frontmost, so App Nap throttles it -- and a
+    // throttled process gets its CoreBluetooth discovery callbacks delivered late or not
+    // at all, which looks exactly like a wristband that is not there.
+    let activity = ProcessInfo.processInfo.beginActivity(
+        options: [.userInitiated, .idleSystemSleepDisabled],
+        reason: "Pavlok headless test fire")
+
+    let testKey = "pavlok_test_\(type)_intensity"
+    let originalIntensity = UserDefaults.standard.object(forKey: testKey)
+    let originalEnabled = UserDefaults.standard.object(forKey: "pavlok_shock_enabled")
+    let pavlok = PavlokController.shared
+    let wasEnabled = pavlok.isEnabled
+    let savedIntensity = pavlok.testIntensity(for: type)
+    if let level = override { pavlok.setTestIntensity(level, for: type) }
+
+    func restoreAndExit(_ code: Int32) -> Never {
+        pavlok.setTestIntensity(savedIntensity, for: type)
+        if !wasEnabled { pavlok.isEnabled = false }
+        if let originalIntensity = originalIntensity {
+            UserDefaults.standard.set(originalIntensity, forKey: testKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: testKey)
+        }
+        if originalEnabled == nil { UserDefaults.standard.removeObject(forKey: pavlok.kPavlokEnabled) }
+        UserDefaults.standard.synchronize()
+        ProcessInfo.processInfo.endActivity(activity)
+        exit(code)
+    }
+
+    let level = pavlok.testIntensity(for: type)
+    let operationID = UUID().uuidString.lowercased()
+    let connectionAudit = pavlok.interventionAudit(type: type, intensity: level,
+        reason: "Headless manual test", id: operationID, manual: true)
+    connectionAudit("connection_requested", nil, nil)
+    verdict("[Pavlok TestFire] requested \(PavlokController.testFireLabel(for: type)) at \(level)% (headless)")
+
+    // Enabling is what creates the CBCentralManager and starts the scan; there is no
+    // other way to reach the radio, and it is put back the way it was on the way out.
+    pavlok.isEnabled = true
+
+    let connectDeadline = Date().addingTimeInterval(connectWait)
+    DispatchQueue.global(qos: .userInitiated).async {
+        while !pavlok.isReadyForStimulus(type) && Date() < connectDeadline {
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+        DispatchQueue.main.async {
+            if pavlok.isReadyForStimulus(type) {
+                verdict("[Pavlok TestFire] transport: direct Bluetooth to \(pavlok.bleDeviceName ?? "wristband")")
+
+            } else {
+                verdict("[Pavlok TestFire] transport: Bluetooth not ready; cloud is excluded from connection tests")
+            }
+            pavlok.testFire(type: type, operationID: operationID) { ok, detail in
+                verdict("[Pavlok TestFire] \(ok ? "DELIVERED" : "FAILED"): \(pavlok.lastTestFireSummary)")
+                if !ok { verdict("[Pavlok TestFire] reason: \(detail)") }
+                // A .withoutResponse BLE write is queued, not sent, when writeValue returns.
+                // Tearing the process down immediately can drop it on the floor.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    restoreAndExit(ok ? 0 : 1)
+                }
+            }
+        }
+    }
+
+    // Nothing here should ever take this long; exit rather than hang a script forever.
+    let watchdog = connectWait + 20.0
+    DispatchQueue.main.asyncAfter(deadline: .now() + watchdog) {
+        connectionAudit("result", false, "Headless test watchdog timed out")
+        verdict("[Pavlok TestFire] FAILED: timed out after \(Int(watchdog))s")
+        restoreAndExit(1)
+    }
+
+    RunLoop.main.run()
+}
+
 // MARK: - Application Entrypoint
 if CommandLine.arguments.contains("--test-pavlok-e2e") {
     runPavlokE2ETests()
+}
+
+if CommandLine.arguments.contains("--pavlok-test-fire") {
+    runPavlokTestFireCLI()
 }
 
 let app = NSApplication.shared

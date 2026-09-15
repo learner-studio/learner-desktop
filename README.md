@@ -203,3 +203,45 @@ Synthetic data never reaches production metrics: simulated turns are written wit
 - An earlier server-side rebuild tagged `transcript_rebuild_20260908` has been replaced;
   a snapshot of it is kept locally at
   `data/baseline_snapshot_transcript_rebuild_20260908.json` (gitignored).
+
+### Manual Pavlok Bluetooth test
+
+In the menu-bar capture suite, enable **Keep Bluetooth Connected** and open
+**Test Fire Wristband**. Vibration, beep, and zap each have an independent saved 0–100%
+slider and a **Test fire** button. Changing a slider does not fire; 0% disables
+that test. These settings do not change the automatic 30s/60s coaching levels.
+
+Each click sends one pulse over direct Bluetooth, waits for the selected
+characteristic and its write acknowledgement, and shows the result in the menu.
+Cloud backup is excluded from manual connection tests. An acknowledgement means
+the device accepted the command; it does not measure the physical sensation.
+For Pavlok 2/3, beep uses the same intensity field as vibration, as implemented
+in [PyPav2](https://github.com/ztrayl3/PyPav2/blob/master/PyPav2.py).
+
+If Bluetooth is not ready, charge/wake the band and choose **Scan & Connect via
+Bluetooth**. For Pavlok 3, USB-C power turns it on automatically. Temporarily
+disconnecting its phone Bluetooth connection can help isolate connection issues.
+
+Validation: `python3 -m unittest discover -s tests -p 'test_pavlok*.py'` checks
+menu wiring and executes the production packet encoders. The opt-in live test
+in `tests/heavy/test_pavlok_test_fire_live.py` sends one 25% vibration and requires
+a Bluetooth acknowledgement; it never tests zap automatically.
+
+Pavlok requests and results are also persisted in the existing `habit_events`
+behavior database as `habit_type=pavlok_intervention`, using the existing remote
+sync path. Metadata links lifecycle records with `operation_id` and includes
+modality, requested percentage, phase, result/error, device identity, battery,
+transport, elapsed time, and explicit `device_acknowledged`. Manual tests use
+`manual_test=true` and `treatment_arm=manual_test`; they are excluded from the
+menu's speaking-trial count. Raw diagnostic output remains in
+`~/.ai-aggregator/logs/menubar.log`. A cloud HTTP success is never marked as a
+Bluetooth device acknowledgement.
+
+The menu-bar app owns the persistent Bluetooth connection. **Keep Bluetooth
+Connected** is independent of automatic wearable feedback; it can stay enabled
+while automatic coaching stimuli remain off. The app remembers the last connected
+band, reconnects after link loss, and retains the link between manual tests.
+When the signed app is running, `--pavlok-test-fire` forwards a single validated
+request to that app instead of opening another Bluetooth connection or changing
+saved intensity/feedback settings. A forwarding timeout is an unknown outcome and
+is not automatically retried.
