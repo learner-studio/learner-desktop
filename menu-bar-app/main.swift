@@ -1759,7 +1759,7 @@ final class ManagedHelper {
         defer { try? FileManager.default.removeItem(atPath: pidPath) }
         guard let text = try? String(contentsOfFile: pidPath, encoding: .utf8),
               let pid = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 1,
-              let command = ManagedHelper.commandLine(of: pid), command.contains(marker) else { return }
+              let command = processCommandLine(pid), command.contains(marker) else { return }
         print("[Helpers] Stopping \(name) left over from a previous run (pid \(pid))")
         fflush(stdout)
         kill(pid, SIGTERM)
@@ -1767,19 +1767,21 @@ final class ManagedHelper {
         while kill(pid, 0) == 0 && Date() < deadline { usleep(100_000) }
         if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
     }
+}
 
-    private static func commandLine(of pid: pid_t) -> String? {
-        let ps = Process()
-        ps.executableURL = URL(fileURLWithPath: "/bin/ps")
-        ps.arguments = ["-p", String(pid), "-o", "command="]
-        let out = Pipe()
-        ps.standardOutput = out
-        ps.standardError = FileHandle.nullDevice
-        guard (try? ps.run()) != nil else { return nil }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        ps.waitUntilExit()
-        return ps.terminationStatus == 0 ? String(data: data, encoding: .utf8) : nil
-    }
+/// A process's command line, optionally followed by the environment it was started with
+/// (readable for the current user's own processes).
+func processCommandLine(_ pid: pid_t, includeEnvironment: Bool = false) -> String? {
+    let ps = Process()
+    ps.executableURL = URL(fileURLWithPath: "/bin/ps")
+    ps.arguments = (includeEnvironment ? ["-wwE"] : []) + ["-p", String(pid), "-o", "command="]
+    let out = Pipe()
+    ps.standardOutput = out
+    ps.standardError = FileHandle.nullDevice
+    guard (try? ps.run()) != nil else { return nil }
+    let data = out.fileHandleForReading.readDataToEndOfFile()
+    ps.waitUntilExit()
+    return ps.terminationStatus == 0 ? String(data: data, encoding: .utf8) : nil
 }
 
 // MARK: - Continuous Word Talk-Time Monitor
@@ -2205,7 +2207,12 @@ class TalkTimeMonitor: NSObject {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let query = "SELECT t.id, t.audio_chunk_id, t.transcription, t.timestamp, t.start_time, t.end_time, c.file_path FROM audio_transcriptions t JOIN audio_chunks c ON t.audio_chunk_id = c.id WHERE t.id > \(self.lastCheckedTranscriptionId) ORDER BY t.id ASC LIMIT 50;"
+        // Same rule as the live poll: until the watermark is set, ask only for MAX(id). The
+        // ascending page returns the OLDEST rows, and initialising from its last row (id 51)
+        // replayed weeks of history as live speech whenever screenpipe came up after the coach.
+        let query = self.isInitialized
+            ? "SELECT t.id, t.audio_chunk_id, t.transcription, t.timestamp, t.start_time, t.end_time, c.file_path FROM audio_transcriptions t JOIN audio_chunks c ON t.audio_chunk_id = c.id WHERE t.id > \(self.lastCheckedTranscriptionId) ORDER BY t.id ASC LIMIT 50;"
+            : "SELECT COALESCE(MAX(id), 0) AS id FROM audio_transcriptions LIMIT 1;"
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["query": query])
         req.timeoutInterval = 2.0
 
@@ -2215,8 +2222,8 @@ class TalkTimeMonitor: NSObject {
 
             DispatchQueue.main.async {
                 if !self.isInitialized {
-                    if let last = rows.last,
-                       let id = (last["id"] as? NSNumber)?.int64Value ?? (last["id"] as? Int64) {
+                    if let first = rows.first,
+                       let id = (first["id"] as? NSNumber)?.int64Value ?? (first["id"] as? Int64) {
                         self.lastCheckedTranscriptionId = id
                         self.isInitialized = true
                         print("[SpeakingCoach] Connected to Screenpipe raw_sql (lastCheckedTranscriptionId: \(id))")
@@ -3192,6 +3199,8 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusMenu.delegate = self
         statusItem.menu = statusMenu
 
+        setScreenpipeSkipFlag()
+
         // Tunnel first: the watcher's startup health check goes through it.
         tunnel.start()
         watcher.start()
@@ -3591,6 +3600,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateScreenpipeStatus()
         updateHindsightStatus()
         updateLoginItemApproval()
+        ensureScreenpipeSkipsSignIn()
         enforceMicAutoGainGuard()
         if HabitEventLogger.shared.getUnsyncedCount() > 0 {
             syncHabitsToServer(completion: nil)
@@ -3704,6 +3714,78 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         task.resume()
+    }
+
+    // MARK: - screenpipe sign-in flag
+
+    /// screenpipe skips its account check when SCREENPIPE_SKIP_ONBOARDING is in its
+    /// environment. A separate com.screenpipe.env LaunchAgent used to set it at login, until
+    /// macOS switched that agent off in Login Items ("launchctl"): after the 2026-10-11
+    /// reboot screenpipe started signed out and recorded nothing for ten days. Setting it
+    /// in launchd's user environment covers every screenpipe launched from now on.
+    func setScreenpipeSkipFlag() {
+        let setenv = Process()
+        setenv.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        setenv.arguments = ["setenv", "SCREENPIPE_SKIP_ONBOARDING", "1"]
+        try? setenv.run()
+        setenv.waitUntilExit()
+    }
+
+    /// The screenpipe process last checked for the flag, so each launch is checked once.
+    private var screenpipeFlagCheckedPid: pid_t = 0
+
+    /// At login screenpipe can start before this app has set the flag. Such a screenpipe
+    /// waits for a sign-in and never records, so quit it and start it again with the flag.
+    func ensureScreenpipeSkipsSignIn() {
+        guard let screenpipe = NSRunningApplication.runningApplications(withBundleIdentifier: "screenpi.pe").first,
+              screenpipe.processIdentifier != screenpipeFlagCheckedPid else { return }
+        let pid = screenpipe.processIdentifier
+        screenpipeFlagCheckedPid = pid
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let started = processCommandLine(pid, includeEnvironment: true),
+                  !started.contains("SCREENPIPE_SKIP_ONBOARDING=1"),
+                  // Signed out, screenpipe never starts its server. One that answers is (or
+                  // can be) recording, and quitting it would only drop it to search-only.
+                  self?.screenpipeServerResponds() == false else { return }
+            print("[Screenpipe] Started without SCREENPIPE_SKIP_ONBOARDING, so it is waiting for a sign-in; relaunching it with the flag")
+            fflush(stdout)
+            // A normal quit: screenpipe handles no termination signals, so a signal could
+            // leave its database mid-write.
+            _ = screenpipe.terminate()
+            let deadline = Date().addingTimeInterval(30)
+            while kill(pid, 0) == 0 && Date() < deadline { usleep(200_000) }
+            if kill(pid, 0) == 0 {
+                // Still there: it went to search-only instead of exiting. Reopening is
+                // screenpipe's own way back, and resumes recording.
+                print("[Screenpipe] Did not quit within 30s; reopening it instead")
+                fflush(stdout)
+            }
+            let config = NSWorkspace.OpenConfiguration()
+            config.activates = false
+            config.environment = ["SCREENPIPE_SKIP_ONBOARDING": "1"]
+            NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: "/Applications/screenpipe.app"),
+                                               configuration: config) { _, error in
+                print(error.map { "[Screenpipe] Relaunch failed: \($0.localizedDescription)" }
+                      ?? "[Screenpipe] Relaunched with SCREENPIPE_SKIP_ONBOARDING")
+                fflush(stdout)
+            }
+        }
+    }
+
+    /// Whether screenpipe's local server answers at all (degraded still counts). Blocking;
+    /// call off the main thread.
+    func screenpipeServerResponds() -> Bool {
+        guard let url = URL(string: "http://localhost:3030/health") else { return false }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 2.0
+        let done = DispatchSemaphore(value: 0)
+        var answered = false
+        URLSession.shared.dataTask(with: req) { _, response, _ in
+            answered = response != nil
+            done.signal()
+        }.resume()
+        _ = done.wait(timeout: .now() + 3)
+        return answered
     }
 
     func updateLoginItemApproval() {

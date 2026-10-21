@@ -30,7 +30,7 @@ def method(src, signature):
 
 def helper_class(src):
     start = src.index("final class ManagedHelper")
-    return src[start:src.index("\n}\n", start)]
+    return src[start:src.index("\n}\n", start) + 3]
 
 
 class ManagedHelperTest(unittest.TestCase):
