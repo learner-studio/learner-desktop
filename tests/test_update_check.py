@@ -76,6 +76,11 @@ class TriggerTest(unittest.TestCase):
             if "print(" in line:
                 self.assertNotIn("token", line.lower(), line)
 
+    def test_status_line_is_found_anywhere_in_the_report(self):
+        # The first live run opened with a one-line summary and put STATUS: OK on line 3.
+        finished = method(self.cls, "private func finished(")
+        self.assertRegex(finished, r'first\(where: \{ \$0\.hasPrefix\("STATUS:"\) \}\)')
+
     def test_a_failed_run_says_why(self):
         finished = method(self.cls, "private func finished(")
         self.assertIn('"is_error"', finished)

@@ -1891,8 +1891,9 @@ final class ScreenpipeUpdateCheck {
         // An interactive `claude auth login` sits in a keychain slot keyed by $USER (a shell
         // without USER saves it elsewhere) and can expire between updates. A long-lived
         // token, when saved, keeps unattended runs from depending on either.
+        // Tokens contain no whitespace; a copy across a terminal line wrap adds some.
         if let saved = try? String(contentsOfFile: tokenPath, encoding: .utf8)
-            .trimmingCharacters(in: .whitespacesAndNewlines), !saved.isEmpty {
+            .components(separatedBy: .whitespacesAndNewlines).joined(), !saved.isEmpty {
             env["CLAUDE_CODE_OAUTH_TOKEN"] = saved
         }
         p.environment = env
@@ -1937,13 +1938,14 @@ final class ScreenpipeUpdateCheck {
         let reportPath = "\(logDir)/\(stamp).md"
         try? "# \(reason)\n\nSession: \(session) (`claude --resume \(session)` from the project folder)\nCost: \(cost)\n\n\(report)\n"
             .write(toFile: reportPath, atomically: true, encoding: .utf8)
-        let firstLine = report.split(separator: "\n").first.map(String.init) ?? ""
+        let reportLines = report.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
         let status: String
         if result?["is_error"] as? Bool == true {
             // e.g. "Failed to authenticate: OAuth session expired and could not be refreshed"
-            status = "STATUS: RUN FAILED (\(firstLine.prefix(100)))"
+            status = "STATUS: RUN FAILED (\((reportLines.first ?? "").prefix(100)))"
         } else {
-            status = firstLine.hasPrefix("STATUS:") ? firstLine : "STATUS: NO REPORT"
+            // Asked to lead with it, but a session may open with a one-line summary first.
+            status = reportLines.first(where: { $0.hasPrefix("STATUS:") }) ?? "STATUS: NO REPORT"
         }
         appendIndex("\(stamp)  \(status)  session \(session)  \(cost)  \(reason)")
         print("[UpdateCheck] Finished (exit \(proc.terminationStatus)): \(status), session \(session), \(cost). Report: \(reportPath)")

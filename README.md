@@ -151,10 +151,13 @@ save it where the app reads it (it is passed to each run, never logged):
 
 ```bash
 claude setup-token
-pbpaste > ~/.ai-aggregator/claude-oauth-token && chmod 600 ~/.ai-aggregator/claude-oauth-token
+stty -echo; (umask 077 && cat > ~/.ai-aggregator/claude-oauth-token); stty echo; echo " saved"
 ```
 
-(copy the printed token before the second line). Without it, runs use the interactive
+The second line waits for the token: paste it (nothing is echoed), press Return, then
+Ctrl-D. It reads what you paste rather than the clipboard (copying the command itself would
+overwrite that), and accepts a token that wrapped onto several lines; the app strips the
+line breaks. A run with a bad token logs `STATUS: RUN FAILED (… 401 …)`. Without a token, runs use the interactive
 `claude auth login`, which is stored per `$USER` and has expired between updates before.
 
 ### Version pinning and the preflight check
