@@ -131,6 +131,32 @@ after the 2026-10-11 reboot screenpipe sat signed out and recorded nothing for t
 In 2.7.116, Quit does not exit screenpipe while its server is running: it stops capture
 and keeps serving saved history ("search-only"). Opening the app again resumes recording.
 
+### Update checks
+
+When the installed screenpipe version changes and holds still for 10 minutes, Learner
+Desktop starts a fresh headless Claude Code session (`claude -p`) in this repo. It follows
+[`docs/screenpipe-update-runbook.md`](docs/screenpipe-update-runbook.md) with only the
+commands allowed in `config/screenpipe-update-agent.json`: it checks the whole system,
+re-applies the sign-in flag, resumes capture, and on a version-only change starts the new
+phase with `scripts/start-capture-phase.py` (new GrowthBook phase, re-pinned config,
+committed). Runs are capped at $5 and 30 minutes, once per version. The menu has "Run
+screenpipe Update Check Now".
+
+Every run is logged in `~/.ai-aggregator/logs/screenpipe-update-checks/`: the full session
+(`.jsonl`), its report (`.md`, with the session id to resume it), and one line per run in
+`index.log`.
+
+Unattended runs need a Claude login that does not lapse. Create a long-lived token once and
+save it where the app reads it (it is passed to each run, never logged):
+
+```bash
+claude setup-token
+pbpaste > ~/.ai-aggregator/claude-oauth-token && chmod 600 ~/.ai-aggregator/claude-oauth-token
+```
+
+(copy the printed token before the second line). Without it, runs use the interactive
+`claude auth login`, which is stored per `$USER` and has expired between updates before.
+
 ### Version pinning and the preflight check
 
 screenpipe is the experiment's measuring instrument. Changing it mid-phase makes any shift

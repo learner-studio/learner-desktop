@@ -1,0 +1,52 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Grep",
+      "Glob",
+      "Bash(launchctl list:*)",
+      "Bash(launchctl getenv SCREENPIPE_SKIP_ONBOARDING)",
+      "Bash(launchctl setenv SCREENPIPE_SKIP_ONBOARDING 1)",
+      "Bash(pgrep:*)",
+      "Bash(ps:*)",
+      "Bash(grep:*)",
+      "Bash(tail:*)",
+      "Bash(head:*)",
+      "Bash(ls:*)",
+      "Bash(wc:*)",
+      "Bash(date:*)",
+      "Bash(sleep:*)",
+      "Bash(curl -s -m 5 http://127.0.0.1:18925/health)",
+      "Bash(curl -s -m 5 http://localhost:3030/health)",
+      "Bash(curl -s -m 10 -X POST http://localhost:3030/raw_sql:*)",
+      "Bash(nc -z 127.0.0.1 15432)",
+      "Bash(nc -z 127.0.0.1 3200)",
+      "Bash(open -g -a /Applications/screenpipe.app)",
+      "Bash(./scripts/preflight-capture.sh)",
+      "Bash(./scripts/test.sh)",
+      "Bash(python3 scripts/start-capture-phase.py:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git add config/screenpipe-settings.json)",
+      "Bash(git commit:*)"
+    ],
+    "deny": [
+      "Bash(kill:*)",
+      "Bash(pkill:*)",
+      "Bash(killall:*)",
+      "Bash(rm:*)",
+      "Bash(mv:*)",
+      "Bash(git push:*)",
+      "Edit",
+      "Write",
+      "NotebookEdit",
+      "WebFetch",
+      "WebSearch"
+    ],
+    "additionalDirectories": [
+      "/Users/benpollack/.screenpipe",
+      "/Users/benpollack/.ai-aggregator"
+    ]
+  }
+}
