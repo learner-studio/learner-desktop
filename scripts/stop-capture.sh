@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# stop-capture.sh — clean shutdown of the AI Aggregator + screenpipe capture suite.
+# stop-capture.sh — clean shutdown of Learner Desktop + the screenpipe capture suite.
 #
 # Why this exists: every component is supervised, so `pkill` never works.
-#   * com.benpollack.ai-aggregator-app     KeepAlive=true  -> launchd respawns in ~1s
-#   * com.benpollack.ai-aggregator-watcher KeepAlive=true  -> launchd respawns in ~1s
-#   * com.benpollack.ai-aggregator-tunnel  KeepAlive=true  -> launchd respawns in ~1s
+#   * com.benpollack.learner-desktop       KeepAlive on crash -> launchd respawns it; it
+#                                          runs the SSH tunnel and the transcript watcher
+#                                          as child processes and stops them on quit
 #   * screenpipe (LaunchAgent, RunAtLoad)  -> restarts at next login
 #   * screenpipe's Tauri ExitRequested handler calls api.prevent_exit(), so closing
 #     its windows never quits the process.
@@ -13,17 +13,17 @@
 # The only thing that actually stops a KeepAlive job is removing it from the launchd
 # domain (`launchctl bootout`). `launchctl stop` just triggers a respawn.
 #
-# Data safety: the menu-bar app writes habit trial rows to
-# ~/.ai-aggregator/behavior_experiments.sqlite and pushes them to Postgres over the
+# Data safety: Learner Desktop writes habit trial rows to
+# ~/.ai-aggregator/behavior_experiments.sqlite and pushes them to Postgres over its
 # autossh tunnel by spawning `bun run src/sync-habits.ts`. sync-habits.ts syncs at most
 # 100 rows per invocation, so we loop until the unsynced count reaches zero, and we do
-# it BEFORE tearing down the tunnel (no tunnel = no Postgres = no flush).
+# it BEFORE stopping the app (it takes the tunnel down with it). The app's own
+# shutdown then flushes anything written in between, before stopping its tunnel.
 #
 # Usage:
 #   ./scripts/stop-capture.sh                  # stop everything for this boot
 #   ./scripts/stop-capture.sh --persist        # ...and keep it off across reboot/login
 #   ./scripts/stop-capture.sh --keep-screenpipe
-#   ./scripts/stop-capture.sh --keep-tunnel
 #   ./scripts/stop-capture.sh --no-flush       # skip the habit sync (not recommended)
 #
 set -uo pipefail
@@ -34,22 +34,18 @@ BUN_BIN="${HOME}/.bun/bin/bun"
 DOMAIN="gui/$(id -u)"
 
 AGENT_DIR="${HOME}/Library/LaunchAgents"
-LABEL_APP="com.benpollack.ai-aggregator-app"
-LABEL_WATCHER="com.benpollack.ai-aggregator-watcher"
-LABEL_TUNNEL="com.benpollack.ai-aggregator-tunnel"
+LABEL_APP="com.benpollack.learner-desktop"
 LABEL_SCREENPIPE="screenpipe"
 
 PERSIST=0
 FLUSH=1
 STOP_SCREENPIPE=1
-STOP_TUNNEL=1
 
 for arg in "$@"; do
   case "$arg" in
     --persist)          PERSIST=1 ;;
     --no-flush)         FLUSH=0 ;;
     --keep-screenpipe)  STOP_SCREENPIPE=0 ;;
-    --keep-tunnel)      STOP_TUNNEL=0 ;;
     -h|--help)          sed -n '2,30p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
   esac
@@ -125,45 +121,21 @@ if [ "$FLUSH" -eq 1 ]; then
 fi
 
 ########################################################################
-# 2. Menu-bar app FIRST — it re-arms screenpipe audio every 8 seconds
-#    (updateAllStatuses -> ensureAudioDevicesActive -> POST /audio/device/start)
-#    and re-triggers habit sync. Stopping it first stops it fighting us.
+# 2. Learner Desktop before screenpipe — it re-arms screenpipe audio every
+#    8 seconds (updateAllStatuses -> ensureAudioDevicesActive ->
+#    POST /audio/device/start). Its clean shutdown flushes late habit rows,
+#    then stops its watcher and tunnel.
 ########################################################################
-say "Stopping AI Aggregator menu-bar app"
+say "Stopping Learner Desktop"
 stop_agent "$LABEL_APP"
 # Any stragglers (a hand-launched copy outside launchd) can now be killed for real.
-pkill -f "ai-aggregator-menubar" 2>/dev/null && info "killed leftover ai-aggregator-menubar process"
+pkill -f "MacOS/learner-desktop" 2>/dev/null && info "killed leftover learner-desktop process"
+# A crashed or SIGKILLed app cannot stop its helpers; nothing else would.
+pkill -f "learner-watcher.js" 2>/dev/null && info "killed leftover watcher process"
+pkill -f "autossh.*18925" 2>/dev/null && info "killed leftover autossh process"
 
 ########################################################################
-# 3. Watcher (bun src/cli.ts watch)
-########################################################################
-say "Stopping aggregator watcher"
-stop_agent "$LABEL_WATCHER"
-
-########################################################################
-# 4. Second flush — catches rows written between step 1 and step 2
-########################################################################
-if [ "$FLUSH" -eq 1 ] && [ -x "$BUN_BIN" ]; then
-  late="$(unsynced_count)"
-  if [ "$late" != "0" ] && [ "$late" != "?" ]; then
-    say "Late flush (${late} rows appeared during shutdown)"
-    ( cd "$PROJECT_DIR" && "$BUN_BIN" run src/sync-habits.ts ) 2>&1 | sed 's/^/    /'
-  fi
-fi
-
-########################################################################
-# 5. SSH tunnel LAST of the aggregator agents — the flush needs it
-########################################################################
-if [ "$STOP_TUNNEL" -eq 1 ]; then
-  say "Stopping autossh tunnel"
-  stop_agent "$LABEL_TUNNEL"
-  pkill -f "autossh.*18925" 2>/dev/null && info "killed leftover autossh process"
-else
-  say "Leaving tunnel running (--keep-tunnel)"
-fi
-
-########################################################################
-# 6. screenpipe — graceful stop, then quit, then escalate
+# 3. screenpipe — graceful stop, then quit, then escalate
 #    screenpipe installs NO SIGTERM handler, so a bare SIGTERM skips
 #    process_exit::run_blocking_pre_exit_teardown and can leave the 6 GB
 #    db.sqlite mid-write. Pause capture over the local API first, then send a
@@ -224,7 +196,7 @@ fi
 # Report
 ########################################################################
 say "Final state"
-launchctl list | grep -E "aggregator|screenpipe" || info "no aggregator/screenpipe launchd jobs loaded"
+launchctl list | grep -E "learner-desktop|screenpipe" || info "no learner-desktop/screenpipe launchd jobs loaded"
 info "unsynced habit rows: $(unsynced_count)"
 echo
 info "screenpipe-mcp node processes are MCP servers owned by Claude Desktop / Claude Code."

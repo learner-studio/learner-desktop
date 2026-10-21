@@ -28,9 +28,8 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 STOP = os.path.join(REPO, "scripts", "stop-capture.sh")
 START = os.path.join(REPO, "scripts", "start-capture.sh")
 
-LABELS = ["com.benpollack.ai-aggregator-app",
-          "com.benpollack.ai-aggregator-watcher",
-          "com.benpollack.ai-aggregator-tunnel"]
+# The tunnel and watcher run inside the app now, so the app is the only aggregator job.
+LABELS = ["com.benpollack.learner-desktop"]
 
 GATED = (os.environ.get("AIAGG_HEAVY") == "1"
          and os.environ.get("AIAGG_HEAVY_DESTRUCTIVE") == "1")

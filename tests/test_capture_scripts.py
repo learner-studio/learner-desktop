@@ -198,24 +198,31 @@ class HelpAndArgumentTest(unittest.TestCase):
 
 
 class StopOrderingTest(unittest.TestCase):
-    """The shutdown order is the whole point of the script: the menu-bar app re-arms
-    screenpipe audio every 8s and the habit flush needs the tunnel, so app must go
-    down first and the tunnel last."""
+    """The shutdown order is the whole point of the script: Learner Desktop re-arms
+    screenpipe audio every 8s, so it must go down before screenpipe. It also owns the
+    tunnel and watcher, which it stops itself after its own final habit flush."""
 
     def setUp(self):
         self.jail = Jail()
         self.addCleanup(self.jail.close)
 
-    def test_boots_out_app_then_watcher_then_tunnel(self):
+    def test_boots_out_the_app_then_screenpipe(self):
         _, calls = self.jail.run(STOP)
         boots = [c for c in calls if c.startswith("launchctl bootout")]
         self.assertEqual(
             boots,
-            ["launchctl bootout gui/%d/com.benpollack.ai-aggregator-app" % os.getuid(),
-             "launchctl bootout gui/%d/com.benpollack.ai-aggregator-watcher" % os.getuid(),
-             "launchctl bootout gui/%d/com.benpollack.ai-aggregator-tunnel" % os.getuid(),
+            ["launchctl bootout gui/%d/com.benpollack.learner-desktop" % os.getuid(),
              "launchctl bootout gui/%d/screenpipe" % os.getuid()],
         )
+
+    def test_kills_helpers_a_crashed_app_left_behind(self):
+        # A SIGKILLed app cannot stop its children; nothing else would.
+        _, calls = self.jail.run(STOP)
+        app = indexes(calls, "bootout gui/%d/com.benpollack.learner-desktop" % os.getuid())
+        for helper in ("learner-watcher.js", "autossh"):
+            killed = indexes(calls, helper)
+            self.assertTrue(killed, f"never cleaned up a leftover {helper}")
+            self.assertLess(app[0], killed[0])
 
     def test_does_not_disable_jobs_without_persist(self):
         _, calls = self.jail.run(STOP)
@@ -227,31 +234,26 @@ class StopOrderingTest(unittest.TestCase):
         disabled = {c.split("/")[-1] for c in calls if c.startswith("launchctl disable")}
         self.assertEqual(booted, disabled)
 
-    def test_keep_tunnel_leaves_the_tunnel_alone(self):
-        _, calls = self.jail.run(STOP, "--keep-tunnel")
-        self.assertEqual(indexes(calls, "aggregator-tunnel"), [])
-        self.assertTrue(indexes(calls, "aggregator-app"))
-
     def test_keep_screenpipe_skips_the_whole_screenpipe_teardown(self):
         _, calls = self.jail.run(STOP, "--keep-screenpipe")
         self.assertEqual(indexes(calls, "screenpipe"), [])
-        self.assertTrue(indexes(calls, "aggregator-app"))
+        self.assertTrue(indexes(calls, "learner-desktop"))
 
 
 class StopFlushTest(unittest.TestCase):
     """Habit rows must be pushed to Postgres while the tunnel is still up."""
 
-    def test_flush_runs_before_the_tunnel_is_torn_down(self):
+    def test_flush_runs_before_the_app_takes_the_tunnel_down(self):
         jail = Jail(habit_db=True, unsynced="7")
         self.addCleanup(jail.close)
         _, calls = jail.run(STOP)
 
         counted = indexes(calls, "sqlite3")
-        tunnel = indexes(calls, "aggregator-tunnel")
+        app = indexes(calls, "bootout gui/%d/com.benpollack.learner-desktop" % os.getuid())
         self.assertTrue(counted, "never checked the unsynced row count")
-        self.assertTrue(tunnel)
-        self.assertLess(counted[0], tunnel[0],
-                        "flush must happen before the tunnel goes away")
+        self.assertTrue(app)
+        self.assertLess(counted[0], app[0],
+                        "flush must happen before the app stops its tunnel")
 
     def test_flush_loop_aborts_when_the_count_stops_dropping(self):
         # sqlite3 always reports 7, so no row ever drains. The loop must give up
@@ -306,12 +308,10 @@ class ScreenpipeTeardownTest(unittest.TestCase):
 
 
 class StartOrderingTest(unittest.TestCase):
-    """Startup is the exact reverse: tunnel first (habit sync needs :15432),
-    menu-bar app last (so it does not spend its first ticks reporting failures)."""
+    """Startup is the exact reverse: screenpipe first, then Learner Desktop (so it does
+    not spend its first ticks reporting screenpipe down), which brings up the tunnel."""
 
-    PLISTS = ("com.benpollack.ai-aggregator-tunnel.plist",
-              "com.benpollack.ai-aggregator-watcher.plist",
-              "com.benpollack.ai-aggregator-app.plist",
+    PLISTS = ("com.benpollack.learner-desktop.plist",
               "screenpipe.plist")
 
     def start_jail(self, **kw):
@@ -323,17 +323,22 @@ class StartOrderingTest(unittest.TestCase):
         self.addCleanup(jail.close)
         return jail
 
-    def test_starts_tunnel_then_watcher_then_screenpipe_then_app(self):
+    def test_starts_screenpipe_then_the_app(self):
         jail = self.start_jail(plists=self.PLISTS)
         self.addCleanup(jail.close)
         _, calls = jail.run(START)
 
         order = [c.split("/")[-1].replace(".plist", "")
                  for c in calls if c.startswith("launchctl bootstrap")]
-        self.assertEqual(order, ["com.benpollack.ai-aggregator-tunnel",
-                                 "com.benpollack.ai-aggregator-watcher",
-                                 "screenpipe",
-                                 "com.benpollack.ai-aggregator-app"])
+        self.assertEqual(order, ["screenpipe", "com.benpollack.learner-desktop"])
+
+    def test_waits_for_the_apps_tunnel_after_starting_the_app(self):
+        jail = self.start_jail(plists=self.PLISTS)
+        _, calls = jail.run(START)
+        app = indexes(calls, "bootstrap gui/%d" % os.getuid())[-1]
+        probe = indexes(calls, "nc -z 127.0.0.1 15432")
+        self.assertTrue(probe, "never checked the Postgres forward")
+        self.assertLess(app, probe[0])
 
     def test_enables_each_job_before_bootstrapping_it(self):
         """stop-capture.sh --persist leaves jobs launchctl-disabled; without a
@@ -341,8 +346,7 @@ class StartOrderingTest(unittest.TestCase):
         jail = self.start_jail(plists=self.PLISTS)
         _, calls = jail.run(START)
 
-        for label in ("aggregator-tunnel", "aggregator-watcher",
-                      "aggregator-app", "screenpipe"):
+        for label in ("learner-desktop", "screenpipe"):
             enable = [i for i, c in enumerate(calls)
                       if c.startswith("launchctl enable") and label in c]
             boot = [i for i, c in enumerate(calls)
@@ -360,7 +364,7 @@ class StartOrderingTest(unittest.TestCase):
         jail = self.start_jail(plists=self.PLISTS)
         _, calls = jail.run(START, "--no-screenpipe")
         self.assertEqual(indexes(calls, "screenpipe"), [])
-        self.assertTrue(indexes(calls, "aggregator-app"))
+        self.assertTrue(indexes(calls, "learner-desktop"))
 
     def test_a_missing_plist_warns_and_falls_back_instead_of_crashing(self):
         jail = self.start_jail(plists=())

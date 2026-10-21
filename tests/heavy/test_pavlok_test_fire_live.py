@@ -33,7 +33,7 @@ import unittest
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 SWIFT_SRC = os.path.join(REPO, "menu-bar-app", "main.swift")
-INSTALLED_APP = os.path.expanduser("~/Applications/AI Aggregator.app")
+INSTALLED_APP = os.path.expanduser("~/Applications/Learner Desktop.app")
 APP_LOG = os.path.expanduser("~/.ai-aggregator/logs/menubar.log")
 
 HEAVY = os.environ.get("AIAGG_HEAVY") == "1"

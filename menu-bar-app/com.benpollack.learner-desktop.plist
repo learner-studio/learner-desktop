@@ -3,10 +3,10 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.benpollack.ai-aggregator-app</string>
+    <string>com.benpollack.learner-desktop</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/benpollack/Applications/AI Aggregator.app/Contents/MacOS/ai-aggregator-menubar</string>
+        <string>/Users/benpollack/Applications/Learner Desktop.app/Contents/MacOS/learner-desktop</string>
     </array>
     <key>RunAtLoad</key>
     <true/>

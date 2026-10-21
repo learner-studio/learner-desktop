@@ -13,7 +13,7 @@ import re
 import unittest
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-PLIST = os.path.join(REPO, "menu-bar-app", "com.benpollack.ai-aggregator-app.plist")
+PLIST = os.path.join(REPO, "menu-bar-app", "com.benpollack.learner-desktop.plist")
 SWIFT = os.path.join(REPO, "menu-bar-app", "main.swift")
 BUILD = os.path.join(REPO, "scripts", "build-app.sh")
 
@@ -40,7 +40,7 @@ class LaunchAgentPlistTest(unittest.TestCase):
     def test_launches_the_installed_bundle_binary(self):
         self.assertEqual(
             self.plist["ProgramArguments"],
-            ["/Users/benpollack/Applications/AI Aggregator.app/Contents/MacOS/ai-aggregator-menubar"],
+            ["/Users/benpollack/Applications/Learner Desktop.app/Contents/MacOS/learner-desktop"],
         )
 
     def test_label_matches_what_the_scripts_boot_out(self):
