@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+#
+# SSH tunnel to the OVH box. Learner Desktop runs this from its app bundle and restarts
+# it whenever it exits; run it by hand only when the app is not running.
+#
 set -euo pipefail
 
 PORT=18925
@@ -21,12 +25,14 @@ if lsof -i :$PORT >/dev/null 2>&1; then
   fi
 fi
 
-echo "Starting autossh tunnel on 127.0.0.1:${PORT} -> ${TARGET_HOST}:${PORT}..."
+echo "Starting autossh tunnel to ${TARGET_HOST} (Hindsight :18925, GrowthBook :3200, Postgres :15432)..."
 export AUTOSSH_GATETIME=0
 exec "$AUTOSSH_BIN" -M 0 -N \
   -o "ServerAliveInterval 15" \
   -o "ServerAliveCountMax 3" \
   -o "ExitOnForwardFailure yes" \
   -o "StrictHostKeyChecking accept-new" \
-  -L "${PORT}:127.0.0.1:${PORT}" \
+  -L "18925:127.0.0.1:18925" \
+  -L "3200:127.0.0.1:3200" \
+  -L "15432:127.0.0.1:5432" \
   "$TARGET_HOST"

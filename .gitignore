@@ -10,9 +10,8 @@ logs/
 
 # --- Build artifacts ---------------------------------------------------------
 node_modules/
-menu-bar-app/AI Aggregator.app/
-menu-bar-app/ai-aggregator-menubar
-/main
+menu-bar-app/Learner Desktop.app/
+menu-bar-app/learner-desktop
 
 # --- OS ----------------------------------------------------------------------
 .DS_Store

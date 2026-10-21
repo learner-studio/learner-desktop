@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ServiceManagement
 import SQLite3
 import CoreBluetooth
 
@@ -559,7 +560,7 @@ class PavlokController: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             if self.isReadyForStimulus(type) {
                 timer.invalidate()
                 self.sendStimulus(type: type, value: intensity,
-                                  reason: "Manual test fire from AI Aggregator menu", allowCloud: false, auditID: auditID) { ok, msg in
+                                  reason: "Manual test fire from Learner Desktop menu", allowCloud: false, auditID: auditID) { ok, msg in
                     finish(ok, msg ?? "no response")
                 }
             } else if Date() >= deadline {
@@ -1630,6 +1631,154 @@ func syncHabitsToServer(completion: ((Bool) -> Void)? = nil) {
             fflush(stdout)
             completion?(false)
         }
+    }
+}
+
+// MARK: - Bundled Helpers (SSH tunnel, transcript watcher)
+
+/// A helper process the app runs for as long as it is running. The SSH tunnel and the
+/// transcript watcher used to be separate /bin/bash LaunchAgents, which Login Items lists
+/// as "bash" from an unknown developer; once switched off there, launchd silently stopped
+/// starting them at login (ten days down after the 2026-10-11 reboot). As children of the
+/// app they share its one Login Items entry and start, stop and restart with it.
+final class ManagedHelper {
+    let name: String
+    private let executable: String
+    private let arguments: [String]
+    /// Part of the helper's command line, to recognise an orphan from a crashed run.
+    private let marker: String
+    private let logPath: String
+    private let pidPath: String
+    private var process: Process?
+    private var logHandle: FileHandle?
+    private var stopping = false
+    private var startedAt = Date.distantPast
+    private var restartDelay: TimeInterval = 1
+
+    init(name: String, executable: String, arguments: [String], marker: String) {
+        self.name = name
+        self.executable = executable
+        self.arguments = arguments
+        self.marker = marker
+        let runtimeDir = NSHomeDirectory() + "/.ai-aggregator"
+        logPath = runtimeDir + "/logs/\(name).log"
+        pidPath = runtimeDir + "/\(name).pid"
+    }
+
+    var isRunning: Bool { process?.isRunning ?? false }
+
+    func start() {
+        stopping = false
+        reapOrphan()
+        launch()
+    }
+
+    func restart() {
+        stop()
+        start()
+    }
+
+    private func launch() {
+        guard !stopping, !isRunning else { return }
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: logPath) { fm.createFile(atPath: logPath, contents: nil) }
+        let log = FileHandle(forWritingAtPath: logPath)
+        log?.seekToEndOfFile()
+
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: executable)
+        p.arguments = arguments
+        p.currentDirectoryURL = URL(fileURLWithPath: NSHomeDirectory() + "/.ai-aggregator")
+        if let log = log {
+            p.standardOutput = log
+            p.standardError = log
+        }
+        p.terminationHandler = { [weak self] proc in
+            DispatchQueue.main.async { self?.exited(proc) }
+        }
+        do {
+            try p.run()
+        } catch {
+            // Only a missing or non-executable binary gets here; retrying would not help.
+            try? log?.close()
+            print("[Helpers] Could not start \(name): \(error.localizedDescription)")
+            fflush(stdout)
+            return
+        }
+        process = p
+        logHandle = log
+        startedAt = Date()
+        try? String(p.processIdentifier).write(toFile: pidPath, atomically: true, encoding: .utf8)
+        print("[Helpers] Started \(name) (pid \(p.processIdentifier))")
+        fflush(stdout)
+    }
+
+    private func exited(_ proc: Process) {
+        guard proc === process else { return }
+        process = nil
+        try? logHandle?.close()
+        logHandle = nil
+        try? FileManager.default.removeItem(atPath: pidPath)
+        if stopping { return }
+        // One that stayed up a minute was healthy, so bring it back promptly; one that dies
+        // straight away (no network, port already held) backs off instead of spinning.
+        restartDelay = Date().timeIntervalSince(startedAt) > 60 ? 1 : min(restartDelay * 2, 60)
+        print("[Helpers] \(name) exited (status \(proc.terminationStatus)); restarting in \(Int(restartDelay))s")
+        fflush(stdout)
+        DispatchQueue.main.asyncAfter(deadline: .now() + restartDelay) { [weak self] in
+            self?.launch()
+        }
+    }
+
+    /// SIGTERM, then SIGKILL if it is still running after `timeout`. Blocks the caller.
+    func stop(timeout: TimeInterval = 5) {
+        stopping = true
+        guard let p = process else { return }
+        if p.isRunning {
+            p.terminate()
+            var deadline = Date().addingTimeInterval(timeout)
+            while p.isRunning && Date() < deadline { usleep(100_000) }
+            if p.isRunning {
+                kill(p.processIdentifier, SIGKILL)
+                deadline = Date().addingTimeInterval(2)
+                while p.isRunning && Date() < deadline { usleep(100_000) }
+            }
+            print("[Helpers] Stopped \(name)")
+            fflush(stdout)
+        }
+        process = nil
+        try? logHandle?.close()
+        logHandle = nil
+        try? FileManager.default.removeItem(atPath: pidPath)
+    }
+
+    /// macOS has no parent-death signal, so a crashed or force-killed app leaves its
+    /// helpers running and holding the forwarded ports. The pid file lets the next launch
+    /// stop them first -- but only if that pid still belongs to one (pids are reused).
+    private func reapOrphan() {
+        defer { try? FileManager.default.removeItem(atPath: pidPath) }
+        guard let text = try? String(contentsOfFile: pidPath, encoding: .utf8),
+              let pid = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 1,
+              let command = ManagedHelper.commandLine(of: pid), command.contains(marker) else { return }
+        print("[Helpers] Stopping \(name) left over from a previous run (pid \(pid))")
+        fflush(stdout)
+        kill(pid, SIGTERM)
+        let deadline = Date().addingTimeInterval(3)
+        while kill(pid, 0) == 0 && Date() < deadline { usleep(100_000) }
+        if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
+    }
+
+    private static func commandLine(of pid: pid_t) -> String? {
+        let ps = Process()
+        ps.executableURL = URL(fileURLWithPath: "/bin/ps")
+        ps.arguments = ["-p", String(pid), "-o", "command="]
+        let out = Pipe()
+        ps.standardOutput = out
+        ps.standardError = FileHandle.nullDevice
+        guard (try? ps.run()) != nil else { return nil }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        ps.waitUntilExit()
+        return ps.terminationStatus == 0 ? String(data: data, encoding: .utf8) : nil
     }
 }
 
@@ -2975,6 +3124,23 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var hindsightSyncedCount: String = "--"
     var hindsightBank: String = "learning-transcript-archive-v1"
 
+    /// The app's own LaunchAgent. If it is switched off in System Settings -> Login Items,
+    /// launchd skips it at login -- and the tunnel and watcher with it -- so a manual start
+    /// does not survive the next reboot. Only the owner can re-allow it there.
+    let appAgentPlist = NSHomeDirectory() + "/Library/LaunchAgents/com.benpollack.learner-desktop.plist"
+    var needsLoginApproval = false
+
+    // Helpers the app runs itself, from its own bundle (see ManagedHelper).
+    lazy var tunnel = ManagedHelper(
+        name: "tunnel", executable: "/bin/bash",
+        arguments: [URL(fileURLWithPath: Bundle.main.resourcePath ?? "").appendingPathComponent("tunnel.sh").path],
+        marker: "18925:127.0.0.1:18925")
+    lazy var watcher = ManagedHelper(
+        name: "watcher", executable: "/Users/benpollack/.bun/bin/bun",
+        arguments: [URL(fileURLWithPath: Bundle.main.resourcePath ?? "").appendingPathComponent("learner-watcher.js").path,
+                    "watch", "--no-initial-sync"],
+        marker: "learner-watcher.js")
+
     /// launchctl bootout / kickstart -k and stop-capture.sh deliver SIGTERM. Route it
     /// through NSApplication.terminate so it takes the same clean path as menu Quit
     /// instead of killing the process mid-write.
@@ -3019,12 +3185,16 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             button.title = "🧠 🟢 ..."
-            button.toolTip = "AI Capture Suite & Logger\nScreenpipe, AI Vault & Hindsight"
+            button.toolTip = "Learner Desktop\nScreenpipe, AI Vault & Hindsight"
         }
 
         statusMenu = NSMenu()
         statusMenu.delegate = self
         statusItem.menu = statusMenu
+
+        // Tunnel first: the watcher's startup health check goes through it.
+        tunnel.start()
+        watcher.start()
 
         rebuildMenu()
         updateAllStatuses()
@@ -3063,9 +3233,9 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusMenu.removeAllItems()
 
         // --- Header ---
-        let header = NSMenuItem(title: "AI Capture Suite & Logger", action: nil, keyEquivalent: "")
+        let header = NSMenuItem(title: "Learner Desktop", action: nil, keyEquivalent: "")
         header.attributedTitle = NSAttributedString(
-            string: "AI Capture Suite & Logger",
+            string: "Learner Desktop",
             attributes: [.font: NSFont.boldSystemFont(ofSize: 13)]
         )
         statusMenu.addItem(header)
@@ -3332,9 +3502,19 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         syncNow.target = self
         statusMenu.addItem(syncNow)
 
+        let helpers = NSMenuItem(title: "   └─ Tunnel: \(tunnel.isRunning ? "🟢 running" : "🔴 down") | Watcher: \(watcher.isRunning ? "🟢 running" : "🔴 down")", action: nil, keyEquivalent: "")
+        helpers.isEnabled = false
+        statusMenu.addItem(helpers)
+
         let restartTunnel = NSMenuItem(title: "   Restart Tunnel & Watcher", action: #selector(restartAggregatorServices), keyEquivalent: "")
         restartTunnel.target = self
         statusMenu.addItem(restartTunnel)
+
+        if needsLoginApproval {
+            let allow = NSMenuItem(title: "   ⚠️ Won't start at login: allow Learner Desktop in Login Items...", action: #selector(openLoginItemsSettings), keyEquivalent: "")
+            allow.target = self
+            statusMenu.addItem(allow)
+        }
 
         statusMenu.addItem(NSMenuItem.separator())
 
@@ -3400,7 +3580,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         statusMenu.addItem(NSMenuItem.separator())
 
-        let quitItem = NSMenuItem(title: "Quit AI Aggregator", action: #selector(quitApp), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: "Quit Learner Desktop", action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
         statusMenu.addItem(quitItem)
     }
@@ -3410,6 +3590,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateVaultCount()
         updateScreenpipeStatus()
         updateHindsightStatus()
+        updateLoginItemApproval()
         enforceMicAutoGainGuard()
         if HabitEventLogger.shared.getUnsyncedCount() > 0 {
             syncHabitsToServer(completion: nil)
@@ -3525,6 +3706,25 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         task.resume()
     }
 
+    func updateLoginItemApproval() {
+        let plist = URL(fileURLWithPath: appAgentPlist)
+        // statusForLegacyPlist is a synchronous XPC round trip; keep it off the main thread.
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let blocked = SMAppService.statusForLegacyPlist(at: plist) == .requiresApproval
+            DispatchQueue.main.async {
+                guard let self = self, blocked != self.needsLoginApproval else { return }
+                if blocked {
+                    print("[LoginItem] Learner Desktop is switched off in Login Items; it will not start at login.")
+                } else {
+                    print("[LoginItem] Learner Desktop is allowed in Login Items; it will start at login.")
+                }
+                fflush(stdout)
+                self.needsLoginApproval = blocked
+                self.updateTrayButton()
+            }
+        }
+    }
+
     func updateTrayButton() {
         guard let button = statusItem?.button else { return }
 
@@ -3538,21 +3738,24 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else if talkMonitor.isWarningActive {
             baseTitle = "🗣️ ⚠️ \(talkMonitor.formattedDuration)"
             button.toolTip = "Talk-Time Warning: Continuous speech for \(talkMonitor.formattedDuration)\(callHint)\(pavlokHint)"
+        } else if needsLoginApproval {
+            baseTitle = "🧠 🔴 LOGIN"
+            button.toolTip = "Learner Desktop\nSwitched off in Login Items: it will not start at login, and neither will the tunnel or watcher\(pavlokHint)"
         } else if !isHindsightHealthy {
             baseTitle = "🧠 🔴 ERR"
-            button.toolTip = "AI Capture Suite & Logger\nHindsight tunnel disconnected\(pavlokHint)"
+            button.toolTip = "Learner Desktop\nHindsight tunnel disconnected\(pavlokHint)"
         } else if !isScreenpipeHealthy && !isScreenpipeDegraded {
             baseTitle = "🧠 🔴 SP"
-            button.toolTip = "AI Capture Suite & Logger\nScreenpipe stopped\(pavlokHint)"
+            button.toolTip = "Learner Desktop\nScreenpipe stopped\(pavlokHint)"
         } else if isScreenpipeDegraded {
             baseTitle = "🧠 🟡 \(vaultCount)"
-            button.toolTip = "AI Capture Suite & Logger\nScreenpipe idle/degraded\(pavlokHint)"
+            button.toolTip = "Learner Desktop\nScreenpipe idle/degraded\(pavlokHint)"
         } else if let call = talkMonitor.activeCallApp {
             baseTitle = "🗣️ 📞 \(vaultCount)"
             button.toolTip = "Active Call: \(call)\nSpeaking Coach monitoring talk-time limits\(pavlokHint)"
         } else {
             baseTitle = "🧠 🟢 \(vaultCount)"
-            button.toolTip = "AI Capture Suite & Logger\nAll systems healthy (\(vaultCount) chats vaulted)\(pavlokHint)"
+            button.toolTip = "Learner Desktop\nAll systems healthy (\(vaultCount) chats vaulted)\(pavlokHint)"
         }
 
         // Cute Dog Stick Figure Bluetooth Connection Indicator (rendered inline via NSTextAttachment)
@@ -3862,12 +4065,15 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func restartAggregatorServices() {
-        let cmd = "launchctl unload ~/Library/LaunchAgents/com.benpollack.ai-aggregator-tunnel.plist 2>/dev/null; launchctl load -w ~/Library/LaunchAgents/com.benpollack.ai-aggregator-tunnel.plist; launchctl unload ~/Library/LaunchAgents/com.benpollack.ai-aggregator-watcher.plist 2>/dev/null; launchctl load -w ~/Library/LaunchAgents/com.benpollack.ai-aggregator-watcher.plist"
-        runShell(cmd) { [weak self] in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                self?.updateHindsightStatus()
-            }
+        tunnel.restart()
+        watcher.restart()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            self?.updateHindsightStatus()
         }
+    }
+
+    @objc func openLoginItemsSettings() {
+        SMAppService.openSystemSettingsLoginItems()
     }
 
     @objc func openVaultFolder() {
@@ -3954,6 +4160,12 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         print("[Shutdown] Unsynced turns remaining: \(logger.getUnsyncedCount())")
 
         logger.close()
+
+        // Only now: the flush above needed the tunnel.
+        print("[Shutdown] Stopping watcher and tunnel...")
+        fflush(stdout)
+        watcher.stop()
+        tunnel.stop()
         print("[Shutdown] Clean shutdown complete.")
         fflush(stdout)
         return .terminateNow

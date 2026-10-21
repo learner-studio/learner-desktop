@@ -2,34 +2,47 @@
 set -euo pipefail
 
 PROJECT_DIR="/Users/benpollack/Documents/AI aggregator logger project"
-APP_NAME="AI Aggregator.app"
+APP_NAME="Learner Desktop.app"
 BUNDLE_DIR="${PROJECT_DIR}/menu-bar-app/${APP_NAME}"
 TARGET_APP="/Users/benpollack/Applications/${APP_NAME}"
+BUN_BIN="${HOME}/.bun/bin/bun"
 
 echo "Compiling Swift menu bar binary..."
-swiftc -O -lsqlite3 "${PROJECT_DIR}/menu-bar-app/main.swift" -o "${PROJECT_DIR}/menu-bar-app/ai-aggregator-menubar"
+swiftc -O -lsqlite3 "${PROJECT_DIR}/menu-bar-app/main.swift" -o "${PROJECT_DIR}/menu-bar-app/learner-desktop"
 
 echo "Creating Application bundle structure..."
 rm -rf "${BUNDLE_DIR}"
 mkdir -p "${BUNDLE_DIR}/Contents/MacOS"
 mkdir -p "${BUNDLE_DIR}/Contents/Resources"
 
-cp "${PROJECT_DIR}/menu-bar-app/ai-aggregator-menubar" "${BUNDLE_DIR}/Contents/MacOS/"
-chmod +x "${BUNDLE_DIR}/Contents/MacOS/ai-aggregator-menubar"
+cp "${PROJECT_DIR}/menu-bar-app/learner-desktop" "${BUNDLE_DIR}/Contents/MacOS/"
+chmod +x "${BUNDLE_DIR}/Contents/MacOS/learner-desktop"
 
+# The app runs the SSH tunnel and the transcript watcher itself, from its own bundle.
+# They used to be separate /bin/bash LaunchAgents, which Login Items lists as "bash"
+# from an unknown developer -- and once switched off there they silently stopped
+# starting at login. The watcher is compiled to one self-contained file so the app
+# never runs code out of ~/Documents.
+echo "Bundling the tunnel and transcript watcher..."
+cp "${PROJECT_DIR}/scripts/tunnel.sh" "${BUNDLE_DIR}/Contents/Resources/tunnel.sh"
+chmod +x "${BUNDLE_DIR}/Contents/Resources/tunnel.sh"
+"${BUN_BIN}" build "${PROJECT_DIR}/src/cli.ts" --target=bun --outfile "${BUNDLE_DIR}/Contents/Resources/learner-watcher.js"
+
+# CFBundleIdentifier deliberately keeps its pre-rename value: TCC grants (Bluetooth) and
+# the saved Pavlok settings in UserDefaults are keyed to it.
 cat << 'EOF' > "${BUNDLE_DIR}/Contents/Info.plist"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>
-    <string>ai-aggregator-menubar</string>
+    <string>learner-desktop</string>
     <key>CFBundleIdentifier</key>
     <string>com.benpollack.ai-aggregator-menubar</string>
     <key>CFBundleName</key>
-    <string>AI Aggregator</string>
+    <string>Learner Desktop</string>
     <key>CFBundleDisplayName</key>
-    <string>AI Aggregator</string>
+    <string>Learner Desktop</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -41,9 +54,9 @@ cat << 'EOF' > "${BUNDLE_DIR}/Contents/Info.plist"
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSBluetoothAlwaysUsageDescription</key>
-    <string>AI Aggregator connects directly to your Pavlok wearable wristband over Bluetooth Low Energy for instant, sub-15ms physical speech coaching feedback.</string>
+    <string>Learner Desktop connects directly to your Pavlok wearable wristband over Bluetooth Low Energy for instant, sub-15ms physical speech coaching feedback.</string>
     <key>NSBluetoothPeripheralUsageDescription</key>
-    <string>AI Aggregator communicates with your Pavlok wearable wristband over Bluetooth Low Energy for immediate haptic and shock speech coaching.</string>
+    <string>Learner Desktop communicates with your Pavlok wearable wristband over Bluetooth Low Energy for immediate haptic and shock speech coaching.</string>
 </dict>
 </plist>
 EOF
@@ -79,7 +92,7 @@ else
   echo "  ! no .env in project - habit sync will have no HABITS_PG_URL" >&2
 fi
 
-AGENT_LABEL="com.benpollack.ai-aggregator-app"
+AGENT_LABEL="com.benpollack.learner-desktop"
 AGENT_SRC="${PROJECT_DIR}/menu-bar-app/${AGENT_LABEL}.plist"
 AGENT_DST="${HOME}/Library/LaunchAgents/${AGENT_LABEL}.plist"
 
@@ -87,7 +100,7 @@ if cmp -s "${AGENT_SRC}" "${AGENT_DST}" 2>/dev/null; then
   # Plist unchanged: restart in place. kickstart -k delivers SIGTERM, which the app
   # handles as a clean shutdown, and does not re-register the login item -- so macOS
   # does not show the "App Background Activity" notification.
-  echo "Restarting AI Aggregator (LaunchAgent unchanged)..."
+  echo "Restarting Learner Desktop (LaunchAgent unchanged)..."
   launchctl kickstart -k "gui/$(id -u)/${AGENT_LABEL}" 2>/dev/null \
     || launchctl bootstrap "gui/$(id -u)" "${AGENT_DST}"
 else

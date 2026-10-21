@@ -1,6 +1,6 @@
-# AI Aggregator — Monologue Habit Experiment
+# Learner Desktop — Monologue Habit Experiment
 
-A self-experiment in interrupting monologues on calls. A macOS menu-bar app watches
+A self-experiment in interrupting monologues on calls. Learner Desktop, a macOS menu-bar app, watches
 [screenpipe](https://github.com/mediar-ai/screenpipe)'s live transcription, tracks how long
 the owner has been talking without yielding, and delivers a stimulus at 30 s and 60 s under a
 randomised treatment arm. Historical Read AI transcripts supply the pre-treatment baseline.
@@ -12,7 +12,7 @@ screenpipe (localhost:3030)          Read AI .docx exports
    audio_transcriptions                       │
         │ /raw_sql poll                       │ parse_readai_transcripts.py
         ▼                                     ▼
-  menu-bar app (Swift)                data/historical_calls_export.json
+  Learner Desktop (Swift)             data/historical_calls_export.json
    TalkTimeMonitor                            │ ingest_to_postgres.ts
         │ logTurn()                           │
         ▼                                     │
@@ -41,14 +41,28 @@ comparable on the same basis.
 ```bash
 bun install
 cp .env.example .env   # then fill in HABITS_PG_URL
-./scripts/tunnel.sh    # SSH tunnel to Postgres
+./scripts/build-app.sh # build and install Learner Desktop
 ```
 
-Rebuild and install the menu-bar app:
+`build-app.sh` installs `~/Applications/Learner Desktop.app` and its LaunchAgent
+(`com.benpollack.learner-desktop`), then restarts it. Run it again after any change.
 
-```bash
-./scripts/build-app.sh
-```
+### One app, one login item
+
+Learner Desktop runs the SSH tunnel (`scripts/tunnel.sh`: Hindsight :18925, GrowthBook
+:3200, Postgres :15432) and the transcript watcher (`src/cli.ts watch`, compiled to one
+file) as child processes from its own bundle. It restarts either one if it exits, and
+stops both on quit, after its final habit flush. Their output goes to
+`~/.ai-aggregator/logs/tunnel.log` and `watcher.log`; the app's own to `menubar.log`.
+
+They used to be two separate `/bin/bash` LaunchAgents. macOS lists those in System
+Settings → Login Items as "bash" from an unknown developer, and once they were switched
+off there, launchd silently stopped starting them at login: both stayed down for ten days
+after the 2026-10-11 reboot. Now the app's single entry is all that has to be allowed,
+and the tray shows `🧠 🔴 LOGIN` if it is not.
+
+The bundle identifier is still `com.benpollack.ai-aggregator-menubar`: the Bluetooth
+permission and the saved Pavlok settings are keyed to it, so renaming it would reset both.
 
 Re-import the historical baseline (parse, then ingest):
 

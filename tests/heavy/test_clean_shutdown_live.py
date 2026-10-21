@@ -17,9 +17,9 @@ import subprocess
 import time
 import unittest
 
-LABEL = "com.benpollack.ai-aggregator-app"
+LABEL = "com.benpollack.learner-desktop"
 DOMAIN = f"gui/{os.getuid()}"
-BINARY = "ai-aggregator-menubar"
+BINARY = "learner-desktop"
 LOG = os.path.expanduser("~/.ai-aggregator/logs/menubar.log")
 DB = os.path.expanduser("~/.ai-aggregator/behavior_experiments.sqlite")
 
