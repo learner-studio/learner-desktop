@@ -119,6 +119,18 @@ Transcription comes from screenpipe, vendored in-tree at `vendor/screenpipe`
   Filter those out of analysis.
 - Settings this experiment depends on are captured in `config/screenpipe-settings.json`.
 
+### Sign-in check
+
+Since 2.7.34 screenpipe will not start recording or its API until someone signs in to a
+screenpipe account, unless `SCREENPIPE_SKIP_ONBOARDING=1` is in its environment.
+Learner Desktop sets that in launchd's user environment at launch, and relaunches a
+screenpipe that started without it (at login it can start first). This replaced the
+separate `com.screenpipe.env` LaunchAgent, which macOS switched off in Login Items:
+after the 2026-10-11 reboot screenpipe sat signed out and recorded nothing for ten days.
+
+In 2.7.116, Quit does not exit screenpipe while its server is running: it stops capture
+and keeps serving saved history ("search-only"). Opening the app again resumes recording.
+
 ### Version pinning and the preflight check
 
 screenpipe is the experiment's measuring instrument. Changing it mid-phase makes any shift
