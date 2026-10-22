@@ -55,6 +55,20 @@ say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 info() { printf '    %s\n' "$*"; }
 warn() { printf '    \033[33m! %s\033[0m\n' "$*"; }
 
+# "on" if screenpipe's API reports any active capture, "off" if it reports none,
+# "unknown" if the API does not answer.
+capture_state() {
+  curl -s --max-time 3 http://127.0.0.1:3030/health 2>/dev/null | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except ValueError:
+    print("unknown")
+    sys.exit()
+audio = (d.get("capture_status") or {}).get("active_audio_devices") or 0
+print("on" if audio > 0 or d.get("frame_status") == "ok" else "off")'
+}
+
 unsynced_count() {
   [ -f "$HABIT_DB" ] || { echo 0; return; }
   sqlite3 "$HABIT_DB" \
@@ -166,11 +180,21 @@ if [ "$STOP_SCREENPIPE" -eq 1 ]; then
     done
   fi
 
+  # Since 2.7.116 a Quit while the server runs does not exit: capture stops and the
+  # process stays to serve saved history ("search-only"). That is stopped as far as
+  # this script is concerned, so it is left alone. Signals are only for a quit that
+  # did not take: capture still on, or an API that cannot say.
   if pgrep -f "screenpipe.app/Contents/MacOS/screenpipe-app" >/dev/null 2>&1; then
-    warn "still running after 30s — escalating to SIGTERM"
-    pkill -TERM -f "screenpipe.app/Contents/MacOS/screenpipe-app" 2>/dev/null
-    sleep 5
-    pkill -KILL -f "screenpipe.app/Contents/MacOS/screenpipe-app" 2>/dev/null && warn "SIGKILLed screenpipe-app"
+    state="$(capture_state)"
+    if [ "$state" = "off" ]; then
+      info "screenpipe stayed open in search-only mode: capture is off, it only serves saved history"
+      info "(it exits at logout; opening it, or ./scripts/start-capture.sh, resumes recording)"
+    else
+      warn "still running after 30s with capture ${state} — escalating to SIGTERM"
+      pkill -TERM -f "screenpipe.app/Contents/MacOS/screenpipe-app" 2>/dev/null
+      sleep 5
+      pkill -KILL -f "screenpipe.app/Contents/MacOS/screenpipe-app" 2>/dev/null && warn "SIGKILLed screenpipe-app"
+    fi
   else
     info "screenpipe-app is stopped"
   fi
