@@ -80,8 +80,7 @@ let observe = Timer.scheduledTimer(withTimeInterval: 0.01, repeats: true) { _ in
         fullAt = Date().timeIntervalSince1970
         let values: [String: Any] = ["gate_unix": gateAt as Any? ?? NSNull(),
             "visible_unix": visibleAt as Any? ?? NSNull(), "fully_visible_unix": fullAt!,
-            "streak_at_fire": streakAtFire as Any? ?? NSNull(),
-            "isSimulating": monitor.isSimulating]
+            "streak_at_fire": streakAtFire as Any? ?? NSNull()]
         let data = try! JSONSerialization.data(withJSONObject: values, options: [.prettyPrinted,.sortedKeys])
         try! data.write(to: URL(fileURLWithPath: evidence + "/panel-timing.json"))
         print("[AudioE2E] VISIBLE: \(values)")
@@ -255,7 +254,6 @@ class CoachAudioLatency(unittest.TestCase):
         self.assertFalse(failures, failures)
         self.assertEqual(result.returncode, 0, (evidence / "menubar.log").read_text()[-2000:])
         panel = json.loads((evidence / "panel-timing.json").read_text())
-        self.assertFalse(panel["isSimulating"])
         # Find the last ingested row preceding the first threshold crossing in logs.
         before = (evidence / "menubar.log").read_text().split("Stimulus trigger (30s warning)")[0]
         trigger_id = int(re.findall(r"Transcription \[(\d+)\]", before)[-1])

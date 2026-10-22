@@ -30,7 +30,7 @@ class TranscriptWatermarkTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         src = read(SWIFT)
-        cls.tick = method(src, "func tick()")
+        cls.tick = method(src, "func tick() {\n        updatePresentation()")
         cls.live = method(src, "func checkLiveMeetingSegments()")
 
     def assert_initialises_from_max_id(self, body, table):

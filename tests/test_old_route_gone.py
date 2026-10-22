@@ -4,7 +4,7 @@
 The app used to write habit rows straight into Postgres (`habits`, via a :15432 forward
 and a `habits_writer` password in .env) and conversations into Hindsight (:18925). Since
 2026-10-22 everything goes to learner-server's HTTPS RPC API; the server also revoked
-that database role. This fails if any of it creeps back outside vendor/.
+that database role. This fails if any of it creeps back.
 """
 
 import os
@@ -19,12 +19,12 @@ ALLOWED = {"tests/test_old_route_gone.py"}
 
 
 class OldRouteGoneTest(unittest.TestCase):
-    def test_no_tunnel_database_route_outside_vendor(self):
+    def test_no_tunnel_database_route(self):
         files = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard"],
                                cwd=REPO, capture_output=True, text=True, check=True).stdout.split()
         hits = []
         for f in files:
-            if f.startswith("vendor/") or f in ALLOWED or not os.path.isfile(os.path.join(REPO, f)):
+            if f in ALLOWED or not os.path.isfile(os.path.join(REPO, f)):
                 continue
             try:
                 with open(os.path.join(REPO, f), encoding="utf-8") as fh:

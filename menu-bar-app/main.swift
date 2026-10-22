@@ -4,6 +4,80 @@ import ServiceManagement
 import SQLite3
 import CoreBluetooth
 
+// MARK: - Logging
+
+/// Every `print` in the app goes through here (it shadows Swift.print in this module).
+/// Lines get a timestamp, and a line that repeats within 10 minutes (numbers ignored) is
+/// held back and counted, so a retry loop -- a Bluetooth band out of range, the mic gain
+/// guard -- costs one line per 10 minutes instead of thousands. The app's own log file
+/// is rotated by AppLog.
+func print(_ items: Any..., separator: String = " ", terminator: String = "\n") {
+    AppLog.write(items.map { "\($0)" }.joined(separator: separator), terminator: terminator)
+}
+
+enum AppLog {
+    static let path = NSHomeDirectory() + "/.ai-aggregator/logs/menubar.log"
+    static let maxBytes: UInt64 = 10_000_000
+    static let repeatWindow: TimeInterval = 600
+
+    private static let lock = NSLock()
+    private static var lastSeen: [String: (at: Date, held: Int)] = [:]
+    private static var writes = 0
+    private static let stamp: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return f
+    }()
+
+    /// Send stdout/stderr to the log file (launchd points them there too; this lets the app
+    /// rotate it). Not used by the one-shot CLI modes, which print to the terminal.
+    static func attachToFile() {
+        rotateIfNeeded(force: false)
+        freopen(path, "a", stdout)
+        freopen(path, "a", stderr)
+    }
+
+    static func write(_ line: String, terminator: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        let now = Date()
+        let key = line.replacingOccurrences(of: "[0-9]+", with: "#", options: .regularExpression)
+        var text = line
+        if let seen = lastSeen[key], now.timeIntervalSince(seen.at) < repeatWindow {
+            lastSeen[key] = (seen.at, seen.held + 1)
+            return
+        } else if let seen = lastSeen[key], seen.held > 0 {
+            text += "  [repeated \(seen.held)x in the previous \(Int(repeatWindow / 60)) min]"
+        }
+        if lastSeen.count > 2000 { lastSeen.removeAll() }
+        lastSeen[key] = (now, 0)
+        Swift.print("\(stamp.string(from: now)) \(text)", terminator: terminator)
+        writes += 1
+        if writes % 500 == 0 { rotateIfNeeded(force: false) }
+    }
+
+    /// Keep one previous file: menubar.log -> menubar.1.log once it passes maxBytes.
+    static func rotateIfNeeded(force: Bool) {
+        let size = (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? UInt64) ?? 0
+        guard force || size > maxBytes else { return }
+        let old = path.replacingOccurrences(of: ".log", with: ".1.log")
+        try? FileManager.default.removeItem(atPath: old)
+        try? FileManager.default.moveItem(atPath: path, toPath: old)
+        fflush(stdout)
+        freopen(path, "a", stdout)
+        freopen(path, "a", stderr)
+    }
+
+    /// Helper logs (tunnel, watcher): rotate before each launch.
+    static func rotate(helperLog: String, maxBytes: UInt64 = 5_000_000) {
+        let size = (try? FileManager.default.attributesOfItem(atPath: helperLog)[.size] as? UInt64) ?? 0
+        guard size > maxBytes else { return }
+        let old = helperLog.replacingOccurrences(of: ".log", with: ".1.log")
+        try? FileManager.default.removeItem(atPath: old)
+        try? FileManager.default.moveItem(atPath: helperLog, toPath: old)
+    }
+}
+
 // MARK: - Screenshare-Invisible Floating Monologue Toast Alert
 class MonologueToastController: NSObject {
     static let shared = MonologueToastController()
@@ -162,7 +236,6 @@ class MonologueToastController: NSObject {
 
     @objc func dismiss() {
         hide()
-        TalkTimeMonitor.shared.stopSimulation()
     }
 
     func hide() {
@@ -1899,6 +1972,8 @@ final class ManagedHelper {
         guard !stopping, !isRunning else { return }
         let fm = FileManager.default
         if !fm.fileExists(atPath: logPath) { fm.createFile(atPath: logPath, contents: nil) }
+        AppLog.rotate(helperLog: logPath)
+        if !fm.fileExists(atPath: logPath) { fm.createFile(atPath: logPath, contents: nil) }
         let log = FileHandle(forWritingAtPath: logPath)
         log?.seekToEndOfFile()
 
@@ -1999,6 +2074,112 @@ func processCommandLine(_ pid: pid_t, includeEnvironment: Bool = false) -> Strin
     let data = out.fileHandleForReading.readDataToEndOfFile()
     ps.waitUntilExit()
     return ps.terminationStatus == 0 ? String(data: data, encoding: .utf8) : nil
+}
+
+// MARK: - AI Vault export
+
+/// Pulls new ChatGPT and Claude conversations into ~/ai-vault-data with the `ai-vault`
+/// CLI, where the transcript watcher picks them up and archives them on learner-server.
+/// Nothing scheduled this before, so nothing new was exported after 2026-09-07. ai-vault
+/// logs in with browser cookies that expire; that shows up as "Authentication failed",
+/// and the menu then says which login to refresh (`ai-vault setup --provider <name>`).
+final class VaultExport {
+    static let shared = VaultExport()
+    static let interval: TimeInterval = 6 * 3600
+    static let perProviderTimeout: TimeInterval = 30 * 60
+    static let providers = ["claude", "chatgpt"]
+
+    private let work = DispatchQueue(label: "com.benpollack.vault-export", qos: .utility)
+    private let logPath = NSHomeDirectory() + "/.ai-aggregator/logs/vault-export.log"
+    private var nextRun = Date().addingTimeInterval(120)
+    private var running = false
+
+    private(set) var expiredLogins: Set<String> = []
+    private(set) var lastRun: Date?
+    private(set) var lastSummary = "not run yet"
+
+    /// Called on the 8 s status poll.
+    func tick() {
+        guard !running, Date() >= nextRun else { return }
+        runNow()
+    }
+
+    func runNow() {
+        guard !running else { return }
+        running = true
+        nextRun = Date().addingTimeInterval(VaultExport.interval)
+        work.async {
+            var expired: Set<String> = []
+            var notes: [String] = []
+            for provider in VaultExport.providers {
+                let (status, output) = self.backup(provider)
+                if output.range(of: "Authentication failed|cookies appear to be expired", options: .regularExpression) != nil {
+                    expired.insert(provider)
+                    notes.append("\(provider): login expired")
+                } else if status == nil {
+                    notes.append("\(provider): timed out")
+                } else {
+                    notes.append("\(provider): \(status == 0 ? "ok" : "exit \(status!)")")
+                }
+            }
+            DispatchQueue.main.async {
+                self.expiredLogins = expired
+                self.lastRun = Date()
+                self.lastSummary = notes.joined(separator: ", ")
+                self.running = false
+                print("[VaultExport] \(self.lastSummary)")
+            }
+        }
+    }
+
+    /// Runs one provider's backup, appending its output to vault-export.log. Returns the
+    /// exit status (nil on timeout) and the output, for the auth check.
+    private func backup(_ provider: String) -> (Int32?, String) {
+        guard let cli = VaultExport.cliPath() else { return (127, "ai-vault CLI not found") }
+        AppLog.rotate(helperLog: logPath)
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: cli)
+        var args = ["backup", provider, "--only-new", "--skip-media", "-y"]
+        if provider == "chatgpt" { args.append("--random-delay") }
+        p.arguments = args
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = (cli as NSString).deletingLastPathComponent + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+        p.environment = env
+        p.standardInput = FileHandle.nullDevice
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = out
+        var data = Data()
+        let reader = DispatchQueue(label: "vault-export-read")
+        out.fileHandleForReading.readabilityHandler = { h in
+            let chunk = h.availableData
+            reader.sync { data.append(chunk) }
+        }
+        guard (try? p.run()) != nil else { return (126, "could not start ai-vault") }
+        let deadline = Date().addingTimeInterval(VaultExport.perProviderTimeout)
+        while p.isRunning && Date() < deadline { usleep(500_000) }
+        let timedOut = p.isRunning
+        if timedOut { p.terminate() }
+        p.waitUntilExit()
+        out.fileHandleForReading.readabilityHandler = nil
+        let text = reader.sync { String(data: data, encoding: .utf8) ?? "" }
+        if let h = FileHandle(forWritingAtPath: logPath) ?? {
+            FileManager.default.createFile(atPath: logPath, contents: nil)
+            return FileHandle(forWritingAtPath: logPath)
+        }() {
+            h.seekToEndOfFile()
+            h.write(Data("=== \(Date()) \(provider)\(timedOut ? " (timed out)" : "")\n\(text)\n".utf8))
+            try? h.close()
+        }
+        return (timedOut ? nil : p.terminationStatus, text)
+    }
+
+    /// ai-vault is installed under nvm; pick the newest node version that has it.
+    static func cliPath() -> String? {
+        let root = NSHomeDirectory() + "/.nvm/versions/node"
+        let versions = ((try? FileManager.default.contentsOfDirectory(atPath: root)) ?? []).sorted().reversed()
+        return versions.map { "\(root)/\($0)/bin/ai-vault" }.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
 }
 
 // MARK: - screenpipe Update Check
@@ -2308,13 +2489,10 @@ class TalkTimeMonitor: NSObject {
         return fractionalDateFormatter.date(from: value) ?? plainDateFormatter.date(from: value)
     }
 
-    var isSimulating: Bool = false
-    private var simulatedSeconds: TimeInterval = 0.0
-
     var onStreakUpdated: ((TimeInterval) -> Void)?
 
     var canAlert: Bool {
-        return isSimulating || !alertOnlyDuringCalls || (activeCallApp != nil)
+        return !alertOnlyDuringCalls || (activeCallApp != nil)
     }
 
     /// The visual toast is the common floor across every arm, including baseline. The
@@ -2562,35 +2740,6 @@ class TalkTimeMonitor: NSObject {
     }
 
     func tick() {
-        if isSimulating {
-            currentStreak = simulatedSeconds
-            simulatedSeconds += 1.0
-            if currentStreak >= warningThreshold && armShowsToast {
-                noteToastShown()
-                MonologueToastController.shared.show(currentStreak, callApp: "Google Meet (Simulated)")
-            } else {
-                MonologueToastController.shared.hide()
-            }
-            if canAlert {
-                if currentStreak >= warningThreshold && !hasDeliveredStimulusAt30s {
-                    hasDeliveredStimulusAt30s = true
-                    hasWarnedPavlokThisMonologue = true
-                    warningFiredWallClock = Date()
-                    warningFiredStreakSec = currentStreak
-                    deliverStimulusForThreshold(isWarning: true)
-                }
-                if currentStreak >= alertThreshold && !hasDeliveredStimulusAt60s {
-                    hasDeliveredStimulusAt60s = true
-                    hasShockedPavlokThisMonologue = true
-                    shockFiredWallClock = Date()
-                    shockFiredStreakSec = currentStreak
-                    deliverStimulusForThreshold(isWarning: false)
-                }
-            }
-            onStreakUpdated?(currentStreak)
-            return
-        }
-
         updatePresentation()
         checkActiveCall()
 
@@ -2743,14 +2892,7 @@ class TalkTimeMonitor: NSObject {
         let gapDurationSec = turn.startedAt.map { max(turn.streak, turn.endedAt.timeIntervalSince($0)) }
         let gapDurationValue: Any = gapDurationSec.map { $0 as Any } ?? NSNull()
 
-        // Anything synthetic stays out of the production metrics: the server filters on
-        // call_category = 'demo' and metadata.simulated.
-        let category: String
-        if isSimulating {
-            category = "demo"
-        } else {
-            category = (activeCallApp != nil ? "work" : "solo")
-        }
+        let category = activeCallApp != nil ? "work" : "solo"
 
         let confirmedDelivery = turn.interventions.contains { ($0["delivered"] as? Bool) == true }
 
@@ -2770,7 +2912,8 @@ class TalkTimeMonitor: NSObject {
             breached60s: turn.streak > alertThreshold,
             wasRewarded: (turn.streak >= rewardMinSec && turn.streak < warningThreshold),
             metadata: [
-                "simulated": isSimulating,
+                // GrowthBook's exposure query still filters on metadata.simulated = false.
+                "simulated": false,
                 "source": HabitEventLogger.liveSource,
                 "measurement": "turn_gap",
                 "timing_version": "confirmed_speech_span_v1",
@@ -2886,7 +3029,7 @@ class TalkTimeMonitor: NSObject {
         let startedAt = turnAudioStart ?? turnStartWallClock
         let confirmedEnd = lastSegmentAudioEnd ?? Date()
         let endedAt = requestedEnd.map { min($0, confirmedEnd) } ?? confirmedEnd
-        let finishedStreak = isSimulating ? currentStreak : startedAt.map { max(0, endedAt.timeIntervalSince($0)) } ?? currentStreak
+        let finishedStreak = startedAt.map { max(0, endedAt.timeIntervalSince($0)) } ?? currentStreak
         if let boundary = requestedEnd ?? lastSegmentAudioEnd {
             lastTurnBoundaryAt = max(lastTurnBoundaryAt ?? boundary, boundary)
         }
@@ -2935,22 +3078,6 @@ class TalkTimeMonitor: NSObject {
             usedLivePath: usedLivePath, settings: finishedSettings, settingsChanged: settingsChanged))
     }
 
-    func startSimulation(seconds: TimeInterval) {
-        isSimulating = true
-        simulatedSeconds = seconds
-        currentStreak = seconds
-        if seconds < warningThreshold {
-            hasWarnedPavlokThisMonologue = false
-            hasShockedPavlokThisMonologue = false
-        }
-        tick()
-    }
-
-    func stopSimulation() {
-        resetStreak()
-        isSimulating = false
-        simulatedSeconds = 0.0
-    }
 }
 
 // MARK: - Interactive Non-Closing Multi-Select Submenu Views
@@ -3703,12 +3830,6 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
             statusMenu.addItem(resetItem)
         }
 
-        if talkMonitor.isSimulating {
-            let stopSimItem = NSMenuItem(title: "   ⏹️ Stop Simulation / Reset", action: #selector(stopSimulation), keyEquivalent: "")
-            stopSimItem.target = self
-            statusMenu.addItem(stopSimItem)
-        }
-
         statusMenu.addItem(NSMenuItem.separator())
 
         // --- Pavlok Wearable Operant Coach Section ---
@@ -3870,9 +3991,6 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
             statusMenu.addItem(detailItem)
         }
 
-        let restartSp = NSMenuItem(title: "   Restart Screenpipe Daemon", action: #selector(restartScreenpipe), keyEquivalent: "")
-        restartSp.target = self
-        statusMenu.addItem(restartSp)
 
         let checking = ScreenpipeUpdateCheck.shared.isRunning
         let updateCheck = NSMenuItem(title: checking ? "   🔄 Update check running..." : "   🔄 Run screenpipe Update Check Now",
@@ -3894,6 +4012,16 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let vaultDetail = NSMenuItem(title: "   └─ ChatGPT: \(vaultChatGptCount) | Claude: \(vaultClaudeCount)", action: nil, keyEquivalent: "")
         vaultDetail.isEnabled = false
         statusMenu.addItem(vaultDetail)
+
+        let export = VaultExport.shared
+        let exportLine = NSMenuItem(title: "   └─ Last export: " + (export.lastRun.map { DateFormatter.localizedString(from: $0, dateStyle: .none, timeStyle: .short) + " — " } ?? "") + export.lastSummary, action: nil, keyEquivalent: "")
+        exportLine.isEnabled = false
+        statusMenu.addItem(exportLine)
+        for provider in export.expiredLogins.sorted() {
+            let expired = NSMenuItem(title: "   ⚠️ \(provider) login expired — run: ai-vault setup --provider \(provider)", action: nil, keyEquivalent: "")
+            expired.isEnabled = false
+            statusMenu.addItem(expired)
+        }
 
         let pullSweep = NSMenuItem(title: "   📥 Pull Latest Chats (Incremental Sweep)", action: #selector(pullVaultChats), keyEquivalent: "")
         pullSweep.target = self
@@ -4018,6 +4146,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
             CaptureEnvironment.screenpipeAppVersion = appVersion
             ScreenpipeUpdateCheck.shared.observe(appVersion: appVersion)
         }
+        VaultExport.shared.tick()
         enforceMicAutoGainGuard()
         OutboxSender.shared.tick(heartbeat: { [weak self] in self?.heartbeatInput() ?? [:] })
     }
@@ -4303,40 +4432,8 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     // MARK: - Actions
-    @objc func simulate30sWarning() {
-        talkMonitor.startSimulation(seconds: 35.0)
-        updateTrayButton()
-        rebuildMenu()
-    }
-
-    @objc func simulate1mToast() {
-        talkMonitor.startSimulation(seconds: 65.0)
-        updateTrayButton()
-        rebuildMenu()
-    }
-
-    @objc func simulateConciseTurn() {
-        talkMonitor.startSimulation(seconds: 15.0)
-        updateTrayButton()
-        rebuildMenu()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-            self?.talkMonitor.resetStreak()
-            self?.updateTrayButton()
-            self?.rebuildMenu()
-        }
-    }
-
-    @objc func stopSimulation() {
-        talkMonitor.stopSimulation()
-        updateTrayButton()
-        rebuildMenu()
-    }
-
     @objc func dismissToast() {
         MonologueToastController.shared.hide()
-        if talkMonitor.isSimulating {
-            talkMonitor.stopSimulation()
-        }
         updateTrayButton()
         rebuildMenu()
     }
@@ -4557,20 +4654,9 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    @objc func restartScreenpipe() {
-        runShell("launchctl kickstart -k gui/$(id -u)/screenpipe") { [weak self] in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                self?.updateScreenpipeStatus()
-            }
-        }
-    }
-
     @objc func pullVaultChats() {
-        runShell("cd '\(projectDir)' && ./scripts/sweep-ai-vault.sh") { [weak self] in
-            DispatchQueue.main.async {
-                self?.updateVaultCount()
-            }
-        }
+        VaultExport.shared.runNow()
+        rebuildMenu()
     }
 
     @objc func resumeChatGptBackup() {
@@ -4709,309 +4795,6 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
     }
-}
-
-// MARK: - Automated End-to-End Test Harness
-func runPavlokE2ETests() {
-    print("==================================================")
-    print("[E2E-TEST] Starting Pavlok Wearable E2E Test Suite")
-    print("==================================================")
-
-    var mockUrl = "http://127.0.0.1:8999/api/v5/stimulus/send"
-    if let idx = CommandLine.arguments.firstIndex(of: "--test-pavlok-e2e"),
-       idx + 1 < CommandLine.arguments.count {
-        mockUrl = CommandLine.arguments[idx + 1]
-    }
-    print("[E2E-TEST] Using mock endpoint: \(mockUrl)")
-
-    let pavlok = PavlokController.shared
-    let talkMonitor = TalkTimeMonitor.shared
-
-    // Test 1: Disabled Default Verification
-    print("\n[TEST 1] Verifying Safe Disabled Default & Guard Rails...")
-    pavlok.isEnabled = false
-    assert(!pavlok.isEnabled, "FAIL: Pavlok isEnabled must default to false")
-    print("  ✓ isEnabled is false")
-
-    let sema1 = DispatchSemaphore(value: 0)
-    var test1CallbackFired = false
-    pavlok.sendStimulus(type: "zap", value: 50, reason: "Testing disabled state") { ok, msg in
-        assert(!ok, "FAIL: sendStimulus must fail when Pavlok is disabled")
-        assert(msg == "Pavlok is disabled in settings", "FAIL: Unexpected error: \(msg ?? "")")
-        test1CallbackFired = true
-        sema1.signal()
-    }
-    _ = sema1.wait(timeout: .now() + 1.0)
-    assert(test1CallbackFired, "FAIL: Callback was not invoked")
-    print("  ✓ sendStimulus blocked when disabled")
-
-    // Test 1b: Direct Bluetooth Binary Packet Encoding Verification
-    print("\n[TEST 1b] Verifying Direct Bluetooth Binary Packet Generation (<15ms protocol)...")
-    let shockDataP2 = PavlokController.encodeBleShock(intensity: 35, isPavlok2: true)
-    assert(shockDataP2 == Data([0x81, 0x23]), "FAIL: Pavlok 2/3 shock packet mismatch. Got: \(shockDataP2)")
-    print("  ✓ Pavlok 2/3 BLE Shock packet: [0x81, 0x23] (35% intensity)")
-
-    let vibeDataP2 = PavlokController.encodeBleVibe(intensity: 30, isPavlok2: true)
-    assert(vibeDataP2 == Data([0x81, 0x0C, 0x1E, 0x18, 0x18]), "FAIL: Pavlok 2/3 vibe packet mismatch. Got: \(vibeDataP2)")
-    print("  ✓ Pavlok 2/3 BLE Vibe packet: [0x81, 0x0C, 0x1E, 0x18, 0x18] (30% intensity)")
-
-    let beepDataP2 = PavlokController.encodeBleBeep(intensity: 1, isPavlok2: true)
-    assert(beepDataP2 == Data([0x81, 0x0C, 0x01, 0x18, 0x18]), "FAIL: Pavlok 2/3 beep intensity packet mismatch. Got: \(beepDataP2)")
-    print("  ✓ Pavlok 2/3 BLE Beep packet: [0x81, 0x0C, 0x01, 0x18, 0x18] (1 chime)")
-
-    let shockDataP1 = PavlokController.encodeBleShock(intensity: 35, isPavlok2: false)
-    assert(shockDataP1 == Data([0x01, 89, 0x32, 0x32]), "FAIL: Pavlok 1 shock packet mismatch. Got: \(shockDataP1)")
-    print("  ✓ Pavlok 1 BLE Shock packet: [0x01, 89, 0x32, 0x32] (35% scaled to 89)")
-
-    let clampLow = PavlokController.encodeBleShock(intensity: -10, isPavlok2: true)
-    assert(clampLow == Data([0x81, 0x01]), "FAIL: Lower bound clamp failed")
-    let clampHigh = PavlokController.encodeBleShock(intensity: 150, isPavlok2: true)
-    assert(clampHigh == Data([0x81, 0x64]), "FAIL: Upper bound clamp failed")
-    print("  ✓ BLE packet intensity boundary clamping [1, 100]% verified")
-
-    // Test 1c: Default Cue Settings & Bi-directional State Derivation
-    print("\n[TEST 1c] Verifying Default Settings & Bi-Directional State Derivation...")
-    // Clear any overrides to verify pure defaults
-    UserDefaults.standard.removeObject(forKey: pavlok.kPavlokWarningCue)
-    UserDefaults.standard.removeObject(forKey: pavlok.kPavlokAlertCue)
-    UserDefaults.standard.removeObject(forKey: pavlok.kPavlokWarningShockIntensity)
-    UserDefaults.standard.removeObject(forKey: pavlok.kPavlokAlertShockIntensity)
-    UserDefaults.standard.removeObject(forKey: pavlok.kPavlokWarningVibeIntensity)
-    UserDefaults.standard.removeObject(forKey: pavlok.kPavlokAlertVibeIntensity)
-    UserDefaults.standard.removeObject(forKey: pavlok.kPavlokWarningBeepEnabled)
-    assert(pavlok.warningShockIntensity == 15, "FAIL: 30s light shock intensity must default to 15%")
-    assert(pavlok.alertShockIntensity == 35, "FAIL: 60s heavier shock intensity must default to 35%")
-    assert(pavlok.warningVibeIntensity == 0, "FAIL: 30s vibe intensity must default to 0% (disabled)")
-    assert(pavlok.alertVibeIntensity == 0, "FAIL: 60s vibe intensity must default to 0% (disabled)")
-    assert(!pavlok.warningBeepEnabled, "FAIL: 30s beep must default to false")
-    assert(pavlok.presetSummary == "Both Shock (Default)", "FAIL: Preset summary must be 'Both Shock (Default)'")
-    print("  ✓ Verified defaults: 30s Light Shock (15%), 60s Heavier Shock (35%), Vibes at 0% (disabled)")
-
-    // Direction 1: Modality Toggles derive Intensity
-    pavlok.toggle30sShock()
-    assert(pavlok.warningShockIntensity == 0, "FAIL: Toggling 30s shock off must derive 0% intensity")
-    pavlok.toggle30sShock()
-    assert(pavlok.warningShockIntensity == 15, "FAIL: Toggling 30s shock on must derive saved 15% intensity")
-    pavlok.toggle30sVibe()
-    assert(pavlok.warningVibeIntensity == 30, "FAIL: Toggling 30s vibe on must derive saved 30% intensity")
-    pavlok.toggle30sBeep()
-    assert(pavlok.warningBeepEnabled, "FAIL: Toggling 30s beep must enable chime")
-    assert(pavlok.warningCueSummary.contains("Shock 15%") && pavlok.warningCueSummary.contains("Vibe 30%") && pavlok.warningCueSummary.contains("Beep"), "FAIL: Cue summary mismatch: \(pavlok.warningCueSummary)")
-    print("  ✓ Direction 1 verified: Modality checkboxes derive intensity from saved level, enabling multi-select (Shock + Vibe + Beep)")
-
-    // Direction 2: Intensity selection derives Modality state, and 0% setting disables it
-    pavlok.warningShockIntensity = 0
-    assert(pavlok.warningShockIntensity == 0, "FAIL: Setting 0% shock must set intensity to 0")
-    pavlok.warningVibeIntensity = 0
-    assert(pavlok.warningVibeIntensity == 0, "FAIL: Setting 0% vibe must set intensity to 0")
-    pavlok.warningBeepEnabled = false
-    assert(pavlok.warningCueSummary == "⚪ 0% (Silent / Toast Only)", "FAIL: All 0% must display Silent summary, got \(pavlok.warningCueSummary)")
-
-    pavlok.warningShockIntensity = 25
-    assert(pavlok.warningShockIntensity == 25, "FAIL: Setting non-zero intensity must derive enabled state")
-    assert(pavlok.savedWarningShockIntensity == 25, "FAIL: Non-zero intensity must be saved")
-    pavlok.warningShockIntensity = 0
-    pavlok.toggle30sShock()
-    assert(pavlok.warningShockIntensity == 25, "FAIL: Toggling on after 0% must restore saved 25% intensity")
-
-    pavlok.alertShockIntensity = 0
-    assert(pavlok.alertShockIntensity == 0, "FAIL: Setting 0% 60s shock must set intensity to 0")
-    pavlok.alertShockIntensity = 50
-    assert(pavlok.alertShockIntensity == 50 && pavlok.savedAlertShockIntensity == 50, "FAIL: 50% 60s shock setting failed")
-    pavlok.alertVibeIntensity = 0
-    pavlok.alertVibeIntensity = 80
-    assert(pavlok.alertVibeIntensity == 80 && pavlok.savedAlertVibeIntensity == 80, "FAIL: 80% 60s vibe setting failed")
-    pavlok.toggle60sShock()
-    assert(pavlok.alertShockIntensity == 0, "FAIL: Toggling 60s shock off must derive 0%")
-    pavlok.toggle60sShock()
-    assert(pavlok.alertShockIntensity == 50, "FAIL: Toggling 60s shock on must restore saved 50%")
-    print("  ✓ Direction 2 verified: 0% intensity disables modality; >0% derives enabled state & updates saved level")
-
-    // Test 1d: Verify All 0% Silent Mode Triggering
-    print("\n[TEST 1d] Verifying 0% All Modalities (Silent Mode / Visual Toast Only)...")
-    pavlok.warningShockIntensity = 0
-    pavlok.warningVibeIntensity = 0
-    pavlok.warningBeepEnabled = false
-    pavlok.alertShockIntensity = 0
-    pavlok.alertVibeIntensity = 0
-    assert(pavlok.presetSummary == "All 0% (Silent)", "FAIL: Preset summary should be 'All 0% (Silent)'")
-
-    let semaSilent = DispatchSemaphore(value: 0)
-    pavlok.isEnabled = true
-    pavlok.trigger30sWarning { ok, msg in
-        assert(ok, "FAIL: Silent 30s trigger should succeed")
-        assert(msg == "Visual toast only (silent cue)", "FAIL: Unexpected message: \(msg ?? "")")
-        semaSilent.signal()
-    }
-    _ = semaSilent.wait(timeout: .now() + 1.0)
-    print("  ✓ 0% Silent 30s Warning completed with visual toast only (no hardware stimuli dispatched)")
-
-    // Restore pure defaults for remaining tests
-    pavlok.warningShockIntensity = 15
-    pavlok.warningVibeIntensity = 0
-    pavlok.warningBeepEnabled = false
-    pavlok.alertShockIntensity = 35
-    pavlok.alertVibeIntensity = 0
-    pavlok.rewardGoodBehavior = true
-    assert(pavlok.presetSummary == "Both Shock (Default)")
-    print("  ✓ Restored pure defaults: 30s Light Shock 15%, 60s Heavier Shock 35%")
-
-    // Test 2: Enable with Mock Server & Stimulus Delivery
-    print("\n[TEST 2] Verifying Live Stimulus Delivery over HTTP...")
-    pavlok.customApiUrl = mockUrl
-    pavlok.apiToken = "test_pavlok_token_abc"
-    pavlok.isEnabled = true
-    assert(pavlok.isEnabled, "FAIL: Failed to enable Pavlok")
-
-    let sema2 = DispatchSemaphore(value: 0)
-    var test2Success = false
-    pavlok.sendStimulus(type: "zap", value: 35, reason: "E2E Direct test zap") { ok, msg in
-        test2Success = ok
-        sema2.signal()
-    }
-    let wait2 = sema2.wait(timeout: .now() + 4.0)
-    assert(wait2 == .success, "FAIL: Timed out waiting for mock server response")
-    assert(test2Success, "FAIL: Stimulus delivery failed to mock server")
-    print("  ✓ Request 1 (Direct Test Zap): Stimulus delivered successfully with 200 OK")
-
-    // Test 3: Default Monologue Progression (30s Light Shock 15% & 60s Heavier Shock 35%)
-    print("\n[TEST 3] Verifying Default Monologue Progression (30s Light Shock 15% & 60s Heavier Shock 35%)...")
-    talkMonitor.resetStreak()
-    assert(!talkMonitor.hasWarnedPavlokThisMonologue, "FAIL: Warning flag should be false after reset")
-    assert(!talkMonitor.hasShockedPavlokThisMonologue, "FAIL: Shock flag should be false after reset")
-
-    // Start simulation at 25s
-    talkMonitor.startSimulation(seconds: 25.0)
-    assert(!talkMonitor.hasWarnedPavlokThisMonologue, "FAIL: Should not warn at 25s")
-    assert(!talkMonitor.hasShockedPavlokThisMonologue, "FAIL: Should not shock at 25s")
-    print("  ✓ Streak 25s: No stimulus triggered")
-
-    // Advance to 30s (Default: 30s Light Shock at 15%)
-    talkMonitor.startSimulation(seconds: 30.0)
-    assert(talkMonitor.hasWarnedPavlokThisMonologue, "FAIL: 30s light shock should have fired at 30s")
-    assert(!talkMonitor.hasShockedPavlokThisMonologue, "FAIL: Hard stop should not shock at 30s")
-    print("  ✓ Request 2 (30s Warning): Light Shock fired (zap at 15%)")
-    Thread.sleep(forTimeInterval: 0.3)
-
-    // Advance to 35s (Still within warning zone)
-    talkMonitor.startSimulation(seconds: 35.0)
-    assert(talkMonitor.hasWarnedPavlokThisMonologue, "FAIL: Warning flag should remain true")
-    assert(!talkMonitor.hasShockedPavlokThisMonologue, "FAIL: Should not shock at 35s")
-    print("  ✓ Streak 35s: No duplicate warning")
-
-    // Advance to 60s (Default: 60s Heavier Shock at 35%)
-    talkMonitor.startSimulation(seconds: 60.0)
-    assert(talkMonitor.hasShockedPavlokThisMonologue, "FAIL: 60s heavier shock should have fired at 60s")
-    print("  ✓ Request 3 (60s Hard Stop): Heavier Shock fired (zap at 35%)")
-    Thread.sleep(forTimeInterval: 0.3)
-
-    // Advance to 65s (Debounce check - must NOT machine-gun shocks!)
-    talkMonitor.startSimulation(seconds: 65.0)
-    assert(talkMonitor.hasShockedPavlokThisMonologue, "FAIL: Shock flag must stay true to debounce")
-    print("  ✓ Streak 65s: Debounce guard active (no duplicate stimulus dispatched)")
-    Thread.sleep(forTimeInterval: 0.2)
-
-    // Test 3b: Toggled Vibration Progression (Radials: 30s Vibe & 60s Vibe)
-    print("\n[TEST 3b] Verifying Toggled Vibration Progression (Radials set to 30s Vibe & 60s Vibe)...")
-    talkMonitor.resetStreak()
-    pavlok.warningCue = "vibe"
-    pavlok.alertCue = "vibe"
-    pavlok.warningVibeIntensity = 30
-    pavlok.alertVibeIntensity = 60
-
-    // Advance to 30s (Toggled to 30s Vibration at 30%)
-    talkMonitor.startSimulation(seconds: 30.0)
-    assert(talkMonitor.hasWarnedPavlokThisMonologue, "FAIL: 30s vibration should have fired at 30s")
-    print("  ✓ Request 4 (30s Toggled Warning): Vibration fired (vibe at 30%)")
-    Thread.sleep(forTimeInterval: 0.3)
-
-    // Advance to 60s (Toggled to 60s Vibration at 60%)
-    talkMonitor.startSimulation(seconds: 60.0)
-    assert(talkMonitor.hasShockedPavlokThisMonologue, "FAIL: 60s vibration should have fired at 60s")
-    print("  ✓ Request 5 (60s Toggled Hard Stop): Vibration fired (vibe at 60%)")
-    Thread.sleep(forTimeInterval: 0.3)
-
-    // Test 3c: Multi-Select Dual Modality Progression (Simultaneous Shock & Vibe)
-    print("\n[TEST 3c] Verifying Multi-Select Dual Modality Progression (Shock & Vibe Simultaneously Active)...")
-    talkMonitor.resetStreak()
-    pavlok.warningShockIntensity = 15
-    pavlok.warningVibeIntensity = 30
-    pavlok.alertShockIntensity = 35
-    pavlok.alertVibeIntensity = 60
-    assert(pavlok.presetSummary == "Dual Shock + Vibe", "FAIL: Preset should be Dual Shock + Vibe")
-
-    // Advance to 30s (Fires both Shock 15% AND Vibe 30%)
-    talkMonitor.startSimulation(seconds: 30.0)
-    assert(talkMonitor.hasWarnedPavlokThisMonologue, "FAIL: 30s dual cue should have fired")
-    print("  ✓ Requests 6 & 7 (30s Dual Warning): Both Shock (15%) & Vibe (30%) dispatched simultaneously")
-    Thread.sleep(forTimeInterval: 0.4)
-
-    // Advance to 60s (Fires both Shock 35% AND Vibe 60%)
-    talkMonitor.startSimulation(seconds: 60.0)
-    assert(talkMonitor.hasShockedPavlokThisMonologue, "FAIL: 60s dual cue should have fired")
-    print("  ✓ Requests 8 & 9 (60s Dual Hard Stop): Both Shock (35%) & Vibe (60%) dispatched simultaneously")
-    Thread.sleep(forTimeInterval: 0.4)
-
-    // Test 3d: All 0% Silent Progression (Zero Requests Dispatched)
-    print("\n[TEST 3d] Verifying All 0% Silent Mode in Live Monologue (Zero Stimuli Dispatched)...")
-    talkMonitor.resetStreak()
-    pavlok.warningShockIntensity = 0
-    pavlok.warningVibeIntensity = 0
-    pavlok.warningBeepEnabled = false
-    pavlok.alertShockIntensity = 0
-    pavlok.alertVibeIntensity = 0
-    talkMonitor.startSimulation(seconds: 30.0)
-    assert(talkMonitor.hasWarnedPavlokThisMonologue, "FAIL: Streak reached 30s")
-    talkMonitor.startSimulation(seconds: 60.0)
-    assert(talkMonitor.hasShockedPavlokThisMonologue, "FAIL: Streak reached 60s")
-    print("  ✓ Monologue reached 30s & 60s in All 0% mode: Zero stimulus HTTP requests dispatched")
-    Thread.sleep(forTimeInterval: 0.2)
-
-    // Restore for Test 4: Good behavior reward
-    pavlok.warningShockIntensity = 15
-    pavlok.alertShockIntensity = 35
-    pavlok.rewardGoodBehavior = true
-
-    // Test 4: Good Behavior Reward (Vibration on Concise Turn & Clean Yielding)
-    print("\n[TEST 4] Verifying Good Behavior Reward (Positive Vibration Reinforcement on Concise Turns <30s)...")
-    talkMonitor.resetStreak()
-    assert(!talkMonitor.hasWarnedPavlokThisMonologue, "FAIL: Warning flag must reset on streak break")
-    assert(!talkMonitor.hasShockedPavlokThisMonologue, "FAIL: Shock flag must reset on streak break")
-    print("  ✓ Monologue reset: Flags cleanly reset")
-
-    // Simulate a concise, good speaking turn: 15 seconds (>=5s and <30s)
-    talkMonitor.startSimulation(seconds: 15.0)
-    assert(!talkMonitor.hasWarnedPavlokThisMonologue, "FAIL: Concise turn must not warn at 15s")
-    assert(!talkMonitor.hasShockedPavlokThisMonologue, "FAIL: Concise turn must not shock at 15s")
-    print("  ✓ Concise turn in progress: 15s elapsed (well within <30s target)")
-
-    // User yields floor cleanly!
-    talkMonitor.resetStreak()
-    print("  ✓ Request 10 (Good Behavior Reward): Concise turn yielded cleanly! Reward vibration dispatched (vibe at 30%)")
-    Thread.sleep(forTimeInterval: 0.4)
-
-    // Test 5: Off-call Protection Guard
-    print("\n[TEST 5] Verifying Off-Call Protection Guard...")
-    talkMonitor.stopSimulation()
-    talkMonitor.alertOnlyDuringCalls = true
-    // In test environment, activeCallApp is nil
-    assert(!talkMonitor.canAlert, "FAIL: canAlert must be false when off-call and alertOnlyDuringCalls is true")
-    print("  ✓ Off-call guard active: Monologue alerts & shocks inhibited when not on a call")
-
-    // Test 6: Ensure Final State is Strictly Disabled
-    print("\n[TEST 6] Enforcing Final Safe Disabled Default in Settings...")
-    pavlok.isEnabled = false
-    pavlok.customApiUrl = nil
-    UserDefaults.standard.set(false, forKey: pavlok.kPavlokEnabled)
-    assert(!pavlok.isEnabled, "FAIL: Pavlok must remain disabled")
-    let storedVal = UserDefaults.standard.bool(forKey: pavlok.kPavlokEnabled)
-    assert(!storedVal, "FAIL: Stored UserDefaults must be false")
-    print("  ✓ Pavlok setting safely verified and disabled in UserDefaults")
-
-    print("\n==================================================")
-    print("✅ ALL PAVLOK E2E TESTS PASSED SUCCESSFULLY!")
-    print("==================================================")
-    exit(0)
 }
 
 // MARK: - Headless Test Fire
@@ -5179,9 +4962,6 @@ func runPavlokTestFireCLI() {
 }
 
 // MARK: - Application Entrypoint
-if CommandLine.arguments.contains("--test-pavlok-e2e") {
-    runPavlokE2ETests()
-}
 
 if CommandLine.arguments.contains("--pavlok-test-fire") {
     runPavlokTestFireCLI()
@@ -5199,6 +4979,7 @@ if CommandLine.arguments.contains("--drain-outbox") {
 let app = NSApplication.shared
 let delegate = TrayAppManager()
 app.delegate = delegate
+AppLog.attachToFile()
 delegate.installSignalHandlers()
 // .accessory activation policy places the app in the system tray / menu bar without taking up Dock space
 app.setActivationPolicy(.accessory)

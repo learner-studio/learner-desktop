@@ -13,7 +13,7 @@ class RewardMenuTests(unittest.TestCase):
     def test_reward_menu_uses_manual_path_and_real_reward_intensity(self):
         source = SOURCE.read_text()
         action = source[source.index('    @objc func testPavlokVibe()'):source.index('    @objc func testPavlokZap()')]
-        helper = source[source.index('    private func performPavlokManualTest('):source.index('    @objc func restartScreenpipe()')]
+        helper = source[source.index('    private func performPavlokManualTest('):source.index('    @objc func pullVaultChats()')]
         level = re.search(r'let rewardVibeIntensity = (\d+)', source).group(1)
         automatic = source.split('private func evaluateGoodBehaviorReward', 1)[1].split('private func handleTranscriptionRow', 1)[0]
         self.assertIn('value: PavlokController.shared.rewardVibeIntensity', automatic)

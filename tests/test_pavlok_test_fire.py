@@ -40,7 +40,7 @@ class Source:
     panel = span(src, "class PavlokTestFireSubmenuView", "\n// MARK: - Cute Dog Stick Figure")
     menu_section = span(src, "// 5. Manual Test Fire", "let scanItem = NSMenuItem")
     cli = span(src, "func runPavlokTestFireCLI()", "\n// MARK: - Application Entrypoint")
-    menu_action = span(src, "@objc func testFirePavlokStimulus(", "\n    @objc func restartScreenpipe")
+    menu_action = span(src, "@objc func testFirePavlokStimulus(", "\n    @objc func pullVaultChats")
 
 
 class SeparateFromTheExperimentTest(unittest.TestCase):

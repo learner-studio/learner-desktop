@@ -2,7 +2,7 @@
 """Opt-in visible meeting-poller E2E, isolated from the owner's recorder and data.
 
 Runs the production Swift monitor, NSPanel and logger against a local HTTP fixture.
-Unlike startSimulation(), this never assigns a streak or bypasses canAlert. Timestamped
+It never assigns a streak or bypasses canAlert. Timestamped
 live input rows arrive on a controlled schedule, while background transcription is empty.
 A two-word output backchannel ends the turn after the panel is inspected. Background
 reconciliation then returns the same speech, which must not create another turn.
@@ -112,7 +112,7 @@ pollTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
         if !expectPanel || !panels.isEmpty {
             let snapshot: [String: Any] = [
                 "streak": monitor.currentStreak, "canAlert": monitor.canAlert,
-                "armShowsToast": monitor.armShowsToast, "isSimulating": monitor.isSimulating,
+                "armShowsToast": monitor.armShowsToast,
                 "warning": monitor.isWarningActive,
                 "firstVisibleStreak": firstVisibleStreak as Any? ?? NSNull(),
                 "windows": panels.map { ["visible": $0.isVisible, "alpha": $0.alphaValue,
@@ -267,7 +267,6 @@ class SpeakingCoachMeetingE2E(unittest.TestCase):
         self.assertEqual(panel["canAlert"], has_meeting)
         self.assertTrue(panel["armShowsToast"], "baseline must receive the visual cue")
         self.assertEqual(panel["warning"], expect_panel)
-        self.assertFalse(panel["isSimulating"], "must exercise the HTTP poller, not the demo bypass")
         self.assertEqual(bool(panel["windows"]), expect_panel)
         self.assertEqual(panel["firstVisibleStreak"], next((offset for offset in offsets if offset >= 30), None) if expect_panel else None)
         with sqlite3.connect(f"file:{evidence}/behavior_experiments.sqlite?mode=ro", uri=True) as db:
