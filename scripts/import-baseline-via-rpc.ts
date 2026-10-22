@@ -29,6 +29,9 @@ import { LearnerApiClient } from '../src/learner-api.js'
 
 export const CLIENT_ID = 'ben-mbp'
 export const CALLS_PER_BATCH = 50
+/** The spec says 4 MB, but nginx answered 413 to a 1.5 MB request (2026-10-22); stay under 1 MB. */
+const MAX_REQUEST_BYTES = 900_000
+const requestBytes = (calls: unknown[]) => Buffer.byteLength(JSON.stringify({ data: { clientId: 'ben-mbp', calls } }))
 export const EVENTS_PER_BATCH = 500
 /** parse_readai_transcripts.py's NAMESPACE_UUID; call ids are uuid5(ns, "call:<session_id>"). */
 export const NAMESPACE_UUID = 'e0b1e9e0-55d0-47c8-beb4-d791e36ffe8c'
@@ -176,8 +179,21 @@ export function buildBatches(exportData: Row, clientId = CLIENT_ID): BuildResult
     events.push(r.data)
   }
 
-  const callBatches: CallsInput[] = []
+  // Batches of ≤50 calls that also stay under the server's 4 MB request cap.
+  const sized: CallTranscript[][] = []
   for (const part of chunk(calls, CALLS_PER_BATCH)) {
+    let current: CallTranscript[] = []
+    for (const call of part) {
+      if (current.length && requestBytes([...current, call]) > MAX_REQUEST_BYTES) {
+        sized.push(current)
+        current = []
+      }
+      current.push(call)
+    }
+    if (current.length) sized.push(current)
+  }
+  const callBatches: CallsInput[] = []
+  for (const part of sized) {
     const r = RecordCallTranscriptsInput.safeParse({ clientId, calls: part })
     if (r.success) callBatches.push(r.data)
     else note('callBatch', r.error)
@@ -192,17 +208,13 @@ export function buildBatches(exportData: Row, clientId = CLIENT_ID): BuildResult
   return { callBatches, eventBatches, calls: calls.length, events: events.length, failures, transcriptLinesNonConforming }
 }
 
-async function send(built: BuildResult): Promise<number> {
-  const url = process.env.LEARNER_API_URL
-  const key = process.env.LEARNER_API_KEY
-  if (!url || !key) {
-    console.error('--send refuses to run without both LEARNER_API_URL and LEARNER_API_KEY set.')
-    return 2
-  }
-  const api = new LearnerApiClient({ baseUrl: url, getKey: () => key })
+async function send(built: BuildResult, callsOnly: boolean): Promise<number> {
+  // Same endpoint and device key as the watcher: LEARNER_API_URL/LEARNER_API_KEY, else
+  // the default URL and the Keychain item (learner-server / ben-mbp).
+  const api = new LearnerApiClient()
   const jobs: [string, unknown, z.ZodTypeAny][] = [
     ...built.callBatches.map((b) => ['recordCallTranscripts', b, RecordCallTranscriptsOutput] as [string, unknown, z.ZodTypeAny]),
-    ...built.eventBatches.map((b) => ['recordHabitEvents', b, RecordHabitEventsOutput] as [string, unknown, z.ZodTypeAny]),
+    ...(callsOnly ? [] : built.eventBatches.map((b) => ['recordHabitEvents', b, RecordHabitEventsOutput] as [string, unknown, z.ZodTypeAny])),
   ]
   for (let i = 0; i < jobs.length; i++) {
     const [name, input, output] = jobs[i]
@@ -227,6 +239,9 @@ async function send(built: BuildResult): Promise<number> {
 
 async function main(argv: string[]): Promise<number> {
   const sendMode = argv.includes('--send')
+  // The historical habit events are already in habits.habit_events; resending them only
+  // returns duplicates. The calls still need to go through once to be scored.
+  const callsOnly = argv.includes('--calls-only')
   const fileArg = argv.find((a) => !a.startsWith('--'))
   const exportFile = fileArg ?? DEFAULT_EXPORT
   if (!existsSync(exportFile)) {
@@ -242,6 +257,7 @@ async function main(argv: string[]): Promise<number> {
   console.log(
     `batches:     recordCallTranscripts=${built.callBatches.length} (≤${CALLS_PER_BATCH}) recordHabitEvents=${built.eventBatches.length} (≤${EVENTS_PER_BATCH})`,
   )
+  console.log(`largest call request: ${Math.max(...built.callBatches.map((b) => requestBytes(b.calls)))} bytes (cap ${MAX_REQUEST_BYTES})`)
   console.log(`transcript lines not in "(MM:SS) Speaker: text" form: ${built.transcriptLinesNonConforming}`)
   console.log(`validation failures: ${[...built.failures.values()].reduce((a, b) => a + b, 0)}`)
   for (const [reason, n] of [...built.failures].sort()) console.log(`  ${reason}: ${n}`)
@@ -251,7 +267,7 @@ async function main(argv: string[]): Promise<number> {
     console.error('Refusing to send while any row fails validation.')
     return 1
   }
-  return send(built)
+  return send(built, callsOnly)
 }
 
 if (import.meta.main) {
