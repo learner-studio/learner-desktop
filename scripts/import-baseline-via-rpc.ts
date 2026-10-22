@@ -208,9 +208,14 @@ export function buildBatches(exportData: Row, clientId = CLIENT_ID): BuildResult
   return { callBatches, eventBatches, calls: calls.length, events: events.length, failures, transcriptLinesNonConforming }
 }
 
-async function send(built: BuildResult, callsOnly: boolean): Promise<number> {
+async function send(built: BuildResult, callsOnly: boolean, exportFile: string): Promise<number> {
   // Same endpoint and device key as the watcher: LEARNER_API_URL/LEARNER_API_KEY, else
-  // the default URL and the Keychain item (learner-server / ben-mbp).
+  // the default URL and the Keychain item (learner-server / ben-mbp). The real server is
+  // only reachable with the real export: a test fixture must never land in production.
+  if (!process.env.LEARNER_API_URL && exportFile !== DEFAULT_EXPORT) {
+    console.error('--send refuses to run: a non-default export file needs an explicit LEARNER_API_URL.')
+    return 2
+  }
   const api = new LearnerApiClient()
   const jobs: [string, unknown, z.ZodTypeAny][] = [
     ...built.callBatches.map((b) => ['recordCallTranscripts', b, RecordCallTranscriptsOutput] as [string, unknown, z.ZodTypeAny]),
@@ -267,7 +272,7 @@ async function main(argv: string[]): Promise<number> {
     console.error('Refusing to send while any row fails validation.')
     return 1
   }
-  return send(built, callsOnly)
+  return send(built, callsOnly, exportFile)
 }
 
 if (import.meta.main) {

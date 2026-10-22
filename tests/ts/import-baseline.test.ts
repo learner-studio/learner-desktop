@@ -149,7 +149,7 @@ describe('buildBatches', () => {
 })
 
 describe('--send', () => {
-  test('refuses without LEARNER_API_URL and LEARNER_API_KEY', async () => {
+  test('refuses to send a fixture without an explicit LEARNER_API_URL', async () => {
     const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs')
     const { join } = await import('node:path')
     const { tmpdir } = await import('node:os')
