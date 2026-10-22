@@ -129,8 +129,8 @@ describe('buildBatches', () => {
       expect(RecordCallTranscriptsInput.safeParse(b).success).toBe(true)
     }
     for (const b of r.eventBatches) expect(RecordHabitEventsInput.safeParse(b).success).toBe(true)
-    // Contract defaults are filled in.
-    expect(r.callBatches[0].calls[0].learnerSpeakers).toEqual(['Ben Pollack', 'Ben', 'Benjamin', 'Benjamin Pollack'])
+    // Each call carries its lines as utterances, Ben's marked as the learner's.
+    expect(r.callBatches[0].calls[0].utterances.map((u) => u.learner)).toEqual([true, false])
   })
 
   test('invalid rows are dropped and counted by reason', () => {
