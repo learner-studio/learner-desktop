@@ -165,3 +165,27 @@ describe('--send', () => {
     expect(p.stderr.toString()).toContain('refuses to run')
   })
 })
+
+describe('utterancesFor', () => {
+  const { utterancesFor } = require('../../scripts/import-baseline-via-rpc.ts')
+  const t = [
+    '(00:01) the owner: Hello there.',
+    '(00:05) UNKNOWN_SPEAKER: Hi.',
+    '(00:09) Conference Room (the owner) - Speaker 1: Someone in the room.',
+    '(1:02:03) the owner: Much later.',
+    '(00:12) Other Person: Out of order stays in place.',
+  ].join('\n')
+  const u = utterancesFor(t, '2026-02-05T20:00:00+01:00')
+
+  test('one utterance per line, in spoken order, unmerged', () => {
+    expect(u.map((x: { speaker: string }) => x.speaker)).toEqual([
+      'the owner', 'UNKNOWN_SPEAKER', 'Conference Room (the owner) - Speaker 1', 'the owner', 'Other Person'])
+  })
+  test('learner only for exact name matches; unknown and conference-room speakers are false', () => {
+    expect(u.map((x: { learner: boolean }) => x.learner)).toEqual([true, false, false, true, false])
+  })
+  test('at is eventTime plus the line offset, including H:MM:SS', () => {
+    expect(u[0].at).toBe('2026-02-05T19:00:01.000Z')
+    expect(u[3].at).toBe('2026-02-05T20:02:03.000Z')
+  })
+})
