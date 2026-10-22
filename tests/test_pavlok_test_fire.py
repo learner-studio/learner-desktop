@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fast lane: the manual Pavlok test-fire section of the menu.
+"""Fast lane: the manual Pavlok test fire (`--pavlok-test-fire` and the notification hook).
 
 Hermetic -- reads menu-bar-app/main.swift and asserts nothing else. The live fire is in
 tests/heavy/test_pavlok_test_fire_live.py, which needs the wristband and is gated behind
@@ -37,10 +37,7 @@ class Source:
     src = read(SWIFT)
     controller = span(src, "class PavlokController", "\n// MARK: - Habit Experiment Manager")
     test_fire_fn = span(src, "func testFire(type: String", "\n    // Backward-compatibility bridge")
-    panel = span(src, "class PavlokTestFireSubmenuView", "\n// MARK: - Cute Dog Stick Figure")
-    menu_section = span(src, "// 5. Manual Test Fire", "let scanItem = NSMenuItem")
     cli = span(src, "func runPavlokTestFireCLI()", "\n// MARK: - Application Entrypoint")
-    menu_action = span(src, "@objc func testFirePavlokStimulus(", "\n    @objc func pullVaultChats")
 
 
 class SeparateFromTheExperimentTest(unittest.TestCase):
@@ -70,25 +67,18 @@ class SeparateFromTheExperimentTest(unittest.TestCase):
             self.assertNotIn(name, Source.test_fire_fn,
                              f"testFire() reads {name}, which belongs to the trial")
 
-    def test_the_panel_only_ever_writes_the_test_intensities(self):
-        for name in ("warningShockIntensity", "warningVibeIntensity", "warningBeepEnabled",
-                     "alertShockIntensity", "alertVibeIntensity"):
-            self.assertNotIn(name, Source.panel,
-                             f"the test-fire panel touches {name}, which belongs to the trial")
-
-
 class OnlyFiresWhenAHumanAsksTest(unittest.TestCase):
     def test_every_call_site_is_a_deliberate_human_action(self):
-        """Three entry points, all of them a person doing something: the panel button,
-        the plain menu item, and the --pavlok-test-fire command."""
-        allowed = (Source.panel, Source.menu_action, Source.cli,
+        """Two entry points, both a person doing something: the --pavlok-test-fire
+        command and the notification hook."""
+        allowed = (Source.cli,
                    span(Source.src, "@objc func receivePavlokTest", "func applicationDidFinishLaunching"))
         calls = [m.start() for m in re.finditer(r"\.testFire\(type:", Source.src)]
-        self.assertGreaterEqual(len(calls), 3, "test fire is not wired up at all")
+        self.assertGreaterEqual(len(calls), 2, "test fire is not wired up at all")
         for pos in calls:
             line = Source.src[Source.src.rindex("\n", 0, pos) + 1:Source.src.index("\n", pos)].strip()
             self.assertTrue(any(line in region for region in allowed),
-                            f"testFire() is called from outside the menu and CLI: {line}")
+                            f"testFire() is called from outside the CLI and notification hook: {line}")
 
     def test_the_monologue_monitor_cannot_reach_it(self):
         monitor = span(Source.src, "// MARK: - Continuous Word Talk-Time Monitor",
@@ -139,46 +129,10 @@ class ReportsTheOutcomeOnScreenTest(unittest.TestCase):
         # Success and failure have to look different at a glance.
         self.assertIn('success ? "✅" : "❌"', result)
 
-    def test_the_panel_shows_the_outcome_without_closing_the_menu(self):
-        self.assertIn("resultLabel", Source.panel)
-        self.assertIn("lastTestFireSummary", Source.panel)
-
-    def test_the_menu_carries_the_outcome_after_it_closes(self):
-        self.assertIn("lastTestFireSummary", Source.menu_section)
-
-    def test_a_failure_from_the_plain_menu_item_is_raised_not_just_logged(self):
-        # The menu has closed by then and a failed stimulus is, by definition, silent.
-        self.assertIn("NSAlert()", Source.menu_action)
-        self.assertIn("guard !ok else { return }", Source.menu_action)
-
     def test_the_result_is_not_persisted_across_restarts(self):
         # A "delivered" line left over from three days ago is worse than no line.
         self.assertNotIn("lastTestFire", Source.src[Source.src.index("let kPavlokTestVibeIntensity"):
                                                     Source.src.index("var isEnabled: Bool")])
-
-
-class PanelControlsTest(unittest.TestCase):
-    def test_each_modality_has_its_own_slider_over_the_full_range(self):
-        self.assertIn("NSSlider(value: 0, minValue: 0, maxValue: 100", Source.panel)
-        for t in TYPES:
-            self.assertIn(f'("{t}"', Source.panel, f"no {t} row in the test-fire panel")
-
-    def test_each_modality_has_its_own_fire_button(self):
-        self.assertIn('NSButton(title: "Test fire"', Source.panel)
-        self.assertIn("fireButtons[row.type] = button", Source.panel)
-
-    def test_a_zero_or_disabled_row_cannot_be_fired(self):
-        self.assertIn("isEnabled = p.canTestFire && value > 0", Source.panel)
-        self.assertIn("item.isEnabled = PavlokController.shared.canTestFire && level > 0",
-                      Source.menu_section)
-        # AppKit re-enables items whose target responds to the action unless told not to.
-        self.assertIn("testFireMenu.autoenablesItems = false", Source.menu_section)
-
-    def test_the_section_is_reachable_from_the_status_menu(self):
-        self.assertIn("PavlokTestFireSubmenuView()", Source.menu_section)
-        self.assertIn("statusMenu.addItem(testFireParentItem)", Source.menu_section)
-        for t in TYPES:
-            self.assertIn(f'"{t}"', Source.menu_section)
 
 
 class HeadlessCommandTest(unittest.TestCase):
@@ -217,7 +171,7 @@ class StillLazyAboutBluetoothTest(unittest.TestCase):
 
     def test_the_test_fire_path_does_not_create_its_own_central_manager(self):
         self.assertEqual(Source.src.count("CBCentralManager(delegate:"), 1)
-        for region in (Source.test_fire_fn, Source.panel, Source.cli, Source.menu_action):
+        for region in (Source.test_fire_fn, Source.cli):
             self.assertNotIn("CBCentralManager(", region)
 
     def test_it_reaches_the_radio_through_the_existing_lazy_scan(self):

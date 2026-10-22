@@ -273,13 +273,13 @@ Synthetic data never reaches production metrics: simulated turns are written wit
 
 ### Manual Pavlok Bluetooth test
 
-In the menu-bar capture suite, enable **Keep Bluetooth Connected** and open
-**Test Fire Wristband**. Vibration, beep, and zap each have an independent saved 0–100%
-slider and a **Test fire** button. Changing a slider does not fire; 0% disables
+Enable **Keep Bluetooth Connected** under the menu's **⚡ Pavlok** submenu, then run
+`"~/Applications/Learner Desktop.app/Contents/MacOS/learner-desktop" --pavlok-test-fire <vibe|beep|zap> [intensity]`.
+Vibration, beep, and zap each keep an independent saved 0–100% test intensity; 0% disables
 that test. These settings do not change the automatic 30s/60s coaching levels.
 
-Each click sends one pulse over direct Bluetooth, waits for the selected
-characteristic and its write acknowledgement, and shows the result in the menu.
+Each run sends one pulse over direct Bluetooth, waits for the selected
+characteristic and its write acknowledgement, and prints the result.
 Cloud backup is excluded from manual connection tests. An acknowledgement means
 the device accepted the command; it does not measure the physical sensation.
 For Pavlok 2/3, beep uses the same intensity field as vibration, as implemented
