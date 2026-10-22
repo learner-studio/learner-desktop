@@ -1,7 +1,7 @@
 {
   "name": "learner-desktop",
   "version": "1.0.0",
-  "description": "Real-time AI conversation and transcript sync pipeline to Hindsight",
+  "description": "Learner Desktop helpers: ai-vault conversation archiving and baseline import over the learner-server RPC",
   "main": "src/cli.ts",
   "type": "module",
   "scripts": {
@@ -12,7 +12,8 @@
   },
   "dependencies": {
     "chokidar": "^4.0.3",
-    "commander": "^13.1.0"
+    "commander": "^13.1.0",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^22.13.9"

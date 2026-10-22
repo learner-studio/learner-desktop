@@ -54,21 +54,15 @@ class AutomaticSyncStaysOutOfDocumentsTest(unittest.TestCase):
     under ~/Documents, macOS prompts for access -- and, because the binary is ad-hoc
     signed, prompts again after every rebuild."""
 
-    def test_sync_process_runs_from_the_runtime_dir(self):
+    def test_upload_never_touches_documents_or_a_database_credential(self):
+        # Habit rows go out over HTTPS from the app itself (OutboxSender); no bun
+        # script, no .env with a Postgres password, nothing read from ~/Documents.
         src = read(SWIFT)
-        start = src.index("func syncHabitsToServer(")
-        body = src[start:src.index("\n}\n", start)]
-
+        start = src.index("enum LearnerAPI")
+        body = src[start:src.index("// MARK: - Bundled Helpers")]
         self.assertNotIn("/Documents/", body)
-        self.assertIn(".ai-aggregator", body)
-
-    def test_build_installs_the_sync_script_and_env_into_the_runtime_dir(self):
-        build = read(BUILD)
-
-        self.assertRegex(build, r'RUNTIME_DIR="\$\{HOME\}/\.ai-aggregator"')
-        self.assertRegex(build, r'cp .*src/sync-habits\.ts" "\$\{RUNTIME_DIR\}/sync-habits\.ts"')
-        self.assertRegex(build, r'cp .*\.env" "\$\{RUNTIME_DIR\}/\.env"')
-        self.assertIn('chmod 600 "${RUNTIME_DIR}/.env"', build)
+        self.assertNotIn("bun", body)
+        self.assertNotIn(".env", read(BUILD))
 
     def test_build_reregisters_the_agent_only_when_the_plist_changed(self):
         # Re-registering (bootstrap) is what triggers macOS's "App Background Activity"
@@ -119,7 +113,7 @@ class ShutdownSequenceTest(unittest.TestCase):
         body = src[src.index("func applicationShouldTerminate("):src.index("@objc func quitApp()")]
         finalise = body.index("resetStreak()")
         wait_idle = body.index("waitUntilIdle()")
-        sync = body.index("syncHabitsToServer")
+        sync = body.index("OutboxSender.shared.drain(")
         close = body.index("logger.close()")
 
         self.assertLess(finalise, wait_idle)
@@ -130,8 +124,7 @@ class ShutdownSequenceTest(unittest.TestCase):
     def test_shutdown_is_bounded_so_quit_cannot_hang(self):
         src = read(SWIFT)
         body = src[src.index("func applicationShouldTerminate("):src.index("@objc func quitApp()")]
-        self.assertIn("deadline", body)
-        self.assertIn("attempts < 30", body)
+        self.assertRegex(body, r"drain\(until: Date\(\)\.addingTimeInterval\((\d|1\d)\)\)")
 
 
 if __name__ == "__main__":

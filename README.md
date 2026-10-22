@@ -8,21 +8,28 @@ randomised treatment arm. Historical Read AI transcripts supply the pre-treatmen
 ## Architecture
 
 ```
-screenpipe (localhost:3030)          Read AI .docx exports
-   audio_transcriptions                       │
-        │ /raw_sql poll                       │ parse_readai_transcripts.py
-        ▼                                     ▼
-  Learner Desktop (Swift)             data/historical_calls_export.json
-   TalkTimeMonitor                            │ ingest_to_postgres.ts
-        │ logTurn()                           │
-        ▼                                     │
-  ~/.ai-aggregator/behavior_experiments.sqlite│
-        │ sync-habits.ts (SSH tunnel :15432)  │
-        ▼                                     ▼
-              Postgres `habits` — habit_events + call_transcripts
-                            │
-                       GrowthBook
+screenpipe (localhost:3030)        Read AI .docx exports           ai-vault export
+  audio_transcriptions                     │                       (~/ai-vault-data)
+       │ /raw_sql poll                     │ parse_readai_transcripts.py    │
+       ▼                                   ▼                                │
+ Learner Desktop (Swift)        data/historical_calls_export.json          │
+  TalkTimeMonitor                          │                                │
+       │ logTurn()                         │ import-baseline-via-rpc.ts     │ learner-watcher.js
+       ▼                                   │                                │ (src/cli.ts watch)
+ behavior_experiments.sqlite               │                                │
+       │ recordHabitEvents                 │ recordCallTranscripts,         │ archiveConversation-
+       │                                   │ recordHabitEvents              │ Documents
+       ▼                                   ▼                                ▼
+          learner-server RPC: POST $LEARNER_API_URL/rpc/<name>, header x-api-key
 ```
+
+Every write goes to learner-server over HTTPS as `POST ${LEARNER_API_URL}/rpc/<name>`
+with body `{"data": <input>}` and the device key in `x-api-key`; the wire shapes are
+pinned in `contract/desktop.ts` (zod) and `contract/contract.json` (see
+`contract/PINNED_COMMIT`). `LEARNER_API_URL` defaults to
+`https://dev.biztoolz.app/learner-api`; the key comes from `LEARNER_API_KEY`, else the
+Keychain (`security find-generic-password -s learner-server -a ben-mbp -w`). The client
+id is `ben-mbp`.
 
 Two paths write `habit_events` and they measure different things, recorded in
 `metadata.measurement`:
@@ -40,7 +47,7 @@ comparable on the same basis.
 
 ```bash
 bun install
-cp .env.example .env   # then fill in HABITS_PG_URL
+security add-generic-password -s learner-server -a ben-mbp -w   # store the device key (prompts)
 ./scripts/build-app.sh # build and install Learner Desktop
 ```
 
@@ -49,11 +56,20 @@ cp .env.example .env   # then fill in HABITS_PG_URL
 
 ### One app, one login item
 
-Learner Desktop runs the SSH tunnel (`scripts/tunnel.sh`: Hindsight :18925, GrowthBook
-:3200, Postgres :15432) and the transcript watcher (`src/cli.ts watch`, compiled to one
-file) as child processes from its own bundle. It restarts either one if it exits, and
-stops both on quit, after its final habit flush. Their output goes to
-`~/.ai-aggregator/logs/tunnel.log` and `watcher.log`; the app's own to `menubar.log`.
+Learner Desktop runs the transcript watcher (`src/cli.ts watch`, compiled to one file,
+`learner-watcher.js watch --no-initial-sync`) as a child process from its own bundle. It
+restarts it if it exits and stops it on quit. Its output goes to
+`~/.ai-aggregator/logs/watcher.log`; the app's own to `menubar.log`.
+
+The watcher parses each changed `conversation.md` into messages
+(`src/parsers/ai-vault-messages.ts`) and sends it with `archiveConversationDocuments`,
+≤50 per call. A local ledger (`~/.ai-aggregator/sync-ledger.sqlite`, table
+`archive_ledger`) resends a conversation only when its content hash changes. A 422 parks
+that one document; 401/403 stops with "key problem"; 413 halves the batch; 429/5xx back
+off 2 s → 5 min with jitter; with no key it logs once and retries later. Conversations
+with no text messages (empty, or voice-mode audio only) are not sent. `bun src/cli.ts
+sync` sweeps the whole export once; `bun src/cli.ts status` shows the endpoint, whether
+a key is available and the ledger counts.
 
 They used to be two separate `/bin/bash` LaunchAgents. macOS lists those in System
 Settings → Login Items as "bash" from an unknown developer, and once they were switched
@@ -64,16 +80,18 @@ and the tray shows `🧠 🔴 LOGIN` if it is not.
 The bundle identifier is still `com.benpollack.ai-aggregator-menubar`: the Bluetooth
 permission and the saved Pavlok settings are keyed to it, so renaming it would reset both.
 
-Re-import the historical baseline (parse, then ingest):
+Re-import the historical baseline (parse, then send over RPC):
 
 ```bash
 python3 scripts/parse_readai_transcripts.py
-bun scripts/ingest_to_postgres.ts
+bun scripts/import-baseline-via-rpc.ts            # dry run: build + validate, counts only
+LEARNER_API_URL=... LEARNER_API_KEY=... bun scripts/import-baseline-via-rpc.ts --send
 ```
 
 ## Tests
 
-Two lanes, stdlib `unittest` only — no pytest, no dependencies.
+Two lanes, stdlib `unittest` only — no pytest, no dependencies — plus `bun test tests/ts`
+in the fast lane when bun is installed.
 
 ```bash
 ./scripts/test.sh          # fast lane (default), ~11s
@@ -88,7 +106,9 @@ functions and both capture scripts. The capture-script tests run the real
 state-changing command (`launchctl`, `pkill`, `curl`, `osascript`, `open`, `nc`,
 `sqlite3`, `bun`) is a recording stub on `PATH` and `HOME` points at a throwaway
 directory — they assert the ordering and flag handling without touching the real
-capture stack. Run this on every change.
+capture stack. `tests/ts/` covers the ai-vault message parser (and, read-only, every
+file in `~/ai-vault-data` when it exists), the RPC client against a local mock server
+(2xx, 422, 401, 413, 429), and the baseline RPC mapping. Run this on every change.
 
 **Heavy lane** (`tests/heavy/*.py`) needs the real world: screenpipe on `:3030`,
 the 209-file `.docx` corpus, `swiftc`. Each suite skips rather than fails when its

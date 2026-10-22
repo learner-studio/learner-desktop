@@ -45,34 +45,19 @@ three-minute maximum. Confirm the text on the actual display, then create that
 file. `panel.json` records AppKit visibility and opacity; it is not a substitute
 for the owner's visual confirmation. The negative cases do not hold a panel.
 
-## Remote upload and GrowthBook check
+## Remote upload check
 
-Run only when deliberately testing the real server. This writes one retained demo
-row and requires the normal `HABITS_PG_URL`, database tunnel and SSH access to `ovh`.
+Habit rows reach learner-server through its HTTPS RPC API (`recordHabitEvents`), not a
+database tunnel. To send the outbox once and see the result, with the device key in the
+Keychain (`learner-server` / `ben-mbp`):
 
 ```sh
-AIAGG_HEAVY=1 AIAGG_REMOTE_E2E=1 \
-AIAGG_COACH_E2E_SOURCE_DB="/absolute/path/to/local-evidence/live-warning/behavior_experiments.sqlite" \
-AIAGG_REMOTE_E2E_DIR="$PWD/data/verification/growthbook-$(date +%Y%m%d-%H%M%S)" \
-python3 tests/heavy/test_habit_sync_growthbook_e2e.py -v
+"$HOME/Applications/Learner Desktop.app/Contents/MacOS/learner-desktop" --drain-outbox
 ```
 
-The test copies the one verified local turn, assigns a unique event/session ID and
-sets `call_category=demo`, `metadata.simulated=true` and
-`metadata.experiment_eligible=false`. It retains the source event ID for correlation.
-It calls the actual `syncHabits` uploader with the isolated database path, verifies
-one upload followed by zero on a second sync, and checks the local acknowledgement.
-
-Over SSH it reads GrowthBook's configured Habits Telemetry exposure query and Habit
-Speech Events fact query, then queries Postgres `habits` for the exact uploaded ID
-and executes those actual GrowthBook queries. The row must exist in `habit_events`
-with the same toast/path/duration, and be excluded from both experiment queries.
-This proves source delivery and exclusion; it does not claim a synthetic turn was
-included in a refreshed GrowthBook experiment report.
-
-Remote opt-in is separate from `AIAGG_HEAVY=1`, so the ordinary heavy suite never
-uploads test telemetry implicitly. Evidence retains the server row and query
-results without exporting connection credentials.
+It exits 0 once the outbox is empty, and prints the last status (sent, parked after a 422,
+key refused, or server unreachable). Point `LEARNER_OUTBOX_DB` at a copy of the database to
+send only test rows.
 
 ## Verified on September 12, 2026
 

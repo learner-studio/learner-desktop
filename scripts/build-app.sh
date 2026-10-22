@@ -79,19 +79,6 @@ echo "Installing to ~/Applications/..."
 rm -rf "${TARGET_APP}"
 cp -R "${BUNDLE_DIR}" "${TARGET_APP}"
 
-echo "Installing runtime files to ~/.ai-aggregator (keeps the app out of ~/Documents)..."
-# The app's automatic habit sync runs from here so an ad-hoc-signed rebuild never
-# re-triggers the "access files in your Documents folder" prompt.
-RUNTIME_DIR="${HOME}/.ai-aggregator"
-mkdir -p "${RUNTIME_DIR}"
-cp "${PROJECT_DIR}/src/sync-habits.ts" "${RUNTIME_DIR}/sync-habits.ts"
-if [ -f "${PROJECT_DIR}/.env" ]; then
-  cp "${PROJECT_DIR}/.env" "${RUNTIME_DIR}/.env"
-  chmod 600 "${RUNTIME_DIR}/.env"
-else
-  echo "  ! no .env in project - habit sync will have no HABITS_PG_URL" >&2
-fi
-
 AGENT_LABEL="com.benpollack.learner-desktop"
 AGENT_SRC="${PROJECT_DIR}/menu-bar-app/${AGENT_LABEL}.plist"
 AGENT_DST="${HOME}/Library/LaunchAgents/${AGENT_LABEL}.plist"

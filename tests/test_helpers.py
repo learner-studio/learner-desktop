@@ -88,7 +88,7 @@ class AppOwnsHelpersTest(unittest.TestCase):
         # The flush pushes rows over the tunnel; stopping it first strands them.
         body = self.src[self.src.index("func applicationShouldTerminate("):
                         self.src.index("@objc func quitApp()")]
-        sync = body.index("syncHabitsToServer")
+        sync = body.index("OutboxSender.shared.drain(")
         watcher = body.index("watcher.stop(")
         tunnel = body.index("tunnel.stop(")
         self.assertLess(sync, watcher)
@@ -126,10 +126,11 @@ class BuildBundlesHelpersTest(unittest.TestCase):
         self.assertLess(self.build.index("learner-watcher.js"),
                         self.build.index('codesign --force --sign "${SIGN_IDENTITY}"'))
 
-    def test_tunnel_forwards_hindsight_growthbook_and_postgres(self):
+    def test_tunnel_forwards_only_growthbook(self):
+        # Habit rows and conversations go to learner-server over HTTPS now.
         tunnel = read(TUNNEL)
-        for forward in ("18925:127.0.0.1:18925", "3200:127.0.0.1:3200", "15432:127.0.0.1:5432"):
-            self.assertIn(forward, tunnel)
+        self.assertIn("3200:127.0.0.1:3200", tunnel)
+        self.assertEqual(tunnel.count(" -L "), 1, "only the GrowthBook forward stays")
 
 
 class LearnerDesktopNameTest(unittest.TestCase):

@@ -13,24 +13,19 @@
 # The only thing that actually stops a KeepAlive job is removing it from the launchd
 # domain (`launchctl bootout`). `launchctl stop` just triggers a respawn.
 #
-# Data safety: Learner Desktop writes habit trial rows to
-# ~/.ai-aggregator/behavior_experiments.sqlite and pushes them to Postgres over its
-# autossh tunnel by spawning `bun run src/sync-habits.ts`. sync-habits.ts syncs at most
-# 100 rows per invocation, so we loop until the unsynced count reaches zero, and we do
-# it BEFORE stopping the app (it takes the tunnel down with it). The app's own
-# shutdown then flushes anything written in between, before stopping its tunnel.
+# Data safety: Learner Desktop queues habit trial rows in
+# ~/.ai-aggregator/behavior_experiments.sqlite and sends them to learner-server over
+# HTTPS. Its clean shutdown (what bootout triggers) sends what is queued; anything it
+# cannot send stays in SQLite and goes out on next launch.
 #
 # Usage:
 #   ./scripts/stop-capture.sh                  # stop everything for this boot
 #   ./scripts/stop-capture.sh --persist        # ...and keep it off across reboot/login
 #   ./scripts/stop-capture.sh --keep-screenpipe
-#   ./scripts/stop-capture.sh --no-flush       # skip the habit sync (not recommended)
 #
 set -uo pipefail
 
-PROJECT_DIR="/Users/benpollack/code/learner-desktop"
 HABIT_DB="${HOME}/.ai-aggregator/behavior_experiments.sqlite"
-BUN_BIN="${HOME}/.bun/bin/bun"
 DOMAIN="gui/$(id -u)"
 
 AGENT_DIR="${HOME}/Library/LaunchAgents"
@@ -38,13 +33,11 @@ LABEL_APP="com.benpollack.learner-desktop"
 LABEL_SCREENPIPE="screenpipe"
 
 PERSIST=0
-FLUSH=1
 STOP_SCREENPIPE=1
 
 for arg in "$@"; do
   case "$arg" in
     --persist)          PERSIST=1 ;;
-    --no-flush)         FLUSH=0 ;;
     --keep-screenpipe)  STOP_SCREENPIPE=0 ;;
     -h|--help)          sed -n '2,30p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
@@ -99,42 +92,6 @@ stop_agent() {
 }
 
 ########################################################################
-# 1. Flush pending habit rows to Postgres (tunnel and app still running)
-########################################################################
-if [ "$FLUSH" -eq 1 ]; then
-  say "Flushing habit rows to Postgres"
-  before="$(unsynced_count)"
-  info "unsynced rows: ${before}"
-
-  if [ "$before" = "0" ]; then
-    info "nothing to flush"
-  elif [ ! -x "$BUN_BIN" ]; then
-    warn "bun not found at ${BUN_BIN} — cannot flush. Rows stay local until next start."
-  else
-    if ! nc -z 127.0.0.1 15432 >/dev/null 2>&1; then
-      warn "Postgres tunnel (127.0.0.1:15432) is not up — flush will fail."
-    fi
-    # sync-habits.ts pushes at most 100 rows per run; loop until drained or stuck.
-    for _ in $(seq 1 50); do
-      remaining="$(unsynced_count)"
-      [ "$remaining" = "0" ] && break
-      ( cd "$PROJECT_DIR" && "$BUN_BIN" run src/sync-habits.ts ) 2>&1 | sed 's/^/    /'
-      after="$(unsynced_count)"
-      if [ "$after" = "$remaining" ]; then
-        warn "no progress (still ${after} unsynced) — aborting flush loop"
-        break
-      fi
-    done
-    final="$(unsynced_count)"
-    if [ "$final" = "0" ]; then
-      info "all habit rows synced"
-    else
-      warn "${final} rows still unsynced — they are safe in ${HABIT_DB} and will sync on next start"
-    fi
-  fi
-fi
-
-########################################################################
 # 2. Learner Desktop before screenpipe — it re-arms screenpipe audio every
 #    8 seconds (updateAllStatuses -> ensureAudioDevicesActive ->
 #    POST /audio/device/start). Its clean shutdown flushes late habit rows,
@@ -153,7 +110,7 @@ done
 pkill -f "MacOS/learner-desktop" 2>/dev/null && info "killed leftover learner-desktop process"
 # A crashed or SIGKILLed app cannot stop its helpers; nothing else would.
 pkill -f "learner-watcher.js" 2>/dev/null && info "killed leftover watcher process"
-pkill -f "autossh.*18925" 2>/dev/null && info "killed leftover autossh process"
+pkill -f "autossh.*3200:127.0.0.1:3200" 2>/dev/null && info "killed leftover autossh process"
 
 ########################################################################
 # 3. screenpipe — stop capture over the API; quit and escalate only if that fails
@@ -239,7 +196,7 @@ fi
 ########################################################################
 say "Final state"
 launchctl list | grep -E "learner-desktop|screenpipe" || info "no learner-desktop/screenpipe launchd jobs loaded"
-info "unsynced habit rows: $(unsynced_count)"
+info "habit rows queued to send: $(unsynced_count)"
 echo
 info "screenpipe-mcp node processes are MCP servers owned by Claude Desktop / Claude Code."
 info "They hold no capture state; quit those clients if you want them gone."

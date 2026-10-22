@@ -1,133 +1,80 @@
 #!/usr/bin/env bun
 import { Command } from 'commander'
 import { config } from './config.js'
-import { HindsightClient } from './hindsight-client.js'
+import { LearnerApiClient } from './learner-api.js'
 import { SyncLedger } from './ledger.js'
-import { SyncService } from './sync-service.js'
+import { SyncService, type SyncSummary } from './sync-service.js'
 import { AggregatorWatcher } from './watcher.js'
 
 const program = new Command()
 
 program
-  .name('ai-aggregator')
-  .description('Real-time AI conversation and transcript sync pipeline to Hindsight')
-  .version('1.0.0')
+  .name('learner-watcher')
+  .description('Archive ai-vault conversations to learner-server (archiveConversationDocuments RPC)')
+  .version('2.0.0')
+
+function printSummary(s: SyncSummary): void {
+  console.log(`  Files discovered:   ${s.discovered}`)
+  console.log(`  Already up to date: ${s.alreadyUpToDate}`)
+  console.log(`  No text messages:   ${s.emptySkipped}`)
+  console.log(`  Unreadable:         ${s.parseFailed}`)
+  console.log(`  Archived:           ${s.synced}`)
+  console.log(`  Parked (refused):   ${s.parked}`)
+  console.log(`  RPC requests:       ${s.requests}`)
+  if (s.stopped) console.log(`  Stopped early:      ${s.stopped} (${s.remaining} not sent)`)
+  console.log(`  Duration:           ${(s.durationMs / 1000).toFixed(2)}s`)
+}
 
 program
   .command('status')
-  .description('Check Hindsight server health and local sync ledger status')
-  .action(async () => {
-    const client = new HindsightClient()
+  .description('Show the endpoint, whether a device key is available, and the local ledger counts')
+  .action(() => {
+    const api = new LearnerApiClient()
     const ledger = new SyncLedger()
-
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-    console.log(' AI Aggregator -> Hindsight Status Report')
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-    console.log(`Endpoint: ${config.hindsight.baseUrl}`)
-    console.log(`Target Bank: ${config.hindsight.bank}`)
-    console.log('')
-
-    // Health check
-    process.stdout.write('Checking Hindsight connection... ')
-    const health = await client.checkHealth()
-    if (health.healthy) {
-      console.log('✓ Healthy (Connected to dev server)')
-    } else {
-      console.log(`✗ Unreachable: ${health.error}`)
-      console.log('Tip: Check if the tunnel is running with `bun run tunnel` or `curl http://127.0.0.1:18925/health`')
-    }
-
-    // Ledger Stats
+    const service = new SyncService(api, ledger)
     const stats = ledger.getStats()
-    ledger.updateStatusFile({ healthy: health.healthy })
-    console.log('')
-    console.log('Local Ledger Statistics:')
-    console.log(`  • Total tracked conversations: ${stats.total}`)
-    console.log(`  • Successfully synced:         ${stats.synced}`)
-    console.log(`  • Failed / Pending retry:      ${stats.failed}`)
-
-    // File discovery check
-    const syncService = new SyncService(client, ledger)
-    const discovered = syncService.findConversationFiles()
-    console.log('')
-    console.log(`Discovered on disk: ${discovered.length} conversation.md files in ${config.paths.aiVaultData}`)
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-
+    console.log(`Endpoint:    ${api.baseUrl}/rpc/archiveConversationDocuments`)
+    console.log(`Client id:   ${api.clientId}`)
+    console.log(`Device key:  ${api.hasKey() ? 'available' : 'MISSING (set LEARNER_API_KEY or Keychain learner-server/ben-mbp)'}`)
+    console.log(`Ledger:      ${stats.total} tracked, ${stats.synced} archived, ${stats.failed} parked, ${stats.skipped} without text`)
+    console.log(`On disk:     ${service.findConversationFiles().length} conversation.md files in ${config.paths.aiVaultData}`)
+    ledger.updateStatusFile()
     ledger.close()
   })
 
 program
   .command('sync')
-  .description('Run a batch backfill of conversation transcripts into Hindsight')
-  .option('-l, --limit <number>', 'Limit number of conversations to sync', parseInt)
-  .option('-f, --force', 'Force re-sync even if content hash matches')
-  .option('-p, --provider <name>', 'Filter by provider (chatgpt, claude)')
-  .option('-v, --verbose', 'Print verbose error details')
+  .description('Archive every conversation whose content changed since it was last sent')
+  .option('-l, --limit <number>', 'Only consider the first N files', (v) => parseInt(v, 10))
+  .option('-f, --force', 'Resend even if the content hash matches')
+  .option('-p, --provider <name>', 'Only one provider directory (chatgpt, claude, gemini)')
   .action(async (options) => {
-    const client = new HindsightClient()
     const ledger = new SyncLedger()
-    const syncService = new SyncService(client, ledger)
-
-    console.log('Connecting to Hindsight...')
-    const health = await client.checkHealth()
-    if (!health.healthy) {
-      console.error(`Error: Cannot reach Hindsight at ${config.hindsight.baseUrl}: ${health.error}`)
-      process.exit(1)
-    }
-
-    console.log(`Starting backfill to bank: ${config.hindsight.bank}...`)
-    if (options.limit) console.log(`Limit: ${options.limit}`)
-    if (options.provider) console.log(`Provider filter: ${options.provider}`)
-    if (options.force) console.log('Force re-sync: Enabled')
-
-    const summary = await syncService.runSync({
-      limit: options.limit,
-      force: options.force,
-      verbose: options.verbose,
-      provider: options.provider,
-    })
-
-    console.log('')
-    console.log('═══════════════════════════════════════════════════')
-    console.log(' Backfill Summary')
-    console.log('═══════════════════════════════════════════════════')
-    console.log(`  Files Discovered:   ${summary.discovered}`)
-    console.log(`  Already Up-to-Date: ${summary.alreadyUpToDate}`)
-    console.log(`  Newly Synced:       ${summary.synced}`)
-    console.log(`  Failed:             ${summary.failed}`)
-    console.log(`  Async Operations:   ${summary.operations.length}`)
-    console.log(`  Duration:           ${(summary.durationMs / 1000).toFixed(2)}s`)
-    console.log('═══════════════════════════════════════════════════')
-
+    const service = new SyncService(new LearnerApiClient(), ledger)
+    const summary = await service.runSync({ limit: options.limit, force: options.force, provider: options.provider })
+    printSummary(summary)
     ledger.close()
+    process.exit(summary.stopped ? 1 : 0)
   })
 
 program
   .command('watch')
-  .description('Start the real-time file watcher daemon')
-  .option('--no-initial-sync', 'Skip initial backfill sweep on start')
+  .description('Watch the ai-vault export and archive conversations as they change')
+  .option('--no-initial-sync', 'Skip the initial sweep over the whole export on start')
   .action(async (options) => {
-    const client = new HindsightClient()
     const ledger = new SyncLedger()
-    const syncService = new SyncService(client, ledger)
+    const service = new SyncService(new LearnerApiClient(), ledger)
+    ledger.updateStatusFile()
 
-    console.log('Checking Hindsight connection before starting watcher...')
-    const health = await client.checkHealth()
-    if (!health.healthy) {
-      console.error(`Warning: Cannot reach Hindsight at ${config.hindsight.baseUrl}: ${health.error}`)
-      console.error('The watcher will continue running and retry when Hindsight is available.')
-    } else {
-      console.log('✓ Connected to Hindsight')
-    }
+    const watcher = new AggregatorWatcher(service)
+    watcher.start([config.paths.aiVaultData])
 
     if (options.initialSync) {
-      console.log('\nRunning initial sync sweep...')
-      const summary = await syncService.runSync()
-      console.log(`Initial sweep complete: ${summary.synced} synced, ${summary.alreadyUpToDate} already up-to-date, ${summary.failed} failed.\n`)
+      console.log('Running initial sweep...')
+      service.enqueue(service.findConversationFiles()).catch((err) => {
+        console.error(`Initial sweep failed: ${(err as Error).message}`)
+      })
     }
-
-    const watcher = new AggregatorWatcher(syncService)
-    watcher.start([config.paths.aiVaultData])
 
     const cleanup = () => {
       console.log('\nShutting down watcher...')
@@ -135,9 +82,11 @@ program
       ledger.close()
       process.exit(0)
     }
-
     process.on('SIGINT', cleanup)
     process.on('SIGTERM', cleanup)
   })
+
+// A watcher that dies stops archiving; log and keep going instead.
+process.on('unhandledRejection', (err) => console.error(`[learner-watcher] unhandled: ${(err as Error)?.message ?? err}`))
 
 program.parse(process.argv)

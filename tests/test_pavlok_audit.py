@@ -13,7 +13,7 @@ SOURCE = pathlib.Path(__file__).resolve().parents[1] / 'menu-bar-app/main.swift'
 class InterventionPersistenceTest(unittest.TestCase):
     def test_request_and_ack_survive_close_with_same_operation_id(self):
         source = SOURCE.read_text()
-        logger = source.split('class HabitEventLogger {', 1)[1].split('\nfunc syncHabitsToServer', 1)[0]
+        logger = source.split('class HabitEventLogger {', 1)[1].split('\n// MARK: - learner-server API', 1)[0]
         with tempfile.TemporaryDirectory() as directory:
             logger = logger.replace('let dir = home + "/.ai-aggregator"',
                                     'let dir = ' + json.dumps(directory))
