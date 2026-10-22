@@ -34,6 +34,20 @@ for arg in "$@"; do
   esac
 done
 
+# "on" if screenpipe's API reports any active capture, "off" if it reports none,
+# "unknown" if the API does not answer. (Same check as stop-capture.sh.)
+capture_state() {
+  curl -s --max-time 3 http://127.0.0.1:3030/health 2>/dev/null | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except ValueError:
+    print("unknown")
+    sys.exit()
+audio = (d.get("capture_status") or {}).get("active_audio_devices") or 0
+print("on" if audio > 0 or d.get("frame_status") == "ok" else "off")'
+}
+
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 info() { printf '    %s\n' "$*"; }
 warn() { printf '    \033[33m! %s\033[0m\n' "$*"; }
@@ -77,6 +91,19 @@ if [ "$START_SCREENPIPE" -eq 1 ]; then
   done
   if curl -s --max-time 2 http://127.0.0.1:3030/health >/dev/null 2>&1; then
     info "screenpipe API :3030 is up"
+    # Reopening only leaves search-only mode. Capture that stop-capture.sh paused over
+    # the API (without quitting, to avoid the "Quit screenpipe?" dialog) has to be
+    # started over the API again.
+    sleep 3
+    if [ "$(capture_state)" = "off" ]; then
+      info "capture is paused — resuming it over the local API"
+      curl -s --max-time 5 -X POST http://127.0.0.1:3030/audio/start >/dev/null 2>&1 || true
+      for mid in $(curl -s --max-time 3 http://127.0.0.1:3030/vision/list 2>/dev/null \
+                   | grep -oE '"id"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+$'); do
+        curl -s --max-time 5 -X POST http://127.0.0.1:3030/vision/device/start \
+          -H 'Content-Type: application/json' -d "{\"monitor_id\": ${mid}}" >/dev/null 2>&1 || true
+      done
+    fi
   else
     warn "screenpipe API :3030 not responding after 60s — check ~/.screenpipe/screenpipe-app.*.log"
   fi
