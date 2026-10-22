@@ -84,6 +84,33 @@ export function nonConformingTranscriptLines(t: string): number {
 // biome-ignore lint: rows come from JSON
 type Row = Record<string, any>
 
+/**
+ * The learner's own labels in Read.ai exports (README, "Historical baseline rules").
+ * Matched exactly: `Conference Room (Ben Pollack) - Speaker N` is someone else in the
+ * room, and UNKNOWN_SPEAKER is never assumed to be him.
+ */
+export const LEARNER_NAMES = new Set(['Ben Pollack', 'Ben', 'Benjamin', 'Benjamin Pollack'])
+
+export interface Utterance { speaker: string; text: string; at: string; learner: boolean }
+
+/** `cleanTranscript` → utterances in spoken order, one per line; `at` = eventTime + offset. */
+export function utterancesFor(cleanTranscript: string, eventTime: string): Utterance[] {
+  const start = Date.parse(eventTime)
+  const out: Utterance[] = []
+  // A missing or offset-less eventTime is rejected by validation; don't throw here.
+  if (!Number.isFinite(start)) return out
+  for (const raw of cleanTranscript.split('\n')) {
+    const m = /^\((\d+):(\d{2})(?::(\d{2}))?\) ([^:]+): (.*)$/.exec(raw.trim())
+    if (!m) continue
+    const [h, mm, ss] = m[3] === undefined ? [0, Number(m[1]), Number(m[2])] : [Number(m[1]), Number(m[2]), Number(m[3])]
+    const speaker = m[4].trim().slice(0, 120)
+    const text = m[5].trim()
+    if (!speaker || !text) continue
+    out.push({ speaker, text, at: new Date(start + ((h * 60 + mm) * 60 + ss) * 1000).toISOString(), learner: LEARNER_NAMES.has(speaker) })
+  }
+  return out
+}
+
 export function mapCall(c: Row, importerSource?: string): unknown {
   return {
     callId: callIdFor(String(c.session_id)),
@@ -101,6 +128,7 @@ export function mapCall(c: Row, importerSource?: string): unknown {
     benTurns: numOrNull(c.ben_turns),
     benTotalSpeechSec: numOrNull(c.ben_total_speech_sec),
     cleanTranscript: c.clean_transcript ?? '',
+    utterances: utterancesFor(c.clean_transcript ?? '', toIsoWithOffset(c.event_time) ?? ''),
     metadata: { ...(c.metadata ?? {}), ...(importerSource && !c.metadata?.source ? { source: importerSource } : {}) },
   }
 }
