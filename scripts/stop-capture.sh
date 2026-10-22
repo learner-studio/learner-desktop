@@ -28,7 +28,7 @@
 #
 set -uo pipefail
 
-PROJECT_DIR="/Users/benpollack/Documents/AI aggregator logger project"
+PROJECT_DIR="/Users/benpollack/code/learner-desktop"
 HABIT_DB="${HOME}/.ai-aggregator/behavior_experiments.sqlite"
 BUN_BIN="${HOME}/.bun/bin/bun"
 DOMAIN="gui/$(id -u)"

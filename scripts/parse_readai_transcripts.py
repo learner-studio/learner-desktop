@@ -24,8 +24,8 @@ import uuid
 import datetime
 import xml.etree.ElementTree as ET
 
-TRANSCRIPTS_DIR = "/Users/benpollack/Documents/AI aggregator logger project/Past Call Transcripts/Read AI Meeting Notes"
-OUTPUT_JSON = "/Users/benpollack/Documents/AI aggregator logger project/data/historical_calls_export.json"
+TRANSCRIPTS_DIR = "/Users/benpollack/code/learner-desktop/Past Call Transcripts/Read AI Meeting Notes"
+OUTPUT_JSON = "/Users/benpollack/code/learner-desktop/data/historical_calls_export.json"
 
 NAMESPACE_UUID = uuid.UUID("e0b1e9e0-55d0-47c8-beb4-d791e36ffe8c")
 
