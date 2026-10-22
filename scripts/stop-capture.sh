@@ -142,6 +142,13 @@ fi
 ########################################################################
 say "Stopping Learner Desktop"
 stop_agent "$LABEL_APP"
+# bootout returns before the app's clean shutdown is done, and that shutdown still
+# needs its tunnel to flush habit rows. Wait for it, so what is killed below really
+# is left over (launchd SIGKILLs a job that has not exited after 20s anyway).
+for _ in $(seq 1 30); do
+  pgrep -f "MacOS/learner-desktop" >/dev/null 2>&1 || break
+  sleep 1
+done
 # Any stragglers (a hand-launched copy outside launchd) can now be killed for real.
 pkill -f "MacOS/learner-desktop" 2>/dev/null && info "killed leftover learner-desktop process"
 # A crashed or SIGKILLed app cannot stop its helpers; nothing else would.
@@ -149,11 +156,15 @@ pkill -f "learner-watcher.js" 2>/dev/null && info "killed leftover watcher proce
 pkill -f "autossh.*18925" 2>/dev/null && info "killed leftover autossh process"
 
 ########################################################################
-# 3. screenpipe — graceful stop, then quit, then escalate
+# 3. screenpipe — stop capture over the API; quit and escalate only if that fails
 #    screenpipe installs NO SIGTERM handler, so a bare SIGTERM skips
 #    process_exit::run_blocking_pre_exit_teardown and can leave the 6 GB
-#    db.sqlite mid-write. Pause capture over the local API first, then send a
-#    real quit (routed through applicationShouldTerminate -> quit teardown).
+#    db.sqlite mid-write. Pause capture over the local API first. If that stops
+#    it, leave the process be: with a capture session active, Quit pops "Quit
+#    screenpipe? All recording will stop" and waits for a click, and since
+#    2.7.116 it does not exit anyway (it stays up serving saved history). Only
+#    when capture is still on, or the API cannot say, send a real quit
+#    (routed through applicationShouldTerminate -> quit teardown).
 ########################################################################
 if [ "$STOP_SCREENPIPE" -eq 1 ]; then
   say "Stopping screenpipe"
@@ -171,20 +182,29 @@ if [ "$STOP_SCREENPIPE" -eq 1 ]; then
     info "local API on :3030 not responding (screenpipe may already be down)"
   fi
 
+  quit_sent=0
   if pgrep -f "screenpipe.app/Contents/MacOS/screenpipe-app" >/dev/null 2>&1; then
-    info "sending quit (runs pre-exit teardown; confirm the dialog if one appears)"
-    osascript -e 'tell application "screenpipe" to quit' >/dev/null 2>&1 || true
-    for _ in $(seq 1 30); do
-      pgrep -f "screenpipe.app/Contents/MacOS/screenpipe-app" >/dev/null 2>&1 || break
-      sleep 1
-    done
+    if [ "$(capture_state)" = "off" ]; then
+      info "capture stopped over the API; screenpipe stays up serving saved history (no Quit, so no dialog)"
+      info "(./scripts/start-capture.sh resumes recording)"
+    else
+      info "sending quit (runs pre-exit teardown; confirm the dialog if one appears)"
+      osascript -e 'tell application "screenpipe" to quit' >/dev/null 2>&1 || true
+      quit_sent=1
+      for _ in $(seq 1 30); do
+        pgrep -f "screenpipe.app/Contents/MacOS/screenpipe-app" >/dev/null 2>&1 || break
+        sleep 1
+      done
+    fi
   fi
 
   # Since 2.7.116 a Quit while the server runs does not exit: capture stops and the
   # process stays to serve saved history ("search-only"). That is stopped as far as
   # this script is concerned, so it is left alone. Signals are only for a quit that
   # did not take: capture still on, or an API that cannot say.
-  if pgrep -f "screenpipe.app/Contents/MacOS/screenpipe-app" >/dev/null 2>&1; then
+  if ! pgrep -f "screenpipe.app/Contents/MacOS/screenpipe-app" >/dev/null 2>&1; then
+    info "screenpipe-app is stopped"
+  elif [ "$quit_sent" -eq 1 ]; then
     state="$(capture_state)"
     if [ "$state" = "off" ]; then
       info "screenpipe stayed open in search-only mode: capture is off, it only serves saved history"
@@ -195,8 +215,6 @@ if [ "$STOP_SCREENPIPE" -eq 1 ]; then
       sleep 5
       pkill -KILL -f "screenpipe.app/Contents/MacOS/screenpipe-app" 2>/dev/null && warn "SIGKILLed screenpipe-app"
     fi
-  else
-    info "screenpipe-app is stopped"
   fi
 
   # The Tauri autostart plugin (tauri-plugin-autostart, MacosLauncher::LaunchAgent)

@@ -215,6 +215,15 @@ class StopOrderingTest(unittest.TestCase):
              "launchctl bootout gui/%d/screenpipe" % os.getuid()],
         )
 
+    def test_waits_for_the_app_to_exit_before_killing_leftovers(self):
+        # bootout returns before the app's clean shutdown, which still needs its
+        # tunnel to flush habit rows. Killing "leftovers" straight away cut it off.
+        _, calls = self.jail.run(STOP)
+        waited = indexes(calls, "pgrep -f MacOS/learner-desktop")
+        killed = indexes(calls, "pkill -f learner-watcher.js")
+        self.assertTrue(waited, "never waited for the app to exit")
+        self.assertLess(waited[0], killed[0])
+
     def test_kills_helpers_a_crashed_app_left_behind(self):
         # A SIGKILLed app cannot stop its children; nothing else would.
         _, calls = self.jail.run(STOP)
@@ -295,14 +304,18 @@ class ScreenpipeTeardownTest(unittest.TestCase):
         self.assertTrue(quit_call, "never sent a graceful quit")
         self.assertLess(audio_stop[0], quit_call[0])
 
-    def test_leaves_screenpipe_in_search_only_mode_alone(self):
+    def test_does_not_quit_once_the_api_has_stopped_capture(self):
+        # With a capture session active, Quit pops "Quit screenpipe? All recording will
+        # stop" and waits for a click (seen 2026-10-22), and since 2.7.116 it would not
+        # exit anyway. Pausing over the API already stops capture, so stop there.
         jail = Jail(health_ok=True, screenpipe_running=True, health_body=SEARCH_ONLY)
         self.addCleanup(jail.close)
         proc, calls = jail.run(STOP)
-        self.assertTrue(indexes(calls, "osascript"), "never sent a graceful quit")
+        self.assertTrue(indexes(calls, "/audio/stop"), "never paused audio capture")
+        self.assertEqual(indexes(calls, "osascript"), [])
         self.assertEqual(indexes(calls, "pkill -TERM"), [])
         self.assertEqual(indexes(calls, "pkill -KILL"), [])
-        self.assertIn("search-only", proc.stdout)
+        self.assertIn("capture stopped over the API", proc.stdout)
 
     def test_escalates_when_the_api_cannot_confirm_capture_stopped(self):
         jail = Jail(health_ok=False, screenpipe_running=True)
@@ -395,6 +408,21 @@ class StartOrderingTest(unittest.TestCase):
         jail = self.start_jail(screenpipe_running=True, plists=self.PLISTS)
         _, calls = jail.run(START)
         self.assertTrue(indexes(calls, "open -g -a /Applications/screenpipe.app"))
+
+    def test_resumes_capture_over_the_api_when_reopening_is_not_enough(self):
+        # Reopening only leaves search-only mode; capture paused over the API by
+        # stop-capture.sh has to be started over the API again.
+        jail = self.start_jail(screenpipe_running=True, health_body=SEARCH_ONLY, plists=self.PLISTS)
+        _, calls = jail.run(START)
+        reopen = indexes(calls, "open -g -a /Applications/screenpipe.app")
+        resume = indexes(calls, "-X POST http://127.0.0.1:3030/audio/start")
+        self.assertTrue(reopen and resume)
+        self.assertLess(reopen[0], resume[0])
+
+    def test_leaves_a_capturing_screenpipe_alone_on_start(self):
+        jail = self.start_jail(screenpipe_running=True, health_body=CAPTURING, plists=self.PLISTS)
+        _, calls = jail.run(START)
+        self.assertEqual(indexes(calls, "/audio/start"), [])
 
     def test_a_missing_plist_warns_and_falls_back_instead_of_crashing(self):
         jail = self.start_jail(plists=())
