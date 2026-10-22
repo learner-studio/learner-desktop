@@ -249,36 +249,16 @@ class StopOrderingTest(unittest.TestCase):
         self.assertTrue(indexes(calls, "learner-desktop"))
 
 
-class StopFlushTest(unittest.TestCase):
-    """Habit rows must be pushed to Postgres while the tunnel is still up."""
+class StopUploadTest(unittest.TestCase):
+    """The app sends its own queued rows over HTTPS when it quits; the script no
+    longer runs a bun/Postgres flush of its own."""
 
-    def test_flush_runs_before_the_app_takes_the_tunnel_down(self):
-        jail = Jail(habit_db=True, unsynced="7")
-        self.addCleanup(jail.close)
-        _, calls = jail.run(STOP)
-
-        counted = indexes(calls, "sqlite3")
-        app = indexes(calls, "bootout gui/%d/com.benpollack.learner-desktop" % os.getuid())
-        self.assertTrue(counted, "never checked the unsynced row count")
-        self.assertTrue(app)
-        self.assertLess(counted[0], app[0],
-                        "flush must happen before the app stops its tunnel")
-
-    def test_flush_loop_aborts_when_the_count_stops_dropping(self):
-        # sqlite3 always reports 7, so no row ever drains. The loop must give up
-        # rather than spin its 50 iterations (or forever).
+    def test_never_runs_a_database_flush(self):
         jail = Jail(habit_db=True, unsynced="7")
         self.addCleanup(jail.close)
         proc, calls = jail.run(STOP)
-        self.assertIn("no progress", proc.stdout)
-        self.assertLessEqual(len([c for c in calls if c.startswith("bun")]), 2)
-
-    def test_no_flush_skips_the_sync_entirely(self):
-        jail = Jail(habit_db=True, unsynced="7")
-        self.addCleanup(jail.close)
-        proc, calls = jail.run(STOP, "--no-flush")
         self.assertEqual([c for c in calls if c.startswith("bun")], [])
-        self.assertNotIn("Flushing habit rows", proc.stdout)
+        self.assertIn("queued to send: 7", proc.stdout)
 
 
 # /health as screenpipe 2.7.116 reports it before and after Quit. Since 2.7.116 a Quit
@@ -368,12 +348,12 @@ class StartOrderingTest(unittest.TestCase):
                  for c in calls if c.startswith("launchctl bootstrap")]
         self.assertEqual(order, ["screenpipe", "com.benpollack.learner-desktop"])
 
-    def test_waits_for_the_apps_tunnel_after_starting_the_app(self):
+    def test_checks_learner_server_after_starting_the_app(self):
         jail = self.start_jail(plists=self.PLISTS)
         _, calls = jail.run(START)
         app = indexes(calls, "bootstrap gui/%d" % os.getuid())[-1]
-        probe = indexes(calls, "nc -z 127.0.0.1 15432")
-        self.assertTrue(probe, "never checked the Postgres forward")
+        probe = indexes(calls, "learner-api/api/health")
+        self.assertTrue(probe, "never checked learner-server")
         self.assertLess(app, probe[0])
 
     def test_enables_each_job_before_bootstrapping_it(self):

@@ -1438,7 +1438,8 @@ class HabitEventLogger {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let dir = home + "/.ai-aggregator"
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        self.dbPath = dir + "/behavior_experiments.sqlite"
+        // LEARNER_OUTBOX_DB points tests (--drain-outbox) at a scratch database.
+        self.dbPath = ProcessInfo.processInfo.environment["LEARNER_OUTBOX_DB"] ?? dir + "/behavior_experiments.sqlite"
         openAndInitDb()
     }
 
@@ -1597,6 +1598,83 @@ class HabitEventLogger {
         return count
     }
 
+    /// Up to `limit` unsent rows as `recordHabitEvents` events (contract/desktop.ts,
+    /// DesktopHabitEvent), oldest first. synced_to_server: 0 unsent, 1 sent, 2 parked
+    /// (the server rejected the row itself with 422; kept for inspection, never resent).
+    func unsentEvents(limit: Int) -> [[String: Any]] {
+        var events: [[String: Any]] = []
+        queue.sync {
+            guard let db = self.db else { return }
+            let sql = """
+            SELECT event_id, session_id, call_app, call_category, timestamp, habit_type, treatment_arm,
+                   turn_duration_sec, words_spoken, warning_fired_at, shock_fired_at, latency_to_yield_sec,
+                   breached_30s, breached_60s, was_rewarded, metadata
+            FROM habit_events WHERE synced_to_server = 0 ORDER BY timestamp ASC LIMIT ?;
+            """
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+            sqlite3_bind_int(stmt, 1, Int32(limit))
+            func text(_ i: Int32) -> String? {
+                sqlite3_column_type(stmt, i) == SQLITE_NULL ? nil : String(cString: sqlite3_column_text(stmt, i))
+            }
+            // Contract `Seconds` is a non-negative number; anything else would get the whole batch a 422.
+            func seconds(_ i: Int32) -> Any {
+                guard sqlite3_column_type(stmt, i) != SQLITE_NULL else { return NSNull() }
+                let v = sqlite3_column_double(stmt, i)
+                return v.isFinite && v >= 0 ? v : NSNull()
+            }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let meta = text(15).flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] } ?? [:]
+                events.append([
+                    "eventId": text(0) ?? "",
+                    "sessionId": text(1) ?? "",
+                    "callApp": text(2) as Any? ?? NSNull(),
+                    "callCategory": text(3) as Any? ?? NSNull(),
+                    "timestamp": HabitEventLogger.isoWithOffset(text(4) ?? ""),
+                    "habitType": text(5) ?? "",
+                    "treatmentArm": text(6) as Any? ?? NSNull(),
+                    "turnDurationSec": seconds(7),
+                    "wordsSpoken": sqlite3_column_type(stmt, 8) == SQLITE_NULL ? NSNull() : Int(sqlite3_column_int(stmt, 8)) as Any,
+                    "warningFiredAtSec": seconds(9),
+                    "shockFiredAtSec": seconds(10),
+                    "latencyToYieldSec": seconds(11),
+                    "breached30s": sqlite3_column_int(stmt, 12) != 0,
+                    "breached60s": sqlite3_column_int(stmt, 13) != 0,
+                    "wasRewarded": sqlite3_column_int(stmt, 14) != 0,
+                    "metadata": meta,
+                ])
+            }
+            sqlite3_finalize(stmt)
+        }
+        return events
+    }
+
+    /// Legacy rows hold "YYYY-MM-DD HH:MM:SS" (UTC); the contract wants ISO-8601 with an offset.
+    static func isoWithOffset(_ raw: String) -> String {
+        if ISO8601DateFormatter().date(from: raw) != nil { return raw }
+        let legacy = DateFormatter()
+        legacy.locale = Locale(identifier: "en_US_POSIX")
+        legacy.timeZone = TimeZone(identifier: "UTC")
+        legacy.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return legacy.date(from: raw).map { ISO8601DateFormatter().string(from: $0) } ?? raw
+    }
+
+    func mark(_ eventIds: [String], as state: Int) {
+        guard !eventIds.isEmpty else { return }
+        queue.sync {
+            guard let db = self.db else { return }
+            let placeholders = Array(repeating: "?", count: eventIds.count).joined(separator: ",")
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "UPDATE habit_events SET synced_to_server = \(state) WHERE event_id IN (\(placeholders));", -1, &stmt, nil) == SQLITE_OK else { return }
+            let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+            for (i, id) in eventIds.enumerated() {
+                sqlite3_bind_text(stmt, Int32(i + 1), (id as NSString).utf8String, -1, SQLITE_TRANSIENT)
+            }
+            sqlite3_step(stmt)
+            sqlite3_finalize(stmt)
+        }
+    }
+
     func getTotalTrialCount() -> Int {
         var count = 0
         queue.sync {
@@ -1613,37 +1691,163 @@ class HabitEventLogger {
     }
 }
 
-func syncHabitsToServer(completion: ((Bool) -> Void)? = nil) {
-    DispatchQueue.global(qos: .utility).async {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/Users/benpollack/.bun/bin/bun")
-        // The sync runs automatically (every 8s and at shutdown), so it must not touch
-        // ~/Documents: the app is ad-hoc signed, its identity changes on every rebuild,
-        // and macOS would re-prompt for Documents access after each build. build-app.sh
-        // installs sync-habits.ts and .env into ~/.ai-aggregator, which needs no grant.
-        let runtimeDir = FileManager.default.homeDirectoryForCurrentUser.path + "/.ai-aggregator"
-        task.arguments = ["run", runtimeDir + "/sync-habits.ts"]
-        task.currentDirectoryURL = URL(fileURLWithPath: runtimeDir)   // bun loads .env from cwd
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = pipe
-        do {
-            try task.run()
-            task.waitUntilExit()
-            let ok = task.terminationStatus == 0
-            if ok {
-                print("[HabitSync] Sync script completed successfully.")
-            } else {
-                let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                print("[HabitSync] Sync script exited with code \(task.terminationStatus): \(out)")
-            }
-            fflush(stdout)
-            completion?(ok)
-        } catch {
-            print("[HabitSync] Failed to spawn bun process: \(error.localizedDescription)")
-            fflush(stdout)
-            completion?(false)
+// MARK: - learner-server API
+
+/// HTTPS RPC to learner-server (spec: learner-server docs/learner-desktop-api.md; wire
+/// shapes pinned in contract/). The app no longer writes into Postgres or Hindsight
+/// over the SSH tunnel: rows wait in the local SQLite outbox and go out from here.
+enum LearnerAPI {
+    static let baseURL = ProcessInfo.processInfo.environment["LEARNER_API_URL"] ?? "https://dev.biztoolz.app/learner-api"
+    static let clientId = "ben-mbp"
+
+    /// The device key: LEARNER_API_KEY (tests), else the Keychain item the operator
+    /// stored with `security add-generic-password -s learner-server -a ben-mbp`. Read
+    /// through /usr/bin/security, which that item trusts, so a rebuilt app is not prompted.
+    static func deviceKey() -> String? {
+        if let k = ProcessInfo.processInfo.environment["LEARNER_API_KEY"], !k.isEmpty { return k }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        p.arguments = ["find-generic-password", "-s", "learner-server", "-a", clientId, "-w"]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return nil }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        let key = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return p.terminationStatus == 0 && !key.isEmpty ? key : nil
+    }
+
+    /// POST {"data": input} to /rpc/<name>. Status 0 means no response at all.
+    static func call(_ name: String, _ input: [String: Any], key: String, timeout: TimeInterval = 20) -> (status: Int, body: Any?) {
+        guard let url = URL(string: "\(baseURL)/rpc/\(name)"),
+              let body = try? JSONSerialization.data(withJSONObject: ["data": input]) else { return (0, nil) }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = timeout
+        req.setValue("application/json", forHTTPHeaderField: "content-type")
+        req.setValue(key, forHTTPHeaderField: "x-api-key")
+        req.httpBody = body
+        var result: (Int, Any?) = (0, nil)
+        let done = DispatchSemaphore(value: 0)
+        URLSession.shared.dataTask(with: req) { data, response, _ in
+            result = ((response as? HTTPURLResponse)?.statusCode ?? 0, data.flatMap { try? JSONSerialization.jsonObject(with: $0) })
+            done.signal()
+        }.resume()
+        _ = done.wait(timeout: .now() + timeout + 5)
+        return result
+    }
+}
+
+/// Drains the habit_events outbox with `recordHabitEvents` and sends a heartbeat every
+/// 5 minutes. The coaching loop never waits on it. Error handling per the spec: 422
+/// rejects a batch, so it is halved until the bad row is alone and parked; 401/403 is a
+/// key problem (🔑) and pauses sending; 413 halves the batch; 429/5xx/no answer backs
+/// off from 2 s to 5 min with jitter. Any non-2xx is a failure.
+final class OutboxSender {
+    static let shared = OutboxSender()
+    static let maxBatch = 500
+
+    private let work = DispatchQueue(label: "com.benpollack.learner-outbox", qos: .utility)
+    private var cachedKey: String?
+    private var batchLimit = maxBatch
+    private var backoff: TimeInterval = 2
+    private var nextAttempt = Date.distantPast
+    private var lastHeartbeat = Date.distantPast
+    private var running = false
+
+    /// No usable device key: missing from the Keychain, or refused by the server.
+    private(set) var keyProblem = false
+    private(set) var lastSentAt: Date?
+    private(set) var lastStatus = "not tried yet"
+
+    /// Called on the 8 s status poll; drains in the background.
+    func tick(heartbeat: @escaping () -> [String: Any]) {
+        work.async {
+            guard !self.running else { return }
+            self.running = true
+            defer { self.running = false }
+            while self.sendOneBatch() == .more {}
+            self.sendHeartbeatIfDue(heartbeat())
         }
+    }
+
+    /// Send everything now, blocking, until the outbox is empty, sending fails or
+    /// `deadline` passes. Used at quit and by --drain-outbox.
+    @discardableResult
+    func drain(until deadline: Date) -> Int {
+        work.sync {
+            nextAttempt = .distantPast
+            while Date() < deadline, sendOneBatch() == .more {}
+        }
+        return HabitEventLogger.shared.getUnsyncedCount()
+    }
+
+    func sendNow() {
+        work.async { self.nextAttempt = .distantPast; self.keyProblem = false; self.cachedKey = nil }
+    }
+
+    private enum Step { case more, idle, failed }
+
+    private func key() -> String? {
+        if cachedKey == nil { cachedKey = LearnerAPI.deviceKey() }
+        keyProblem = cachedKey == nil
+        return cachedKey
+    }
+
+    private func sendOneBatch() -> Step {
+        guard Date() >= nextAttempt else { return .idle }
+        let logger = HabitEventLogger.shared
+        let events = logger.unsentEvents(limit: batchLimit)
+        guard !events.isEmpty else { batchLimit = OutboxSender.maxBatch; return .idle }
+        guard let key = key() else { lastStatus = "no device key"; nextAttempt = Date().addingTimeInterval(300); return .failed }
+        let ids = events.compactMap { $0["eventId"] as? String }
+        let (status, body) = LearnerAPI.call("recordHabitEvents", ["clientId": LearnerAPI.clientId, "events": events], key: key)
+        switch status {
+        case 200..<300:
+            logger.mark(ids, as: 1)
+            lastSentAt = Date()
+            backoff = 2
+            lastStatus = "sent \(ids.count) (\((body as? [String: Any])?["accepted"] ?? "?") accepted, \((body as? [String: Any])?["duplicates"] ?? "?") duplicates)"
+            log(lastStatus)
+            return .more
+        case 422:
+            if ids.count > 1 {
+                batchLimit = max(1, ids.count / 2)
+                return .more
+            }
+            logger.mark(ids, as: 2)
+            lastStatus = "parked event \(ids[0]): \((body as? [String: Any])?["message"] ?? "rejected")"
+            log(lastStatus)
+            return .more
+        case 401, 403:
+            keyProblem = true
+            cachedKey = nil
+            nextAttempt = Date().addingTimeInterval(300)
+            lastStatus = "device key refused (\(status))"
+        case 413:
+            batchLimit = max(1, ids.count / 2)
+            return .more
+        default:
+            nextAttempt = Date().addingTimeInterval(backoff * Double.random(in: 0.5...1.0))
+            backoff = min(backoff * 2, 300)
+            lastStatus = status == 0 ? "server unreachable" : "server error \(status)"
+        }
+        log(lastStatus)
+        return .failed
+    }
+
+    private func sendHeartbeatIfDue(_ input: [String: Any]) {
+        guard Date().timeIntervalSince(lastHeartbeat) >= 300, let key = key() else { return }
+        lastHeartbeat = Date()
+        let (status, _) = LearnerAPI.call("recordAppHeartbeat", input, key: key)
+        if status == 401 || status == 403 { keyProblem = true; cachedKey = nil }
+        if !(200..<300).contains(status) { log("heartbeat failed (\(status))") }
+    }
+
+    private func log(_ message: String) {
+        print("[Outbox] \(message)")
+        fflush(stdout)
     }
 }
 
@@ -3321,9 +3525,8 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var vaultChatGptCount: Int = 0
     var vaultClaudeCount: Int = 0
 
-    var isHindsightHealthy: Bool = false
-    var hindsightSyncedCount: String = "--"
-    var hindsightBank: String = "learning-transcript-archive-v1"
+    /// learner-server answers GET /api/health (public; no key involved).
+    var isServerReachable: Bool = false
 
     /// The app's own LaunchAgent. If it is switched off in System Settings -> Login Items,
     /// launchd skips it at login -- and the tunnel and watcher with it -- so a manual start
@@ -3335,7 +3538,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     lazy var tunnel = ManagedHelper(
         name: "tunnel", executable: "/bin/bash",
         arguments: [URL(fileURLWithPath: Bundle.main.resourcePath ?? "").appendingPathComponent("tunnel.sh").path],
-        marker: "18925:127.0.0.1:18925")
+        marker: "3200:127.0.0.1:3200")
     lazy var watcher = ManagedHelper(
         name: "watcher", executable: "/Users/benpollack/.bun/bin/bun",
         arguments: [URL(fileURLWithPath: Bundle.main.resourcePath ?? "").appendingPathComponent("learner-watcher.js").path,
@@ -3386,7 +3589,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             button.title = "🧠 🟢 ..."
-            button.toolTip = "Learner Desktop\nScreenpipe, AI Vault & Hindsight"
+            button.toolTip = "Learner Desktop\nScreenpipe, AI Vault & learner-server"
         }
 
         statusMenu = NSMenu()
@@ -3702,13 +3905,14 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         statusMenu.addItem(NSMenuItem.separator())
 
-        // --- Hindsight Sync Section ---
-        let hsTitle = isHindsightHealthy
-            ? "🧠 Hindsight: 🟢 Live (OVH :18925)"
-            : "🧠 Hindsight: 🔴 Tunnel Disconnected"
+        // --- learner-server Section ---
+        let outbox = OutboxSender.shared
+        let hsTitle = !isServerReachable ? "☁️ learner-server: 🔴 unreachable"
+            : outbox.keyProblem ? "☁️ learner-server: 🔑 no working device key"
+            : "☁️ learner-server: 🟢 reachable"
         statusMenu.addItem(NSMenuItem(title: hsTitle, action: nil, keyEquivalent: ""))
 
-        let hsDetail = NSMenuItem(title: "   └─ Synced: \(hindsightSyncedCount) chats -> \(hindsightBank)", action: nil, keyEquivalent: "")
+        let hsDetail = NSMenuItem(title: "   └─ 📤 \(HabitEventLogger.shared.getUnsyncedCount()) queued | last: \(outbox.lastStatus)", action: nil, keyEquivalent: "")
         hsDetail.isEnabled = false
         statusMenu.addItem(hsDetail)
 
@@ -3761,11 +3965,11 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let totalTrials = HabitEventLogger.shared.getTotalTrialCount()
         let unsyncedTrials = HabitEventLogger.shared.getUnsyncedCount()
-        let trialsItem = NSMenuItem(title: "   📈 Recorded Trials: \(totalTrials) (\(unsyncedTrials) pending sync)", action: nil, keyEquivalent: "")
+        let trialsItem = NSMenuItem(title: "   📈 Recorded Trials: \(totalTrials) (\(unsyncedTrials) queued to send)", action: nil, keyEquivalent: "")
         trialsItem.isEnabled = false
         statusMenu.addItem(trialsItem)
 
-        let syncHabitsItem = NSMenuItem(title: "   ⚡ Sync Habit Trials to OVH Now", action: #selector(triggerHabitSync), keyEquivalent: "")
+        let syncHabitsItem = NSMenuItem(title: "   ⚡ Send Queued Trials Now", action: #selector(triggerHabitSync), keyEquivalent: "")
         syncHabitsItem.target = self
         statusMenu.addItem(syncHabitsItem)
 
@@ -3807,7 +4011,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func updateAllStatuses() {
         updateVaultCount()
         updateScreenpipeStatus()
-        updateHindsightStatus()
+        updateServerStatus()
         updateLoginItemApproval()
         ensureScreenpipeSkipsSignIn()
         if let appVersion = ScreenpipeUpdateCheck.installedAppVersion() {
@@ -3815,9 +4019,39 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
             ScreenpipeUpdateCheck.shared.observe(appVersion: appVersion)
         }
         enforceMicAutoGainGuard()
-        if HabitEventLogger.shared.getUnsyncedCount() > 0 {
-            syncHabitsToServer(completion: nil)
+        OutboxSender.shared.tick(heartbeat: { [weak self] in self?.heartbeatInput() ?? [:] })
+    }
+
+    /// recordAppHeartbeat input (contract/desktop.ts, RecordAppHeartbeatInput).
+    func heartbeatInput() -> [String: Any] {
+        let captureState = isScreenpipeHealthy ? "recording" : (isScreenpipeDegraded ? "paused" : "stopped")
+        let iso = ISO8601DateFormatter()
+        return [
+            "clientId": LearnerAPI.clientId,
+            "appVersion": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev",
+            "screenpipeVersion": CaptureEnvironment.screenpipeVersion as Any? ?? NSNull(),
+            "captureState": captureState,
+            "outboxDepth": HabitEventLogger.shared.getUnsyncedCount(),
+            "lastSentAt": OutboxSender.shared.lastSentAt.map { iso.string(from: $0) } as Any? ?? NSNull(),
+            "lastVaultExportAt": lastVaultExport().map { iso.string(from: $0) } as Any? ?? NSNull(),
+            "detail": ["screenpipeDetail": screenpipeDetail, "outboxStatus": OutboxSender.shared.lastStatus,
+                       "capturePhase": CaptureEnvironment.capturePhase as Any? ?? NSNull()],
+        ]
+    }
+
+    /// Newest conversation.md under ~/ai-vault-data: when ai-vault last exported anything.
+    /// Lets the server tell "nothing exported" from "sync broken".
+    func lastVaultExport() -> Date? {
+        let fm = FileManager.default
+        var newest: Date?
+        for provider in ["chatgpt", "claude", "gemini"] {
+            let dir = homeDir + "/ai-vault-data/\(provider)/conversations"
+            for convo in (try? fm.contentsOfDirectory(atPath: dir)) ?? [] {
+                if let m = (try? fm.attributesOfItem(atPath: "\(dir)/\(convo)/conversation.md"))?[.modificationDate] as? Date,
+                   m > (newest ?? .distantPast) { newest = m }
+            }
         }
+        return newest
     }
 
     func enforceMicAutoGainGuard() {
@@ -3906,23 +4140,15 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    func updateHindsightStatus() {
-        let statusJsonPath = homeDir + "/.ai-aggregator/status.json"
-        if let data = try? Data(contentsOf: URL(fileURLWithPath: statusJsonPath)),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            if let synced = json["synced"] as? Int {
-                self.hindsightSyncedCount = "\(synced)"
-            }
-        }
-
-        guard let healthUrl = URL(string: "http://127.0.0.1:18925/health") else { return }
+    func updateServerStatus() {
+        guard let healthUrl = URL(string: LearnerAPI.baseURL + "/api/health") else { return }
         var req = URLRequest(url: healthUrl)
         req.timeoutInterval = 2.0
 
         let task = URLSession.shared.dataTask(with: req) { [weak self] _, response, _ in
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                self.isHindsightHealthy = (response as? HTTPURLResponse)?.statusCode == 200
+                self.isServerReachable = (response as? HTTPURLResponse)?.statusCode == 200
                 self.updateTrayButton()
             }
         }
@@ -4036,9 +4262,12 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else if needsLoginApproval {
             baseTitle = "🧠 🔴 LOGIN"
             button.toolTip = "Learner Desktop\nSwitched off in Login Items: it will not start at login, and neither will the tunnel or watcher\(pavlokHint)"
-        } else if !isHindsightHealthy {
+        } else if OutboxSender.shared.keyProblem {
+            baseTitle = "🧠 🔑"
+            button.toolTip = "Learner Desktop\nNo working learner-server device key (Keychain: learner-server / ben-mbp); trials queue locally\(pavlokHint)"
+        } else if !isServerReachable {
             baseTitle = "🧠 🔴 ERR"
-            button.toolTip = "Learner Desktop\nHindsight tunnel disconnected\(pavlokHint)"
+            button.toolTip = "Learner Desktop\nlearner-server unreachable; trials queue locally\(pavlokHint)"
         } else if !isScreenpipeHealthy && !isScreenpipeDegraded {
             baseTitle = "🧠 🔴 SP"
             button.toolTip = "Learner Desktop\nScreenpipe stopped\(pavlokHint)"
@@ -4062,8 +4291,9 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         attachment.image = dogImg
         attachment.bounds = NSRect(x: 0, y: -3.0, width: 22, height: 18)
 
+        let queued = HabitEventLogger.shared.getUnsyncedCount()
         let attrTitle = NSMutableAttributedString(
-            string: baseTitle + " ",
+            string: baseTitle + (queued > 0 ? " 📤\(queued)" : "") + " ",
             attributes: [.font: NSFont.systemFont(ofSize: 14)]
         )
         attrTitle.append(NSAttributedString(attachment: attachment))
@@ -4354,7 +4584,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func syncAggregator() {
         runShell("cd '\(projectDir)' && bun run src/cli.ts sync") { [weak self] in
             DispatchQueue.main.async {
-                self?.updateHindsightStatus()
+                self?.updateServerStatus()
             }
         }
     }
@@ -4363,7 +4593,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         tunnel.restart()
         watcher.restart()
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-            self?.updateHindsightStatus()
+            self?.updateServerStatus()
         }
     }
 
@@ -4393,11 +4623,8 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func triggerHabitSync() {
-        syncHabitsToServer { [weak self] _ in
-            DispatchQueue.main.async {
-                self?.rebuildMenu()
-            }
-        }
+        OutboxSender.shared.sendNow()
+        updateAllStatuses()
     }
 
     @objc func openGrowthBookDashboard() {
@@ -4442,32 +4669,15 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let logger = HabitEventLogger.shared
         logger.waitUntilIdle()
 
-        // sync-habits.ts pushes at most 100 rows per run, so loop until drained. Stop
-        // early if a run makes no progress (tunnel down): rows are safe in SQLite and
-        // will sync on next launch.
-        let deadline = Date().addingTimeInterval(90)
-        var previous = -1
-        var attempts = 0
-        while Date() < deadline && attempts < 30 {
-            let remaining = logger.getUnsyncedCount()
-            if remaining == 0 { break }
-            if remaining == previous {
-                print("[Shutdown] No progress syncing (\(remaining) left) - leaving them for next launch.")
-                break
-            }
-            previous = remaining
-            print("[Shutdown] Syncing \(remaining) unsynced turn(s) to Postgres...")
-            fflush(stdout)
-            let done = DispatchSemaphore(value: 0)
-            syncHabitsToServer { _ in done.signal() }
-            _ = done.wait(timeout: .now() + 20)
-            attempts += 1
-        }
-        print("[Shutdown] Unsynced turns remaining: \(logger.getUnsyncedCount())")
+        // Send what's queued while we can; whatever fails stays in SQLite for next launch.
+        // Bounded so Quit cannot hang (launchd SIGKILLs after 20s anyway).
+        print("[Shutdown] Sending \(logger.getUnsyncedCount()) queued turn(s) to learner-server...")
+        fflush(stdout)
+        let remaining = OutboxSender.shared.drain(until: Date().addingTimeInterval(15))
+        print("[Shutdown] Unsynced turns remaining: \(remaining)")
 
         logger.close()
 
-        // Only now: the flush above needed the tunnel.
         print("[Shutdown] Stopping watcher and tunnel...")
         fflush(stdout)
         watcher.stop()
@@ -4975,6 +5185,15 @@ if CommandLine.arguments.contains("--test-pavlok-e2e") {
 
 if CommandLine.arguments.contains("--pavlok-test-fire") {
     runPavlokTestFireCLI()
+}
+
+// `--drain-outbox` sends the outbox once (LEARNER_API_URL / LEARNER_API_KEY /
+// LEARNER_OUTBOX_DB override the defaults) and exits 0 when it is empty.
+if CommandLine.arguments.contains("--drain-outbox") {
+    let left = OutboxSender.shared.drain(until: Date().addingTimeInterval(120))
+    print("[Outbox] drain finished: \(left) unsent, last status: \(OutboxSender.shared.lastStatus)")
+    HabitEventLogger.shared.close()
+    exit(left == 0 ? 0 : 1)
 }
 
 let app = NSApplication.shared

@@ -50,7 +50,7 @@ class LoginItemsApprovalTest(unittest.TestCase):
     def test_tray_names_the_block_before_the_generic_tunnel_error(self):
         body = body_of(self.src, "func updateTrayButton(")
         blocked = body.index("needsLoginApproval")
-        tunnel = body.index("!isHindsightHealthy")
+        tunnel = body.index("!isServerReachable")
         self.assertLess(blocked, tunnel)
         self.assertIn("Login Items", body[blocked:tunnel])
 

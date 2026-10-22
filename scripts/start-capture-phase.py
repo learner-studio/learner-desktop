@@ -15,7 +15,7 @@ Usage:
   python3 scripts/start-capture-phase.py --dry-run
   python3 scripts/start-capture-phase.py
 """
-import argparse, importlib.util, json, plistlib, re, shlex, sys, urllib.request
+import argparse, json, plistlib, re, shlex, subprocess, sys, urllib.request
 from datetime import date
 from pathlib import Path
 
@@ -24,9 +24,15 @@ CONFIG = REPO / "config" / "screenpipe-settings.json"
 EXPERIMENT = "exp_speech_coach_settings_v1"
 APP_PLIST = Path("/Applications/screenpipe.app/Contents/Info.plist")
 
-sp = importlib.util.spec_from_file_location("remote", REPO / "tests/heavy/test_habit_sync_growthbook_e2e.py")
-r = importlib.util.module_from_spec(sp)
-sp.loader.exec_module(r)
+
+
+def ssh_script(script):
+    """Run a bash script on the OVH box over the `ovh` ssh alias; return its stdout."""
+    result = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "ovh", "bash", "-s"],
+                            input=script, text=True, capture_output=True, timeout=30)
+    if result.returncode:
+        raise SystemExit(f"ssh to ovh failed: {result.stderr[-2000:]}")
+    return result.stdout.strip()
 
 
 def running_versions():
@@ -47,7 +53,7 @@ def phase_name(app, engine):
 def mongo(js):
     command = ('exec mongosh --quiet --username "$MONGO_INITDB_ROOT_USERNAME" '
                '--password "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin --eval "$(cat)"')
-    return r.ssh_script("set -e\ndocker exec -i biztools-growthbook-growthbook-mongo-1 sh -c "
+    return ssh_script("set -e\ndocker exec -i biztools-growthbook-growthbook-mongo-1 sh -c "
                         + shlex.quote(command) + " <<'PHASE_JS'\n" + js + "\nPHASE_JS\n")
 
 

@@ -41,24 +41,21 @@ export class AggregatorWatcher {
       clearTimeout(existingTimer)
     }
 
-    const timer = setTimeout(async () => {
+    const timer = setTimeout(() => {
       this.debounceTimers.delete(filePath)
-      try {
-        const result = await this.syncService.syncSingleFile(filePath)
-        if (result.status === 'synced') {
-          console.log(`[Watcher] [${event.toUpperCase()}] Synced -> ${filePath}`)
-        } else if (result.status === 'failed') {
-          console.error(`[Watcher] [${event.toUpperCase()}] Failed -> ${filePath}: ${result.error}`)
-        }
-      } catch (err) {
+      console.log(`[Watcher] [${event.toUpperCase()}] queued ${filePath}`)
+      this.syncService.enqueue([filePath]).catch((err) => {
         console.error(`[Watcher] Error handling ${filePath}: ${(err as Error).message}`)
-      }
+      })
     }, config.sync.debounceMs)
 
     this.debounceTimers.set(filePath, timer)
   }
 
   stop(): void {
+    for (const t of this.debounceTimers.values()) clearTimeout(t)
+    this.debounceTimers.clear()
+    this.syncService.stop()
     if (this.watcher) {
       this.watcher.close()
       this.watcher = null

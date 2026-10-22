@@ -7,7 +7,7 @@
 #   1. screenpipe — capture engine + local API on :3030
 #   2. Learner Desktop — polls :3030 and flushes habit rows; start it last so it does
 #      not spend its first 8s ticks reporting screenpipe down. It starts the SSH tunnel
-#      (Postgres/Hindsight/GrowthBook forwards) and the transcript watcher itself.
+#      (GrowthBook forward) and the transcript watcher itself.
 #
 # `launchctl enable` undoes the persistent `launchctl disable` that
 # stop-capture.sh --persist applies; without it, bootstrap silently refuses.
@@ -113,14 +113,10 @@ fi
 
 say "Starting Learner Desktop (and its SSH tunnel and watcher)"
 start_agent "$LABEL_APP" "com.benpollack.learner-desktop.plist"
-for _ in $(seq 1 20); do
-  nc -z 127.0.0.1 15432 >/dev/null 2>&1 && break
-  sleep 1
-done
-if nc -z 127.0.0.1 15432 >/dev/null 2>&1; then
-  info "Postgres forward :15432 is up"
+if curl -s --max-time 5 https://dev.biztoolz.app/learner-api/api/health >/dev/null 2>&1; then
+  info "learner-server API is reachable (queued rows will send)"
 else
-  warn "Postgres forward :15432 did not come up — see ~/.ai-aggregator/logs/tunnel.log"
+  warn "learner-server API not reachable — rows queue locally until it is"
 fi
 
 say "Final state"
