@@ -61,7 +61,10 @@ if [ "$START_SCREENPIPE" -eq 1 ]; then
   say "Starting screenpipe"
   launchctl enable "${DOMAIN}/${LABEL_SCREENPIPE}" 2>/dev/null
   if pgrep -f "screenpipe.app/Contents/MacOS/screenpipe-app" >/dev/null 2>&1; then
-    info "screenpipe-app already running"
+    # stop-capture.sh leaves 2.7.116+ running in search-only mode (capture off);
+    # reopening it is screenpipe's own way to resume recording.
+    info "screenpipe-app already running — reopening it to resume capture"
+    open -g -a /Applications/screenpipe.app || warn "could not reopen screenpipe.app"
   elif [ -f "${AGENT_DIR}/screenpipe.plist" ] && launchctl bootstrap "$DOMAIN" "${AGENT_DIR}/screenpipe.plist" 2>/dev/null; then
     info "bootstrapped screenpipe LaunchAgent (RunAtLoad starts it)"
   else

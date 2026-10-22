@@ -57,13 +57,13 @@ class Jail:
 
     def __init__(self, launchctl_loaded=True, screenpipe_running=False,
                  health_ok=False, tunnel_up=False, unsynced="0", habit_db=False,
-                 plists=()):
+                 plists=(), health_body=""):
         bodies = {
             # `launchctl print` deciding whether a job is loaded drives both scripts.
             "launchctl": ('case "$1" in print) exit %d;; esac\nexit 0'
                           % (0 if launchctl_loaded else 1)),
             "pgrep": "exit %d" % (0 if screenpipe_running else 1),
-            "curl": ("printf ''\nexit %d" % (0 if health_ok else 1)),
+            "curl": ("cat <<'JSON'\n%s\nJSON\nexit %d" % (health_body, 0 if health_ok else 1)),
             "sqlite3": ('echo "%s"\nexit 0' % unsynced),
             "nc": "exit %d" % (0 if tunnel_up else 1),
             # Keep the lane fast: the scripts poll with `sleep 1` up to 60 times.
@@ -272,12 +272,20 @@ class StopFlushTest(unittest.TestCase):
         self.assertNotIn("Flushing habit rows", proc.stdout)
 
 
+# /health as screenpipe 2.7.116 reports it before and after Quit. Since 2.7.116 a Quit
+# while the server runs does not exit: capture stops and the process stays to serve
+# saved history ("search-only"), so it is still running after the 30s wait.
+CAPTURING = '{"status":"healthy","frame_status":"ok","capture_status":{"status":"recording","active_audio_devices":2}}'
+SEARCH_ONLY = '{"status":"degraded","frame_status":"not_started","capture_status":{"status":"no_input_device","active_audio_devices":0}}'
+
+
 class ScreenpipeTeardownTest(unittest.TestCase):
     """screenpipe installs no SIGTERM handler, so a bare kill can corrupt db.sqlite.
-    The script must pause capture over the API and ask for a real quit first."""
+    The script must pause capture over the API and ask for a real quit first, and
+    signal it only if capture is still on (or unknowable) after that."""
 
     def test_pauses_capture_over_the_api_before_quitting(self):
-        jail = Jail(health_ok=True, screenpipe_running=True)
+        jail = Jail(health_ok=True, screenpipe_running=True, health_body=CAPTURING)
         self.addCleanup(jail.close)
         _, calls = jail.run(STOP)
 
@@ -287,8 +295,23 @@ class ScreenpipeTeardownTest(unittest.TestCase):
         self.assertTrue(quit_call, "never sent a graceful quit")
         self.assertLess(audio_stop[0], quit_call[0])
 
+    def test_leaves_screenpipe_in_search_only_mode_alone(self):
+        jail = Jail(health_ok=True, screenpipe_running=True, health_body=SEARCH_ONLY)
+        self.addCleanup(jail.close)
+        proc, calls = jail.run(STOP)
+        self.assertTrue(indexes(calls, "osascript"), "never sent a graceful quit")
+        self.assertEqual(indexes(calls, "pkill -TERM"), [])
+        self.assertEqual(indexes(calls, "pkill -KILL"), [])
+        self.assertIn("search-only", proc.stdout)
+
+    def test_escalates_when_the_api_cannot_confirm_capture_stopped(self):
+        jail = Jail(health_ok=False, screenpipe_running=True)
+        self.addCleanup(jail.close)
+        _, calls = jail.run(STOP)
+        self.assertTrue(indexes(calls, "pkill -TERM"))
+
     def test_escalates_to_sigterm_then_sigkill_only_after_the_quit(self):
-        jail = Jail(health_ok=True, screenpipe_running=True)
+        jail = Jail(health_ok=True, screenpipe_running=True, health_body=CAPTURING)
         self.addCleanup(jail.close)
         _, calls = jail.run(STOP)
 
@@ -365,6 +388,13 @@ class StartOrderingTest(unittest.TestCase):
         _, calls = jail.run(START, "--no-screenpipe")
         self.assertEqual(indexes(calls, "screenpipe"), [])
         self.assertTrue(indexes(calls, "learner-desktop"))
+
+    def test_reopens_a_running_screenpipe_to_resume_capture(self):
+        # A screenpipe left in search-only mode by stop-capture.sh is still running;
+        # reopening it is screenpipe's own way to resume recording.
+        jail = self.start_jail(screenpipe_running=True, plists=self.PLISTS)
+        _, calls = jail.run(START)
+        self.assertTrue(indexes(calls, "open -g -a /Applications/screenpipe.app"))
 
     def test_a_missing_plist_warns_and_falls_back_instead_of_crashing(self):
         jail = self.start_jail(plists=())
