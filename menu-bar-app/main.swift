@@ -3352,143 +3352,6 @@ class Pavlok60sSubmenuView: NSView {
 /// Bench test panel: one intensity slider and one fire button per modality, plus a
 /// live result line. Lives in a view-based menu item so the menu stays open -- the
 /// whole point is to press, feel the wrist, adjust, press again.
-class PavlokTestFireSubmenuView: NSView {
-    /// (type, display label, caution row?) in the order they appear.
-    private static let rows: [(type: String, label: String, caution: Bool)] = [
-        ("vibe", "📳 Vibration", false),
-        ("beep", "🔔 Beep", false),
-        ("zap", "⚡ Zap (electric shock)", true)
-    ]
-
-    private var sliders: [String: NSSlider] = [:]
-    private var valueLabels: [String: NSTextField] = [:]
-    private var fireButtons: [String: NSButton] = [:]
-    private let resultLabel = NSTextField(wrappingLabelWithString: "")
-
-    var onStateChanged: (() -> Void)?
-    private var refreshTimer: Timer?
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        refreshTimer?.invalidate()
-        refreshTimer = nil
-        guard window != nil else { return }
-        let timer = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in
-            self?.syncFromModel()
-            self?.onStateChanged?()
-        }
-        refreshTimer = timer
-        RunLoop.main.add(timer, forMode: .common)
-    }
-
-    init() {
-        super.init(frame: NSRect(x: 0, y: 0, width: 372, height: 288))
-        setupViews()
-        syncFromModel()
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    private func setupViews() {
-        var y: CGFloat = 258
-
-        let titleLabel = NSTextField(labelWithString: "Test Fire Wristband (fires immediately)")
-        titleLabel.font = NSFont.boldSystemFont(ofSize: 11)
-        titleLabel.textColor = .secondaryLabelColor
-        titleLabel.frame = NSRect(x: 16, y: y, width: 340, height: 16)
-        addSubview(titleLabel)
-        y -= 24
-
-        for row in PavlokTestFireSubmenuView.rows {
-            let nameLabel = NSTextField(labelWithString: row.label)
-            nameLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-            nameLabel.textColor = row.caution ? .systemOrange : .labelColor
-            nameLabel.frame = NSRect(x: 16, y: y, width: 240, height: 16)
-            addSubview(nameLabel)
-
-            let valueLabel = NSTextField(labelWithString: "0%")
-            valueLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
-            valueLabel.textColor = .secondaryLabelColor
-            valueLabel.alignment = .right
-            valueLabel.frame = NSRect(x: 256, y: y, width: 100, height: 16)
-            addSubview(valueLabel)
-            valueLabels[row.type] = valueLabel
-            y -= 24
-
-            let slider = NSSlider(value: 0, minValue: 0, maxValue: 100,
-                                  target: self, action: #selector(sliderMoved(_:)))
-            slider.frame = NSRect(x: 16, y: y, width: 224, height: 20)
-            slider.controlSize = .small
-            slider.isContinuous = true
-            slider.numberOfTickMarks = 0
-            slider.allowsTickMarkValuesOnly = false
-            slider.setAccessibilityLabel("\(row.label) intensity")
-            slider.identifier = NSUserInterfaceItemIdentifier(row.type)
-            addSubview(slider)
-            sliders[row.type] = slider
-
-            let button = NSButton(title: "Test fire", target: self, action: #selector(fireClicked(_:)))
-            button.bezelStyle = .rounded
-            button.controlSize = .small
-            button.font = NSFont.systemFont(ofSize: 11)
-            button.frame = NSRect(x: 248, y: y - 3, width: 108, height: 24)
-            button.setAccessibilityLabel("Test fire \(row.label)")
-            button.identifier = NSUserInterfaceItemIdentifier(row.type)
-            addSubview(button)
-            fireButtons[row.type] = button
-
-            y -= 32
-        }
-
-        y -= 4
-        resultLabel.font = NSFont.systemFont(ofSize: 10)
-        resultLabel.textColor = .secondaryLabelColor
-        resultLabel.frame = NSRect(x: 16, y: y - 16, width: 340, height: 30)
-        resultLabel.maximumNumberOfLines = 2
-        addSubview(resultLabel)
-        y -= 34
-
-        let tipLabel = NSTextField(labelWithString: "Bluetooth test • 0% is off • one pulse per click")
-        tipLabel.font = NSFont.systemFont(ofSize: 10)
-        tipLabel.textColor = .tertiaryLabelColor
-        tipLabel.alignment = .center
-        tipLabel.frame = NSRect(x: 16, y: y, width: 340, height: 14)
-        addSubview(tipLabel)
-    }
-
-    func syncFromModel() {
-        let p = PavlokController.shared
-        for row in PavlokTestFireSubmenuView.rows {
-            let value = p.testIntensity(for: row.type)
-            sliders[row.type]?.integerValue = value
-            valueLabels[row.type]?.stringValue = "\(value)%"
-            // 0% means off everywhere else in this controller; keep it meaning off here.
-            fireButtons[row.type]?.isEnabled = p.canTestFire && value > 0 && !p.isTestFiring
-        }
-        resultLabel.stringValue = p.canTestFire
-            ? (p.isTestFiring ? "Connecting / awaiting Bluetooth acknowledgement…" : "Last: \(p.lastTestFireSummary)")
-            : "Enable Keep Bluetooth Connected in the menu above."
-    }
-
-    @objc func sliderMoved(_ sender: NSSlider) {
-        guard let type = sender.identifier?.rawValue else { return }
-        PavlokController.shared.setTestIntensity(sender.integerValue, for: type)
-        syncFromModel()
-        onStateChanged?()
-    }
-
-    @objc func fireClicked(_ sender: NSButton) {
-        guard let type = sender.identifier?.rawValue else { return }
-        sender.isEnabled = false
-        resultLabel.stringValue = "Firing \(PavlokController.testFireLabel(for: type)) at \(PavlokController.shared.testIntensity(for: type))%…"
-        PavlokController.shared.testFire(type: type) { [weak self] _, _ in
-            guard let self = self else { return }
-            self.syncFromModel()
-            self.onStateChanged?()
-        }
-    }
-}
-
 // MARK: - Cute Dog Stick Figure Bluetooth Connection Icon
 class PavlokDogIcon {
     private static let connectedImage: NSImage = {
@@ -3638,7 +3501,6 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var isShuttingDown = false
     private var signalSources: [DispatchSourceSignal] = []
 
-    let projectDir = "/Users/benpollack/code/learner-desktop"
     let homeDir = NSHomeDirectory()
     let talkMonitor = TalkTimeMonitor.shared
 
@@ -3765,371 +3627,167 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func rebuildMenu() {
         statusMenu.removeAllItems()
 
-        // --- Header ---
-        let header = NSMenuItem(title: "Learner Desktop", action: nil, keyEquivalent: "")
-        header.attributedTitle = NSAttributedString(
-            string: "Learner Desktop",
-            attributes: [.font: NSFont.boldSystemFont(ofSize: 13)]
-        )
-        statusMenu.addItem(header)
-
-        statusMenu.addItem(NSMenuItem.separator())
-
-        // --- Speaking Coach Section ---
-        let coachHeader = NSMenuItem(title: "Speaking Coach", action: nil, keyEquivalent: "")
-        coachHeader.attributedTitle = NSAttributedString(
-            string: "Speaking Coach (Talk-Time Monitor)",
-            attributes: [.font: NSFont.boldSystemFont(ofSize: 12)]
-        )
-        statusMenu.addItem(coachHeader)
-
-        if let call = talkMonitor.activeCallApp {
-            let callTitle = talkMonitor.activeCallTitle ?? call
-            let callItem = NSMenuItem(title: "   📞 Active Call: \(callTitle)", action: nil, keyEquivalent: "")
-            callItem.isEnabled = false
-            statusMenu.addItem(callItem)
+        func add(_ title: String, _ action: Selector? = nil, to menu: NSMenu? = nil) -> NSMenuItem {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            if action != nil { item.target = self } else { item.isEnabled = false }
+            (menu ?? statusMenu).addItem(item)
+            return item
+        }
+        func header(_ title: String, size: CGFloat = 12) {
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            item.attributedTitle = NSAttributedString(string: title, attributes: [.font: NSFont.boldSystemFont(ofSize: size)])
+            statusMenu.addItem(item)
         }
 
+        header("Learner Desktop", size: 13)
+        statusMenu.addItem(NSMenuItem.separator())
+
+        // --- Speaking Coach ---
+        header("Speaking Coach (Talk-Time Monitor)")
+        let callSuffix = talkMonitor.activeCallApp.map { " (\($0))" } ?? ""
         if talkMonitor.isAlertActive {
-            let callSuffix = talkMonitor.activeCallApp != nil ? " (\(talkMonitor.activeCallApp!))" : ""
-            let alertItem = NSMenuItem(title: "   🚨 Monologue Alert: \(talkMonitor.formattedDuration) continuous speech\(callSuffix)", action: nil, keyEquivalent: "")
-            alertItem.isEnabled = false
-            statusMenu.addItem(alertItem)
-
-            let hideItem = NSMenuItem(title: "   ✕ Dismiss Alert Toast", action: #selector(dismissToast), keyEquivalent: "")
-            hideItem.target = self
-            statusMenu.addItem(hideItem)
+            _ = add("   🚨 Monologue Alert: \(talkMonitor.formattedDuration) continuous speech\(callSuffix)")
+            _ = add("   ✕ Dismiss Alert Toast", #selector(dismissToast))
         } else if talkMonitor.isWarningActive {
-            let callSuffix = talkMonitor.activeCallApp != nil ? " (\(talkMonitor.activeCallApp!))" : ""
-            let warnItem = NSMenuItem(title: "   ⚠️ Monologue Warning: \(talkMonitor.formattedDuration) continuous speech\(callSuffix)", action: nil, keyEquivalent: "")
-            warnItem.isEnabled = false
-            statusMenu.addItem(warnItem)
+            _ = add("   ⚠️ Monologue Warning: \(talkMonitor.formattedDuration) continuous speech\(callSuffix)")
+        } else if let call = talkMonitor.activeCallApp {
+            let title = talkMonitor.activeCallTitle.map { " · \($0)" } ?? ""
+            _ = add("   🟢 Status: In call (\(call)\(title)) • Monitoring talk-time")
         } else {
-            let statusText = talkMonitor.activeCallApp != nil
-                ? "   🟢 Status: In call (\(talkMonitor.activeCallApp!)) • Monitoring talk-time"
-                : (talkMonitor.alertOnlyDuringCalls
-                    ? "   🟢 Status: Standby (Monitoring for calls • Off-call quiet)"
-                    : "   🟢 Status: Listening (All speech monitored: >30s warn / >1m alert)")
-            let okItem = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
-            okItem.isEnabled = false
-            statusMenu.addItem(okItem)
+            _ = add(talkMonitor.alertOnlyDuringCalls
+                ? "   🟢 Status: Standby (Monitoring for calls • Off-call quiet)"
+                : "   🟢 Status: Listening (All speech monitored: >30s warn / >1m alert)")
         }
-
-        let guardItem = NSMenuItem(title: "   🛡️ Mic Auto-Gain Guard: Active (Enforces 90%)", action: nil, keyEquivalent: "")
-        guardItem.isEnabled = false
-        statusMenu.addItem(guardItem)
-
-        let callOnlyTitle = talkMonitor.alertOnlyDuringCalls ? "   ✓ Alert Only During Calls (Off-Call Silent)" : "   ○ Alert On All Monologues (Any App)"
-        let callOnlyItem = NSMenuItem(title: callOnlyTitle, action: #selector(toggleAlertOnlyDuringCalls), keyEquivalent: "")
-        callOnlyItem.target = self
-        statusMenu.addItem(callOnlyItem)
-
         if talkMonitor.currentStreak > 0 {
-            let resetItem = NSMenuItem(title: "   ↺ Reset Speaking Streak (\(talkMonitor.formattedDuration))", action: #selector(resetStreakAction), keyEquivalent: "")
-            resetItem.target = self
-            statusMenu.addItem(resetItem)
+            _ = add("   ↺ Reset Speaking Streak (\(talkMonitor.formattedDuration))", #selector(resetStreakAction))
         }
-
         statusMenu.addItem(NSMenuItem.separator())
 
-        // --- Pavlok Wearable Operant Coach Section ---
-        let pavlokHeader = NSMenuItem(title: "⚡ Pavlok Operant Coach", action: nil, keyEquivalent: "")
-        pavlokHeader.attributedTitle = NSAttributedString(
-            string: "⚡ Pavlok Operant Coach",
-            attributes: [.font: NSFont.boldSystemFont(ofSize: 12)]
-        )
-        statusMenu.addItem(pavlokHeader)
+        // --- Capture, chats, server ---
+        let spState = isScreenpipeHealthy ? "🟢 Recording" : (isScreenpipeDegraded ? "🟡 Idle / Degraded" : "🔴 Stopped")
+        statusMenu.addItem(NSMenuItem(title: "📹 Screenpipe: \(spState)" + (screenpipeDetail.isEmpty ? "" : " — \(screenpipeDetail)"), action: nil, keyEquivalent: ""))
 
-        let pavStatus = NSMenuItem(title: "Connection: \(PavlokController.shared.connectionStatusText)", action: nil, keyEquivalent: "")
-        pavStatus.isEnabled = false
-        pavStatus.image = PavlokDogIcon.image(
-            connected: PavlokController.shared.isBleConnected,
-            isScanning: PavlokController.shared.isBleScanning
-        )
-        statusMenu.addItem(pavStatus)
+        statusMenu.addItem(NSMenuItem(title: "🗄️ AI Vault: 🟢 \(vaultCount) Archived (ChatGPT \(vaultChatGptCount) · Claude \(vaultClaudeCount))", action: nil, keyEquivalent: ""))
+        let export = VaultExport.shared
+        _ = add("   └─ Last export: " + (export.lastRun.map { DateFormatter.localizedString(from: $0, dateStyle: .none, timeStyle: .short) + " — " } ?? "") + export.lastSummary)
+        for provider in export.expiredLogins.sorted() {
+            _ = add("   ⚠️ \(provider) login expired — run: ai-vault setup --provider \(provider)")
+        }
+        _ = add("   📥 Pull Latest Chats (Incremental Sweep)", #selector(pullVaultChats))
 
-        let pavEnabledTitle = PavlokController.shared.isEnabled ? "   ✓ Wearable Operant Feedback Enabled" : "   ○ Wearable Feedback Disabled (Safe Default)"
-        let togglePav = NSMenuItem(title: pavEnabledTitle, action: #selector(togglePavlokEnabled), keyEquivalent: "")
-        togglePav.target = self
-        statusMenu.addItem(togglePav)
+        let outbox = OutboxSender.shared
+        let serverState = !isServerReachable ? "🔴 unreachable" : outbox.keyProblem ? "🔑 no working device key" : "🟢 reachable"
+        statusMenu.addItem(NSMenuItem(title: "☁️ learner-server: \(serverState)", action: nil, keyEquivalent: ""))
+        _ = add("   └─ 📤 \(HabitEventLogger.shared.getUnsyncedCount()) queued | last: \(outbox.lastStatus)"
+            + " | Tunnel \(tunnel.isRunning ? "🟢" : "🔴") | Watcher \(watcher.isRunning ? "🟢" : "🔴")")
+        _ = add("   ⚡ Send Queued Trials Now", #selector(triggerHabitSync))
+        if needsLoginApproval {
+            _ = add("   ⚠️ Won't start at login: allow Learner Desktop in Login Items...", #selector(openLoginItemsSettings))
+        }
+        statusMenu.addItem(NSMenuItem.separator())
 
-        // 1. Quick Cue Combination Presets
+        // --- Habit Experiments & GrowthBook ---
+        header("📊 Habit Experiments (GrowthBook)")
+        let mode = HabitExperimentManager.shared.currentMode
+        let assignedArm = HabitExperimentManager.shared.resolveArm(for: talkMonitor.activeSessionId)
+        _ = add("   🎯 Condition: \(mode.shortTag) [Active: \(assignedArm)]")
+        _ = add("   📈 Recorded Trials: \(HabitEventLogger.shared.getTotalTrialCount())")
+        _ = add("   🌐 Open GrowthBook Dashboard...", #selector(openGrowthBookDashboard))
+        statusMenu.addItem(NSMenuItem.separator())
+
+        // --- Pavlok (one submenu) ---
+        let pavlok = PavlokController.shared
+        let pavMenu = NSMenu()
+        let pavStatus = add("Connection: \(pavlok.connectionStatusText)", to: pavMenu)
+        pavStatus.image = PavlokDogIcon.image(connected: pavlok.isBleConnected, isScanning: pavlok.isBleScanning)
+        _ = add(pavlok.isEnabled ? "✓ Wearable Operant Feedback Enabled" : "○ Wearable Feedback Disabled (Safe Default)",
+                #selector(togglePavlokEnabled), to: pavMenu)
+
         let comboMenu = NSMenu()
         let combos = [
-            ("both_shock", "⚡ Shock (30s: 15%) + ⚡ Shock (60s: 35%)  [Default: Both Shock]"),
-            ("vibe_shock", "📳 Vibe (30s: 30%) + ⚡ Shock (60s: 35%)    [Graduated: Vibe then Shock]"),
-            ("shock_vibe", "⚡ Shock (30s: 15%) + 📳 Vibe (60s: 60%)    [Inverted: Shock then Vibe]"),
-            ("both_vibe",  "📳 Vibe (30s: 30%) + 📳 Vibe (60s: 60%)    [Gentle: Both Vibration]"),
-            ("both_dual",  "⚡📳 Dual Shock + Vibe (Both Thresholds)"),
-            ("all_zero",   "⚪ 0% All Modalities Disabled (Silent / Toast Only)")
+            ("both_shock", "Both Shock (Default)", "⚡ Shock (30s: 15%) + ⚡ Shock (60s: 35%)  [Default: Both Shock]"),
+            ("vibe_shock", "Vibe (30s) + Shock (60s)", "📳 Vibe (30s: 30%) + ⚡ Shock (60s: 35%)    [Graduated: Vibe then Shock]"),
+            ("shock_vibe", "Shock (30s) + Vibe (60s)", "⚡ Shock (30s: 15%) + 📳 Vibe (60s: 60%)    [Inverted: Shock then Vibe]"),
+            ("both_vibe", "Both Vibration", "📳 Vibe (30s: 30%) + 📳 Vibe (60s: 60%)    [Gentle: Both Vibration]"),
+            ("both_dual", "Dual Shock + Vibe", "⚡📳 Dual Shock + Vibe (Both Thresholds)"),
+            ("all_zero", "All 0% (Silent)", "⚪ 0% All Modalities Disabled (Silent / Toast Only)")
         ]
-        for (key, label) in combos {
-            let isSel: Bool
-            switch key {
-            case "both_shock": isSel = (PavlokController.shared.presetSummary == "Both Shock (Default)")
-            case "vibe_shock": isSel = (PavlokController.shared.presetSummary == "Vibe (30s) + Shock (60s)")
-            case "shock_vibe": isSel = (PavlokController.shared.presetSummary == "Shock (30s) + Vibe (60s)")
-            case "both_vibe":  isSel = (PavlokController.shared.presetSummary == "Both Vibration")
-            case "both_dual":  isSel = (PavlokController.shared.presetSummary == "Dual Shock + Vibe")
-            case "all_zero":   isSel = (PavlokController.shared.presetSummary == "All 0% (Silent)")
-            default: isSel = false
-            }
-            let bullet = isSel ? "⦿ " : "○ "
-            let item = NSMenuItem(title: "\(bullet)\(label)", action: #selector(selectCuePreset(_:)), keyEquivalent: "")
-            item.target = self
+        for (key, summary, label) in combos {
+            let isSel = pavlok.presetSummary == summary
+            let item = add("\(isSel ? "⦿ " : "○ ")\(label)", #selector(selectCuePreset(_:)), to: comboMenu)
             item.representedObject = key
             item.state = isSel ? .on : .off
-            comboMenu.addItem(item)
         }
-        let comboParentItem = NSMenuItem(title: "   🎛️ Cue Preset: \(PavlokController.shared.presetSummary)", action: nil, keyEquivalent: "")
-        comboParentItem.submenu = comboMenu
-        statusMenu.addItem(comboParentItem)
+        add("🎛️ Cue Preset: \(pavlok.presetSummary)", to: pavMenu).submenu = comboMenu
 
-        // 2. 30s Warning Popout (Interactive Non-Closing Multi-Select Submenu)
-        let warnMenu = NSMenu()
+        // 30s / 60s panels: interactive, non-closing multi-select views.
         let warnView = Pavlok30sSubmenuView()
-        let warnParentItem = NSMenuItem(title: "   ⏱️ 30s Warning: \(PavlokController.shared.warningCueSummary)", action: nil, keyEquivalent: "")
-        warnView.onStateChanged = { [weak self, weak warnParentItem] in
-            warnParentItem?.title = "   ⏱️ 30s Warning: \(PavlokController.shared.warningCueSummary)"
+        let warnParent = add("⏱️ 30s Warning: \(pavlok.warningCueSummary)", to: pavMenu)
+        warnView.onStateChanged = { [weak self, weak warnParent] in
+            warnParent?.title = "⏱️ 30s Warning: \(PavlokController.shared.warningCueSummary)"
             self?.updateTrayButton()
         }
-        let warnCustomItem = NSMenuItem()
-        warnCustomItem.view = warnView
-        warnMenu.addItem(warnCustomItem)
-        warnParentItem.submenu = warnMenu
-        statusMenu.addItem(warnParentItem)
-
-        // 3. 60s Hard Stop Popout (Interactive Non-Closing Multi-Select Submenu)
-        let alertMenu = NSMenu()
         let alertView = Pavlok60sSubmenuView()
-        let alertParentItem = NSMenuItem(title: "   ⏱️ 60s Hard Stop: \(PavlokController.shared.alertCueSummary)", action: nil, keyEquivalent: "")
-        alertView.onStateChanged = { [weak self, weak alertParentItem] in
-            alertParentItem?.title = "   ⏱️ 60s Hard Stop: \(PavlokController.shared.alertCueSummary)"
+        let alertParent = add("⏱️ 60s Hard Stop: \(pavlok.alertCueSummary)", to: pavMenu)
+        alertView.onStateChanged = { [weak self, weak alertParent] in
+            alertParent?.title = "⏱️ 60s Hard Stop: \(PavlokController.shared.alertCueSummary)"
             self?.updateTrayButton()
         }
-        let alertCustomItem = NSMenuItem()
-        alertCustomItem.view = alertView
-        alertMenu.addItem(alertCustomItem)
-        alertParentItem.submenu = alertMenu
-        statusMenu.addItem(alertParentItem)
-
-        // 4. Good Behavior: Reward Vibration on concise turns
-        let rewardTitle = PavlokController.shared.rewardGoodBehavior ? "   ✓ Good Behavior: Reward Vibration on Concise Turns (<30s)" : "   ○ Good Behavior: Reward Vibration Disabled"
-        let toggleReward = NSMenuItem(title: rewardTitle, action: #selector(toggleGoodBehaviorReward), keyEquivalent: "")
-        toggleReward.target = self
-        statusMenu.addItem(toggleReward)
-
-        // 5. Manual Test Fire (independent intensity per modality, fires on demand)
-        let testFireMenu = NSMenu()
-        // Without this, AppKit re-enables any item whose target responds to the action,
-        // and the 0%/feature-off rows below would be clickable after all.
-        testFireMenu.autoenablesItems = false
-        let testFireView = PavlokTestFireSubmenuView()
-        let testFireParentItem = NSMenuItem(title: "   🧪 Test Fire Wristband: \(PavlokController.shared.testFireSummary)", action: nil, keyEquivalent: "")
-        let testFireCustomItem = NSMenuItem()
-        testFireCustomItem.view = testFireView
-        testFireMenu.addItem(testFireCustomItem)
-        testFireMenu.addItem(NSMenuItem.separator())
-
-        // Plain items as well as the sliders: they are keyboard- and VoiceOver-reachable,
-        // and their titles carry the last outcome after the menu has closed and reopened.
-        var plainFireItems: [String: NSMenuItem] = [:]
-        for type in ["vibe", "beep", "zap"] {
-            let label = PavlokController.testFireLabel(for: type)
-            let level = PavlokController.shared.testIntensity(for: type)
-            let item = NSMenuItem(title: "\(label) — Test fire at \(level)%", action: #selector(testFirePavlokStimulus(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = type
-            item.isEnabled = PavlokController.shared.canTestFire && level > 0 && !PavlokController.shared.isTestFiring
-            testFireMenu.addItem(item)
-            plainFireItems[type] = item
+        for (parent, view) in [(warnParent, warnView as NSView), (alertParent, alertView as NSView)] {
+            let sub = NSMenu()
+            let holder = NSMenuItem()
+            holder.view = view
+            sub.addItem(holder)
+            parent.isEnabled = true
+            parent.submenu = sub
         }
-        testFireParentItem.submenu = testFireMenu
-        statusMenu.addItem(testFireParentItem)
+        _ = add(pavlok.rewardGoodBehavior ? "✓ Good Behavior: Reward Vibration on Concise Turns (<30s)" : "○ Good Behavior: Reward Vibration Disabled",
+                #selector(toggleGoodBehaviorReward), to: pavMenu)
+        pavMenu.addItem(NSMenuItem.separator())
+        add("Keep Bluetooth Connected", #selector(togglePavlokConnection), to: pavMenu).state = pavlok.keepConnected ? .on : .off
+        _ = add("🔍 Scan & Connect via Bluetooth", #selector(scanPavlokBluetooth), to: pavMenu)
+        _ = add(pavlok.apiToken.isEmpty ? "🔑 Configure Cloud Backup Token (Optional)..." : "🔑 Change Cloud Backup Token (Configured)...",
+                #selector(promptPavlokToken), to: pavMenu)
+        let pavState = !pavlok.isEnabled ? "⚪ Disabled" : (pavlok.isBleConnected ? "🟢 Connected" : "🟡 Not connected")
+        let pavParent = NSMenuItem(title: "⚡ Pavlok: \(pavState)", action: nil, keyEquivalent: "")
+        pavParent.submenu = pavMenu
+        statusMenu.addItem(pavParent)
 
-        let testFireResultItem = NSMenuItem(title: "      └─ Last test: \(PavlokController.shared.lastTestFireSummary)", action: nil, keyEquivalent: "")
-        testFireResultItem.isEnabled = false
-        statusMenu.addItem(testFireResultItem)
-
-        testFireView.onStateChanged = { [weak self, weak testFireParentItem, weak testFireResultItem] in
-            let p = PavlokController.shared
-            testFireParentItem?.title = "   🧪 Test Fire Wristband: \(p.testFireSummary)"
-            testFireResultItem?.title = "      └─ Last test: \(p.lastTestFireSummary)"
-            for (type, item) in plainFireItems {
-                let level = p.testIntensity(for: type)
-                item.title = "\(PavlokController.testFireLabel(for: type)) — Test fire at \(level)%"
-                item.isEnabled = p.canTestFire && level > 0 && !p.isTestFiring
-            }
-            self?.updateTrayButton()
+        // --- Settings ---
+        let settings = NSMenu()
+        _ = add(talkMonitor.alertOnlyDuringCalls ? "✓ Alert Only During Calls (Off-Call Silent)" : "○ Alert On All Monologues (Any App)",
+                #selector(toggleAlertOnlyDuringCalls), to: settings)
+        let armMenu = NSMenu()
+        for arm in HabitTreatmentArm.allCases {
+            add("\(mode == arm ? "✓ " : "   ")\(arm.displayName)", #selector(selectExperimentArm(_:)), to: armMenu).representedObject = arm.rawValue
         }
+        let armParent = add("Select Active Intervention Condition...", to: settings)
+        armParent.isEnabled = true
+        armParent.submenu = armMenu
+        let settingsParent = NSMenuItem(title: "Settings", action: nil, keyEquivalent: "")
+        settingsParent.submenu = settings
+        statusMenu.addItem(settingsParent)
 
-        let keepItem = NSMenuItem(title: "   Keep Bluetooth Connected", action: #selector(togglePavlokConnection), keyEquivalent: "")
-        keepItem.target = self
-        keepItem.state = PavlokController.shared.keepConnected ? .on : .off
-        statusMenu.addItem(keepItem)
-        let scanItem = NSMenuItem(title: "   🔍 Scan & Connect via Bluetooth", action: #selector(scanPavlokBluetooth), keyEquivalent: "")
-        scanItem.target = self
-        statusMenu.addItem(scanItem)
-
-        let tokenLabel = PavlokController.shared.apiToken.isEmpty ? "   🔑 Configure Cloud Backup Token (Optional)..." : "   🔑 Change Cloud Backup Token (Configured)..."
-        let tokenItem = NSMenuItem(title: tokenLabel, action: #selector(promptPavlokToken), keyEquivalent: "")
-        tokenItem.target = self
-        statusMenu.addItem(tokenItem)
-
-        statusMenu.addItem(NSMenuItem.separator())
-
-        // --- Screenpipe Section ---
-        let spTitle = isScreenpipeHealthy
-            ? "📹 Screenpipe: 🟢 Recording"
-            : (isScreenpipeDegraded ? "📹 Screenpipe: 🟡 Idle / Degraded" : "📹 Screenpipe: 🔴 Stopped")
-        let spItem = NSMenuItem(title: spTitle, action: nil, keyEquivalent: "")
-        statusMenu.addItem(spItem)
-
-        if !screenpipeDetail.isEmpty {
-            let detailItem = NSMenuItem(title: "   └─ \(screenpipeDetail)", action: nil, keyEquivalent: "")
-            detailItem.isEnabled = false
-            statusMenu.addItem(detailItem)
-        }
-
-
+        // --- Troubleshooting ---
+        let trouble = NSMenu()
+        trouble.autoenablesItems = false
+        _ = add("Open AI Vault Folder...", #selector(openVaultFolder), to: trouble)
+        _ = add("Open Screenpipe Recordings...", #selector(openScreenpipeData), to: trouble)
+        _ = add("View Watcher Log...", #selector(openWatcherLogs), to: trouble)
+        _ = add("View screenpipe Update Checks...", #selector(openUpdateCheckLogs), to: trouble)
+        trouble.addItem(NSMenuItem.separator())
         let checking = ScreenpipeUpdateCheck.shared.isRunning
-        let updateCheck = NSMenuItem(title: checking ? "   🔄 Update check running..." : "   🔄 Run screenpipe Update Check Now",
-                                     action: checking ? nil : #selector(runScreenpipeUpdateCheck), keyEquivalent: "")
-        updateCheck.target = self
-        statusMenu.addItem(updateCheck)
+        _ = add(checking ? "🔄 Update check running..." : "🔄 Run screenpipe Update Check Now",
+                checking ? nil : #selector(runScreenpipeUpdateCheck), to: trouble)
         if let last = ScreenpipeUpdateCheck.shared.lastRunSummary {
-            let lastItem = NSMenuItem(title: "   └─ Last check: \(last)", action: nil, keyEquivalent: "")
-            lastItem.isEnabled = false
-            statusMenu.addItem(lastItem)
+            _ = add("   └─ Last check: \(last)", to: trouble)
         }
+        _ = add("Restart Tunnel & Watcher", #selector(restartAggregatorServices), to: trouble)
+        let troubleParent = NSMenuItem(title: "Troubleshooting", action: nil, keyEquivalent: "")
+        troubleParent.submenu = trouble
+        statusMenu.addItem(troubleParent)
 
         statusMenu.addItem(NSMenuItem.separator())
-
-        // --- AI Vault Section ---
-        let vaultTitle = "🗄️ AI Vault: 🟢 \(vaultCount) Archived"
-        statusMenu.addItem(NSMenuItem(title: vaultTitle, action: nil, keyEquivalent: ""))
-
-        let vaultDetail = NSMenuItem(title: "   └─ ChatGPT: \(vaultChatGptCount) | Claude: \(vaultClaudeCount)", action: nil, keyEquivalent: "")
-        vaultDetail.isEnabled = false
-        statusMenu.addItem(vaultDetail)
-
-        let export = VaultExport.shared
-        let exportLine = NSMenuItem(title: "   └─ Last export: " + (export.lastRun.map { DateFormatter.localizedString(from: $0, dateStyle: .none, timeStyle: .short) + " — " } ?? "") + export.lastSummary, action: nil, keyEquivalent: "")
-        exportLine.isEnabled = false
-        statusMenu.addItem(exportLine)
-        for provider in export.expiredLogins.sorted() {
-            let expired = NSMenuItem(title: "   ⚠️ \(provider) login expired — run: ai-vault setup --provider \(provider)", action: nil, keyEquivalent: "")
-            expired.isEnabled = false
-            statusMenu.addItem(expired)
-        }
-
-        let pullSweep = NSMenuItem(title: "   📥 Pull Latest Chats (Incremental Sweep)", action: #selector(pullVaultChats), keyEquivalent: "")
-        pullSweep.target = self
-        statusMenu.addItem(pullSweep)
-
-        let resumeCpt = NSMenuItem(title: "   ▶️ Resume ChatGPT Full Backfill", action: #selector(resumeChatGptBackup), keyEquivalent: "")
-        resumeCpt.target = self
-        statusMenu.addItem(resumeCpt)
-
-        statusMenu.addItem(NSMenuItem.separator())
-
-        // --- learner-server Section ---
-        let outbox = OutboxSender.shared
-        let hsTitle = !isServerReachable ? "☁️ learner-server: 🔴 unreachable"
-            : outbox.keyProblem ? "☁️ learner-server: 🔑 no working device key"
-            : "☁️ learner-server: 🟢 reachable"
-        statusMenu.addItem(NSMenuItem(title: hsTitle, action: nil, keyEquivalent: ""))
-
-        let hsDetail = NSMenuItem(title: "   └─ 📤 \(HabitEventLogger.shared.getUnsyncedCount()) queued | last: \(outbox.lastStatus)", action: nil, keyEquivalent: "")
-        hsDetail.isEnabled = false
-        statusMenu.addItem(hsDetail)
-
-        let syncNow = NSMenuItem(title: "   ⚡ Sync Backfill Now", action: #selector(syncAggregator), keyEquivalent: "")
-        syncNow.target = self
-        statusMenu.addItem(syncNow)
-
-        let helpers = NSMenuItem(title: "   └─ Tunnel: \(tunnel.isRunning ? "🟢 running" : "🔴 down") | Watcher: \(watcher.isRunning ? "🟢 running" : "🔴 down")", action: nil, keyEquivalent: "")
-        helpers.isEnabled = false
-        statusMenu.addItem(helpers)
-
-        let restartTunnel = NSMenuItem(title: "   Restart Tunnel & Watcher", action: #selector(restartAggregatorServices), keyEquivalent: "")
-        restartTunnel.target = self
-        statusMenu.addItem(restartTunnel)
-
-        if needsLoginApproval {
-            let allow = NSMenuItem(title: "   ⚠️ Won't start at login: allow Learner Desktop in Login Items...", action: #selector(openLoginItemsSettings), keyEquivalent: "")
-            allow.target = self
-            statusMenu.addItem(allow)
-        }
-
-        statusMenu.addItem(NSMenuItem.separator())
-
-        // --- Habit Experiments & GrowthBook Section ---
-        let expHeader = NSMenuItem(title: "📊 Habit Experiments (GrowthBook)", action: nil, keyEquivalent: "")
-        expHeader.attributedTitle = NSAttributedString(
-            string: "📊 Habit Experiments (GrowthBook)",
-            attributes: [.font: NSFont.boldSystemFont(ofSize: 12)]
-        )
-        statusMenu.addItem(expHeader)
-
-        let assignedArm = HabitExperimentManager.shared.resolveArm(for: talkMonitor.activeSessionId)
-        let mode = HabitExperimentManager.shared.currentMode
-        let modeItem = NSMenuItem(title: "   🎯 Condition: \(mode.shortTag) [Active: \(assignedArm)]", action: nil, keyEquivalent: "")
-        modeItem.isEnabled = false
-        statusMenu.addItem(modeItem)
-
-        // Submenu for selecting condition
-        let armSubmenu = NSMenu()
-        for armCase in HabitTreatmentArm.allCases {
-            let check = (mode == armCase) ? "✓ " : "   "
-            let item = NSMenuItem(title: "\(check)\(armCase.displayName)", action: #selector(selectExperimentArm(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = armCase.rawValue
-            armSubmenu.addItem(item)
-        }
-        let selectArmItem = NSMenuItem(title: "   Select Active Intervention Condition...", action: nil, keyEquivalent: "")
-        selectArmItem.submenu = armSubmenu
-        statusMenu.addItem(selectArmItem)
-
-        let totalTrials = HabitEventLogger.shared.getTotalTrialCount()
-        let unsyncedTrials = HabitEventLogger.shared.getUnsyncedCount()
-        let trialsItem = NSMenuItem(title: "   📈 Recorded Trials: \(totalTrials) (\(unsyncedTrials) queued to send)", action: nil, keyEquivalent: "")
-        trialsItem.isEnabled = false
-        statusMenu.addItem(trialsItem)
-
-        let syncHabitsItem = NSMenuItem(title: "   ⚡ Send Queued Trials Now", action: #selector(triggerHabitSync), keyEquivalent: "")
-        syncHabitsItem.target = self
-        statusMenu.addItem(syncHabitsItem)
-
-        let openGbItem = NSMenuItem(title: "   🌐 Open GrowthBook Dashboard...", action: #selector(openGrowthBookDashboard), keyEquivalent: "")
-        openGbItem.target = self
-        statusMenu.addItem(openGbItem)
-
-        statusMenu.addItem(NSMenuItem.separator())
-
-        // --- Folder / Log Shortcuts ---
-        let openVault = NSMenuItem(title: "Open AI Vault Folder...", action: #selector(openVaultFolder), keyEquivalent: "")
-        openVault.target = self
-        statusMenu.addItem(openVault)
-
-        let openSpData = NSMenuItem(title: "Open Screenpipe Recordings...", action: #selector(openScreenpipeData), keyEquivalent: "")
-        openSpData.target = self
-        statusMenu.addItem(openSpData)
-
-        let openProj = NSMenuItem(title: "Open Aggregator Project...", action: #selector(openProjectFolder), keyEquivalent: "")
-        openProj.target = self
-        statusMenu.addItem(openProj)
-
-        let openLog = NSMenuItem(title: "View Watcher Log...", action: #selector(openWatcherLogs), keyEquivalent: "")
-        openLog.target = self
-        statusMenu.addItem(openLog)
-
-        let openChecks = NSMenuItem(title: "View screenpipe Update Checks...", action: #selector(openUpdateCheckLogs), keyEquivalent: "")
-        openChecks.target = self
-        statusMenu.addItem(openChecks)
-
-        statusMenu.addItem(NSMenuItem.separator())
-
         let quitItem = NSMenuItem(title: "Quit Learner Desktop", action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
         statusMenu.addItem(quitItem)
@@ -4147,7 +3805,6 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
             ScreenpipeUpdateCheck.shared.observe(appVersion: appVersion)
         }
         VaultExport.shared.tick()
-        enforceMicAutoGainGuard()
         OutboxSender.shared.tick(heartbeat: { [weak self] in self?.heartbeatInput() ?? [:] })
     }
 
@@ -4181,24 +3838,6 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         return newest
-    }
-
-    func enforceMicAutoGainGuard() {
-        DispatchQueue.global(qos: .utility).async {
-            let script = """
-            set curVol to input volume of (get volume settings)
-            if curVol < 85 then
-                set volume input volume 90
-                return "adjusted from " & curVol
-            else
-                return "ok " & curVol
-            end if
-            """
-            if let res = NSAppleScript(source: script)?.executeAndReturnError(nil).stringValue, res.hasPrefix("adjusted") {
-                print("[SpeakingCoach] \(res). Mic Auto-Gain Guard restored input volume to 90%.")
-                fflush(stdout)
-            }
-        }
     }
 
     func updateVaultCount() {
@@ -4379,53 +4018,42 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let button = statusItem?.button else { return }
 
         let callHint = talkMonitor.activeCallApp != nil ? " [\(talkMonitor.activeCallApp!)]" : ""
-        let pavlokHint = "\nPavlok: \(PavlokController.shared.connectionStatusText) (30s: \(PavlokController.shared.warningCueSummary) | 60s: \(PavlokController.shared.alertCueSummary))"
 
         let baseTitle: String
         if talkMonitor.isAlertActive {
             baseTitle = "🗣️ 🚨 \(talkMonitor.formattedDuration)"
-            button.toolTip = "Talk-Time Alert: Continuous speech for \(talkMonitor.formattedDuration)\(callHint)\nFloating alert toast displayed (hidden from screenshare)\(pavlokHint)"
+            button.toolTip = "Talk-Time Alert: Continuous speech for \(talkMonitor.formattedDuration)\(callHint)\nFloating alert toast displayed (hidden from screenshare)"
         } else if talkMonitor.isWarningActive {
             baseTitle = "🗣️ ⚠️ \(talkMonitor.formattedDuration)"
-            button.toolTip = "Talk-Time Warning: Continuous speech for \(talkMonitor.formattedDuration)\(callHint)\(pavlokHint)"
+            button.toolTip = "Talk-Time Warning: Continuous speech for \(talkMonitor.formattedDuration)\(callHint)"
         } else if needsLoginApproval {
             baseTitle = "🧠 🔴 LOGIN"
-            button.toolTip = "Learner Desktop\nSwitched off in Login Items: it will not start at login, and neither will the tunnel or watcher\(pavlokHint)"
+            button.toolTip = "Learner Desktop\nSwitched off in Login Items: it will not start at login, and neither will the tunnel or watcher"
         } else if OutboxSender.shared.keyProblem {
             baseTitle = "🧠 🔑"
-            button.toolTip = "Learner Desktop\nNo working learner-server device key (Keychain: learner-server / ben-mbp); trials queue locally\(pavlokHint)"
+            button.toolTip = "Learner Desktop\nNo working learner-server device key (Keychain: learner-server / ben-mbp); trials queue locally"
         } else if !isServerReachable {
             baseTitle = "🧠 🔴 ERR"
-            button.toolTip = "Learner Desktop\nlearner-server unreachable; trials queue locally\(pavlokHint)"
+            button.toolTip = "Learner Desktop\nlearner-server unreachable; trials queue locally"
         } else if !isScreenpipeHealthy && !isScreenpipeDegraded {
             baseTitle = "🧠 🔴 SP"
-            button.toolTip = "Learner Desktop\nScreenpipe stopped\(pavlokHint)"
+            button.toolTip = "Learner Desktop\nScreenpipe stopped"
         } else if isScreenpipeDegraded {
             baseTitle = "🧠 🟡 \(vaultCount)"
-            button.toolTip = "Learner Desktop\nScreenpipe idle/degraded\(pavlokHint)"
+            button.toolTip = "Learner Desktop\nScreenpipe idle/degraded"
         } else if let call = talkMonitor.activeCallApp {
             baseTitle = "🗣️ 📞 \(vaultCount)"
-            button.toolTip = "Active Call: \(call)\nSpeaking Coach monitoring talk-time limits\(pavlokHint)"
+            button.toolTip = "Active Call: \(call)\nSpeaking Coach monitoring talk-time limits"
         } else {
             baseTitle = "🧠 🟢 \(vaultCount)"
-            button.toolTip = "Learner Desktop\nAll systems healthy (\(vaultCount) chats vaulted)\(pavlokHint)"
+            button.toolTip = "Learner Desktop\nAll systems healthy (\(vaultCount) chats vaulted)"
         }
-
-        // Cute Dog Stick Figure Bluetooth Connection Indicator (rendered inline via NSTextAttachment)
-        let dogImg = PavlokDogIcon.image(
-            connected: PavlokController.shared.isBleConnected,
-            isScanning: PavlokController.shared.isBleScanning
-        )
-        let attachment = NSTextAttachment()
-        attachment.image = dogImg
-        attachment.bounds = NSRect(x: 0, y: -3.0, width: 22, height: 18)
 
         let queued = HabitEventLogger.shared.getUnsyncedCount()
         let attrTitle = NSMutableAttributedString(
-            string: baseTitle + (queued > 0 ? " 📤\(queued)" : "") + " ",
+            string: baseTitle + (queued > 0 ? " 📤\(queued)" : ""),
             attributes: [.font: NSFont.systemFont(ofSize: 14)]
         )
-        attrTitle.append(NSAttributedString(attachment: attachment))
         button.attributedTitle = attrTitle
         button.image = nil
         button.imagePosition = .noImage
@@ -4622,57 +4250,9 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    @objc func testPavlokVibe() {
-        performPavlokManualTest(type: "vibe", intensity: PavlokController.shared.rewardVibeIntensity)
-    }
-
-    @objc func testPavlokZap() {
-        performPavlokManualTest(type: "zap", intensity: PavlokController.shared.shockIntensity)
-    }
-
-    /// Plain-menu-item test fire. The menu closes on click, so a failure -- which is
-    /// silent on the wrist by definition -- is raised as an alert rather than being left
-    /// for the next time somebody opens the menu.
-    @objc func testFirePavlokStimulus(_ sender: NSMenuItem) {
-        guard let type = sender.representedObject as? String else { return }
-        performPavlokManualTest(type: type)
-    }
-
-    private func performPavlokManualTest(type: String, intensity: Int? = nil) {
-        PavlokController.shared.testFire(type: type, intensityOverride: intensity) { [weak self] ok, detail in
-            guard let self = self else { return }
-            self.rebuildMenu()
-            self.updateTrayButton()
-            guard !ok else { return }
-            let alert = NSAlert()
-            alert.messageText = "\(PavlokController.testFireLabel(for: type)) test fire did not reach the wristband"
-            alert.informativeText = "\(detail)\n\nStatus: \(PavlokController.shared.connectionStatusText)"
-            alert.alertStyle = .warning
-            alert.addButton(withTitle: "OK")
-            NSApp.activate(ignoringOtherApps: true)
-            alert.runModal()
-        }
-    }
-
     @objc func pullVaultChats() {
         VaultExport.shared.runNow()
         rebuildMenu()
-    }
-
-    @objc func resumeChatGptBackup() {
-        runShell("ai-vault backup chatgpt --only-new --random-delay -y") { [weak self] in
-            DispatchQueue.main.async {
-                self?.updateVaultCount()
-            }
-        }
-    }
-
-    @objc func syncAggregator() {
-        runShell("cd '\(projectDir)' && bun run src/cli.ts sync") { [weak self] in
-            DispatchQueue.main.async {
-                self?.updateServerStatus()
-            }
-        }
     }
 
     @objc func restartAggregatorServices() {
@@ -4693,10 +4273,6 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func openScreenpipeData() {
         NSWorkspace.shared.open(URL(fileURLWithPath: homeDir + "/.screenpipe/data"))
-    }
-
-    @objc func openProjectFolder() {
-        NSWorkspace.shared.open(URL(fileURLWithPath: projectDir))
     }
 
     @objc func selectExperimentArm(_ sender: NSMenuItem) {
@@ -4777,24 +4353,6 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApplication.shared.terminate(nil)
     }
 
-    private func runShell(_ command: String, completion: (() -> Void)? = nil) {
-        DispatchQueue.global(qos: .userInitiated).async {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/bin/bash")
-            process.arguments = ["-c", command]
-
-            var env = ProcessInfo.processInfo.environment
-            env["PATH"] = "/Users/benpollack/.bun/bin:/Users/benpollack/.nvm/versions/node/v24.12.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-            process.environment = env
-
-            try? process.run()
-            process.waitUntilExit()
-
-            DispatchQueue.main.async {
-                completion?()
-            }
-        }
-    }
 }
 
 // MARK: - Headless Test Fire
