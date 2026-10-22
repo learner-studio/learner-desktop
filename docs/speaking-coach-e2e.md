@@ -1,9 +1,9 @@
 # Speaking Coach E2E verification
 
 The acceptance boundary is meeting detection response → live transcript HTTP poll →
-accumulated streak → native warning panel → saved habit row → PostgreSQL upload →
-GrowthBook source queries. A call to `startSimulation(seconds: 35)` skips most of
-that boundary and is only a panel preview, not a meeting-pipeline test.
+accumulated streak → native warning panel → saved habit row → upload to learner-server →
+GrowthBook source queries. (The app used to have a `startSimulation` shortcut; it was removed because it skipped most of
+that boundary and was only a panel preview, not a meeting-pipeline test.)
 
 ## Local integration suite
 
@@ -29,7 +29,7 @@ does not measure speech recognition accuracy or exact word boundaries.
 
 The source is copied into an evidence directory and compiled. Only the HTTP URL,
 defaults suite, logger directory and application entrypoint are substituted. The
-monitor and NSPanel code are not mocked. `isSimulating` stays false to exercise the
+monitor and NSPanel code are not mocked. Nothing is simulated, to exercise the
 real meeting gate. No production recorder, running app, user settings, habit
 database, wearable or habit sync is touched. The original source hash is recorded.
 Do not upload this raw local fixture database: it deliberately uses the normal

@@ -55,7 +55,7 @@ Screenpipe VAD algorithm. Both references show the same direction of bias.
    first `isVisible` panel with alpha > 0.05, and full-opacity timestamps separately.
    The coach polls at its production one-second interval.
 
-The test does not call `startSimulation` or assign a streak. The source copy only
+The test does not assign a streak. The source copy only
 substitutes endpoints, defaults, logger location, and the application entrypoint.
 Local test rows remain isolated and are not uploaded. No recorder settings or
 production app files are changed. The source SHA-256 is in each result.

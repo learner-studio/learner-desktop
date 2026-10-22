@@ -126,8 +126,9 @@ Nothing is recorded while it runs. Do not run it during a call.
 
 ## screenpipe
 
-Transcription comes from screenpipe, vendored in-tree at `vendor/screenpipe`
-(mediar-ai/screenpipe `main` @ `a3eae78`, desktop app version 2.7.27).
+Transcription comes from the installed screenpipe desktop app (mediar-ai/screenpipe, tested
+with 2.7.116 / engine 0.4.52). It is not vendored; the update-check agent re-verifies it
+after each screenpipe update.
 
 - The app reads `audio_transcriptions` via `POST http://localhost:3030/raw_sql`.
 - **Transcription latency drives warning latency.** screenpipe cannot write a transcription
@@ -219,14 +220,6 @@ When a settings change is deliberate, re-capture the expectations so it lands in
 **Note:** screenpipe rewrites `store.bin` from memory while it is running, so editing that
 file with the app up does not stick. Stop screenpipe first, or change the setting in its UI.
 
-To re-sync the vendored copy:
-
-```bash
-rm -rf vendor/screenpipe
-git clone --depth 1 https://github.com/mediar-ai/screenpipe.git vendor/screenpipe
-rm -rf vendor/screenpipe/.git
-```
-
 ## Experiment design
 
 Four arms, assigned per session (`treatment_arm`): `baseline`, `caw_audio`, `pavlok_shock`,
@@ -273,11 +266,10 @@ Synthetic data never reaches production metrics: simulated turns are written wit
 ## Data notes
 
 - `Past Call Transcripts/` and `data/` are gitignored: they hold real customer meeting
-  transcripts and everything derived from them.
+  transcripts and everything derived from them. The baseline already lives on learner-server,
+  so `data/` is normally absent; `parse_readai_transcripts.py` recreates it if a re-import is needed.
 - Baseline rows are tagged `metadata.source = 'readai_docx_import_v2'`.
-- An earlier server-side rebuild tagged `transcript_rebuild_20260908` has been replaced;
-  a snapshot of it is kept locally at
-  `data/baseline_snapshot_transcript_rebuild_20260908.json` (gitignored).
+- An earlier server-side rebuild tagged `transcript_rebuild_20260908` has been replaced.
 
 ### Manual Pavlok Bluetooth test
 
