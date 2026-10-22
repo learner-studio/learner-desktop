@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR="/Users/benpollack/Documents/AI aggregator logger project"
+PROJECT_DIR="/Users/benpollack/code/learner-desktop"
 APP_NAME="Learner Desktop.app"
 BUNDLE_DIR="${PROJECT_DIR}/menu-bar-app/${APP_NAME}"
 TARGET_APP="/Users/benpollack/Applications/${APP_NAME}"

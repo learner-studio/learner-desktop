@@ -1815,7 +1815,7 @@ final class ScreenpipeUpdateCheck {
     /// Ceiling on what one unattended run may spend.
     static let maxBudgetUSD = "5"
 
-    private let projectDir = "/Users/benpollack/Documents/AI aggregator logger project"
+    private let projectDir = "/Users/benpollack/code/learner-desktop"
     private let statePath = NSHomeDirectory() + "/.ai-aggregator/screenpipe-update-check.json"
     /// Optional long-lived token from `claude setup-token`, saved by the owner (chmod 600).
     private let tokenPath = NSHomeDirectory() + "/.ai-aggregator/claude-oauth-token"
@@ -3307,7 +3307,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var isShuttingDown = false
     private var signalSources: [DispatchSourceSignal] = []
 
-    let projectDir = "/Users/benpollack/Documents/AI aggregator logger project"
+    let projectDir = "/Users/benpollack/code/learner-desktop"
     let homeDir = NSHomeDirectory()
     let talkMonitor = TalkTimeMonitor.shared
 
