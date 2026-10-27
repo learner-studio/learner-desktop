@@ -1,9 +1,5 @@
 import AppKit
 import Foundation
-import ServiceManagement
-import SQLite3
-import CoreBluetooth
-import CommonCrypto
 import Synchronization
 
 // The app runs a handful of workflows -- the speaking coach, the trial outbox, the chat

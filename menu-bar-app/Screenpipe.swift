@@ -1,9 +1,5 @@
 import AppKit
 import Foundation
-import ServiceManagement
-import SQLite3
-import CoreBluetooth
-import CommonCrypto
 
 /// Version of the screenpipe capture engine currently feeding transcriptions.
 ///
@@ -115,10 +111,6 @@ final class ScreenpipeUpdateCheck: Sendable {
         }
         return nil
     }
-
-    /// The tray's poll used to drive this; the job reads the version itself now. A tick
-    /// that is not due does nothing.
-    func observe(appVersion: String) { job.tick() }
 
     /// "Run screenpipe Update Check Now".
     func start(reason: String) {

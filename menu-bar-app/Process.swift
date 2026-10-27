@@ -1,9 +1,5 @@
 import AppKit
 import Foundation
-import ServiceManagement
-import SQLite3
-import CoreBluetooth
-import CommonCrypto
 
 // MARK: - Bundled Helpers (SSH tunnel, transcript watcher)
 

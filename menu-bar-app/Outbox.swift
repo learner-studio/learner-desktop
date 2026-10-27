@@ -1,9 +1,6 @@
 import AppKit
 import Foundation
-import ServiceManagement
 import SQLite3
-import CoreBluetooth
-import CommonCrypto
 
 // MARK: - Local SQLite Habit Trial Logger
 // @unchecked: every mutable field (db, closed, unwritten) is only touched on `queue`.
@@ -415,14 +412,6 @@ final class OutboxSender: Sendable {
     func setHeartbeatInput(_ input: @escaping @Sendable () -> [String: Any]) { state.withLock { $0.heartbeat = input } }
 
     // MARK: Triggers
-
-    /// Older callers tick from the status poll; the Scheduler ticks the jobs too, and a
-    /// tick that is not due does nothing.
-    func tick(heartbeat input: @escaping @Sendable () -> [String: Any]) {
-        if state.value.heartbeat == nil { setHeartbeatInput(input) }
-        job.tick()
-        heartbeatJob.tick()
-    }
 
     /// "Send Queued Trials Now": re-reads the key and clears a block.
     func sendNow() {

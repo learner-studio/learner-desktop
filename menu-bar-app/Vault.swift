@@ -1,6 +1,5 @@
 import AppKit
 import Foundation
-import ServiceManagement
 import SQLite3
 import CoreBluetooth
 import CommonCrypto
@@ -106,13 +105,6 @@ final class VaultExport: Sendable {
     var isRunning: Bool { state.value.current != nil }
 
     // MARK: Triggers
-
-    /// Older callers tick from the status poll; the Scheduler ticks the job too. Also ticks
-    /// the Archive job, which the export feeds.
-    func tick() {
-        job.tick()
-        Archive.shared.job.tick()
-    }
 
     /// "Pull Latest Chats".
     func runNow() { job.kick("pull latest chats") }
