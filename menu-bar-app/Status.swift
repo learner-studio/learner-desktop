@@ -188,9 +188,13 @@ enum StatusProbe {
         if let v = json["version"] as? String { CaptureEnvironment.screenpipeVersion = v }
         let capture = json["capture_status"] as? [String: Any] ?? [:]
         // screenpipe pauses on purpose (screen locked, a schedule): show it, never fight it.
-        if capture["severity"] as? String == "waiting" {
+        // Its other "waiting" state ("ready and waiting for speech") is normal recording.
+        let waiting = capture["severity"] as? String == "waiting"
+        let state = "\(capture["status"] as? String ?? "") \(capture["reason"] as? String ?? "")".lowercased()
+        if waiting && (state.contains("lock") || state.contains("pause") || state.contains("schedule")) {
             return .degraded("paused: \(capture["reason"] as? String ?? capture["status"] as? String ?? "waiting")")
         }
+        if waiting { return .recording }
         if capture["active_audio_devices"] as? Int == 0 { restartAudio() } else { restartLock.withLock { audioRestart.succeeded() } }
         let status = json["status"] as? String ?? "unknown"
         let frames = json["frame_status"] as? String ?? "unknown"

@@ -348,6 +348,9 @@ final class Job {
     let problemGrace: TimeInterval
     /// Whether runs and ok outcomes are logged (not for every-8-second jobs).
     let quiet: Bool
+    /// A blocked job is checked again once at launch and then this often, so a block that
+    /// was wrong, or that the user fixed elsewhere, clears itself.
+    let blockedRecheck: TimeInterval
     private var backoff: Backoff
     private let body: (Job) -> Outcome
     private let queue: DispatchQueue
@@ -359,13 +362,14 @@ final class Job {
 
     init(_ name: String, period: TimeInterval, firstRun: TimeInterval = 0, backoff: Backoff,
          problemGrace: TimeInterval = 0, quiet: Bool = false, stateDir: String = Job.stateDir,
-         body: @escaping (Job) -> Outcome) {
+         blockedRecheck: TimeInterval = 6 * 3600, body: @escaping (Job) -> Outcome) {
         self.name = name
         self.log = Log(name)
         self.period = period
         self.backoff = backoff
         self.problemGrace = problemGrace
         self.quiet = quiet
+        self.blockedRecheck = blockedRecheck
         self.body = body
         self.queue = DispatchQueue(label: "learner.job.\(name)", qos: .utility)
         try? FileManager.default.createDirectory(atPath: stateDir, withIntermediateDirectories: true)
@@ -376,6 +380,8 @@ final class Job {
             // A saved schedule is kept (a backoff survives restarts), but never later than
             // a fresh start would run it, unless it is waiting on a backoff.
             if saved.failures == 0 && !saved.blocked { saved.nextRun = min(saved.nextRun, fresh.nextRun) }
+            // Blocked at the last launch: check once now that the app has started again.
+            if saved.blocked { saved.nextRun = fresh.nextRun }
             state = saved
             self.backoff.restore(failures: saved.failures)
         } else {
@@ -396,7 +402,7 @@ final class Job {
 
     /// Called by the Scheduler; runs the job when it is due.
     func tick() {
-        let due = lock.withLock { !state.blocked && !running && Date() >= state.nextRun }
+        let due = lock.withLock { !running && Date() >= state.nextRun }
         if due { start(reason: nil) }
     }
 
@@ -452,8 +458,9 @@ final class Job {
                 state.nextRun = now.addingTimeInterval(wait)
                 log.warn("failed in \(took) (attempt \(state.failures)): \(summary); retrying in \(Job.describe(wait))")
             case let .blocked(summary):
-                if !state.blocked || state.summary != summary { log.warn("blocked: \(summary); waiting for the user") }
+                if !state.blocked || state.summary != summary { log.warn("blocked: \(summary); waiting for the user (checking again in \(Job.describe(blockedRecheck)))") }
                 state.blocked = true
+                state.nextRun = now.addingTimeInterval(blockedRecheck)
                 state.problemSince = state.problemSince ?? now
                 state.summary = summary
             }

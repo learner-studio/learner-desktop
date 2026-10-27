@@ -45,6 +45,22 @@ import TestSupport
         #expect(starts() == StatusProbe.audioDevices.count)
     }
 
+    @Test func screenpipeWaitingForSpeechIsRecording() throws {
+        let screenpipe = try HTTPStandIn { req in
+            req.path == "/health"
+                ? HTTPStandIn.Response.json(200, ["status": "healthy", "capture_status": [
+                    "status": "ready", "severity": "waiting", "active_audio_devices": 0,
+                    "reason": "audio capture is ready and waiting for speech"]])
+                : HTTPStandIn.Response.json(500, [:])
+        }
+        let saved = StatusProbe.screenpipeURL
+        StatusProbe.screenpipeURL = screenpipe.baseURL
+        StatusProbe.resetAudioRestart()
+        defer { StatusProbe.screenpipeURL = saved; screenpipe.stop() }
+        #expect(StatusProbe.screenpipe() == .recording)
+        #expect(!screenpipe.requests.contains { $0.path == "/audio/device/start" })
+    }
+
     @Test func aScreenpipePausedOnPurposeIsShownNotFought() throws {
         let screenpipe = try HTTPStandIn { req in
             req.path == "/health"

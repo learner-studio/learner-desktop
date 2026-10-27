@@ -84,6 +84,23 @@ private final class ExportFixture {
         #expect(s3.summary == "claude: ok (3 new), chatgpt: ok (3 new)")
     }
 
+    @Test func aBlockedExportReChecksItsLoginsAndClearsItself() throws {
+        // On 10-27 an offline Mac read as "both logins expired"; a block must not be forever.
+        let f = ExportFixture(configure: { $0.blockedRecheck = 1 })
+        f.output("claude", Fixture.aiVaultExpired)
+        f.output("chatgpt", Fixture.aiVaultExpired)
+        #expect(run(f.export.job).blocked)
+        f.output("claude", Fixture.aiVaultOk)
+        f.output("chatgpt", Fixture.aiVaultOk)
+        let before = try #require(f.export.job.snapshot.lastRun)
+        Thread.sleep(forTimeInterval: 1.1)
+        f.export.job.tick()   // the re-check is due: it runs, and tries the "expired" logins again
+        #expect(waitFor(15) { f.export.job.snapshot.lastRun != before })
+        #expect(!f.export.job.snapshot.blocked)
+        #expect(f.export.expiredLogins.isEmpty)
+        #expect(f.export.job.problem == nil)
+    }
+
     @Test func allLoginsExpiredBlocksUntilASignIn() {
         let f = ExportFixture()
         f.output("claude", Fixture.aiVaultExpired)

@@ -20,6 +20,14 @@ enum AiVaultOutput {
 }
 
 @Suite("Chat export", .quietLog, .timeLimit(.minutes(1))) struct ExportTests {
+    @Test func offlineIsARetryNotAnExpiredLogin() {
+        // ai-vault's output with the Mac offline, 2026-10-27 17:49 (it also says "Authentication failed").
+        let offline = "AI Vault Archive\nAuthenticating...\nAuthentication failed\n\npage.goto: net::ERR_INTERNET_DISCONNECTED at https://claude.ai/\n"
+        #expect(VaultExport.classify(status: 0, stopped: nil, output: offline) == .failed("offline (net::ERR_INTERNET_DISCONNECTED)"))
+        let dns = "Authentication failed\nError: getaddrinfo ENOTFOUND chatgpt.com"
+        if case .failed = VaultExport.classify(status: 0, stopped: nil, output: dns) {} else { Issue.record("DNS failure must be retried") }
+    }
+
     @Test func expiredLoginsAreRecognised() {
         for sample in AiVaultOutput.expired {
             #expect(VaultExport.classify(status: 0, stopped: nil, output: sample) == .loginExpired, "\(sample)")
@@ -27,7 +35,7 @@ enum AiVaultOutput {
     }
 
     @Test func otherErrorsAreFailuresNotOk() {
-        #expect(VaultExport.classify(status: 0, stopped: nil, output: AiVaultOutput.failed) == .failed("failed (see vault-export.log)"))
+        #expect(VaultExport.classify(status: 0, stopped: nil, output: AiVaultOutput.failed) == .failed("offline (net::ERR_INTERNET_DISCONNECTED)"))   // a retryable failure, with the reason
     }
 
     @Test func aRateLimitIsNotAnExpiredLogin() {

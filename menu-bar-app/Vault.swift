@@ -22,6 +22,8 @@ import CommonCrypto
 final class VaultExport {
     struct Config {
         var jobName = "Export"
+        /// How often logins marked expired are tried again on their own.
+        var blockedRecheck: TimeInterval = 6 * 3600
         var providers = ["claude", "chatgpt"]
         var cliPath: () -> String? = VaultExport.installedCLI
         /// nil: ChildProcess.toolEnvironment (ai-vault's node under nvm on PATH).
@@ -59,6 +61,9 @@ final class VaultExport {
 
     static let loginExpiredPattern = "Authentication failed|cookies appear to be expired|Organization ID not available|API request failed: 40[13]"
     static let rateLimitPattern = "API request failed: 429"
+    /// No network (the Mac asleep or offline). ai-vault then also prints "Authentication
+    /// failed", which must not read as an expired login: it is checked first and retried.
+    static let offlinePattern = #"net::ERR_[A-Z_]+|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNREFUSED|ECONNRESET|getaddrinfo"#
     static let failedPattern = "Errors: [1-9]|Completed with [1-9][0-9]* errors|✗ Failed:|browser has been closed"
 
     static let shared = VaultExport()
@@ -81,7 +86,7 @@ final class VaultExport {
         self.config = config
         expired = VaultExport.loadLogins(config.loginsPath, log: log)
         job = Job(config.jobName, period: config.period, firstRun: config.firstRun, backoff: config.failureBackoff,
-                  problemGrace: config.problemGrace) { [weak self] _ in self?.runOnce() ?? .idle }
+                  problemGrace: config.problemGrace, blockedRecheck: config.blockedRecheck) { [weak self] _ in self?.runOnce() ?? .idle }
     }
 
     // MARK: Status for the menu
@@ -142,9 +147,13 @@ final class VaultExport {
         var rateLimited = false
         var ran = 0
         let configStamp = VaultExport.modified(config.aiVaultConfig)
+        // A run while blocked is the periodic re-check: try the expired logins again (a
+        // block can be wrong, or fixed outside the app).
+        let recheck = job.snapshot.blocked
+        if recheck { log.info("re-checking logins marked expired: \(expiredLogins.sorted().joined(separator: ", "))") }
         for provider in config.providers {
             if lock.withLock({ quitting }) { break }
-            if let stamp = lock.withLock({ expired[provider] }), stamp == configStamp {
+            if !recheck, let stamp = lock.withLock({ expired[provider] }), stamp == configStamp {
                 notes.append("\(provider): login expired")
                 continue
             }
@@ -231,6 +240,7 @@ final class VaultExport {
     /// errors, so the output decides; the exit status only when the output says nothing.
     static func classify(status: Int32?, stopped: String?, output: String) -> ProviderResult {
         func has(_ pattern: String) -> Bool { output.range(of: pattern, options: .regularExpression) != nil }
+        if has(offlinePattern) { return .failed("offline (\(output.range(of: offlinePattern, options: .regularExpression).map { String(output[$0]) } ?? "network"))") }
         if has(loginExpiredPattern) { return .loginExpired }
         if output.contains(rateLimitPattern) { return .rateLimited }
         if let why = stopped {
