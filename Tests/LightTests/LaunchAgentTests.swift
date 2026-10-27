@@ -36,3 +36,13 @@ import TestSupport
         }
     }
 }
+
+// The tunnel helper is recognised (for orphan reaping) by a marker in its command line;
+// the script must still contain it.
+@Suite("Tunnel script") struct TunnelScriptTests {
+    @Test func theScriptForwardsThePortTheHelperLooksFor() throws {
+        let script = try String(contentsOfFile: toolsRepoRoot() + "/scripts/tunnel.sh", encoding: .utf8)
+        #expect(script.contains("-L \"3200:127.0.0.1:3200\""), "the helper finds orphans by this marker")
+        #expect(script.contains("-sTCP:LISTEN"))
+    }
+}

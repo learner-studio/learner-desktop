@@ -216,24 +216,35 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// recordAppHeartbeat input (contract/desktop.ts, RecordAppHeartbeatInput).
     func heartbeatInput() -> [String: Any] {
         let current = DispatchQueue.main.sync { status }
+        return TrayAppManager.heartbeat(
+            current, appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev",
+            screenpipeVersion: CaptureEnvironment.screenpipeVersion, capturePhase: CaptureEnvironment.capturePhase,
+            lastSentAt: OutboxSender.shared.lastSentAt, lastExport: VaultExport.shared.lastRun,
+            outboxStatus: OutboxSender.shared.lastStatus)
+    }
+
+    /// recordAppHeartbeat input (contract/desktop.ts, RecordAppHeartbeatInput), from a status
+    /// snapshot. Pure, so the light lane checks it against the contract.
+    static func heartbeat(_ s: AppStatus, appVersion: String, screenpipeVersion: String?, capturePhase: String?,
+                          lastSentAt: Date?, lastExport: Date?, outboxStatus: String) -> [String: Any] {
         let captureState: String
-        switch current.capture {
+        switch s.capture {
         case .recording: captureState = "recording"
         case .degraded: captureState = "paused"
-        default: captureState = "stopped"
+        case .unknown, .stopped: captureState = "stopped"
         }
         let iso = ISO8601DateFormatter()
         return [
             "clientId": LearnerAPI.clientId,
-            "appVersion": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev",
-            "screenpipeVersion": CaptureEnvironment.screenpipeVersion as Any? ?? NSNull(),
+            "appVersion": appVersion,
+            "screenpipeVersion": screenpipeVersion as Any? ?? NSNull(),
             "captureState": captureState,
-            "outboxDepth": current.outboxDepth,
-            "lastSentAt": OutboxSender.shared.lastSentAt.map { iso.string(from: $0) } as Any? ?? NSNull(),
-            "lastVaultExportAt": VaultExport.shared.lastRun.map { iso.string(from: $0) } as Any? ?? NSNull(),
-            "detail": ["capture": StatusProbe.describe(current.capture), "outboxStatus": OutboxSender.shared.lastStatus,
-                       "problems": current.problems.map { "\($0.source): \($0.text)" },
-                       "capturePhase": CaptureEnvironment.capturePhase as Any? ?? NSNull()],
+            "outboxDepth": s.outboxDepth,
+            "lastSentAt": lastSentAt.map { iso.string(from: $0) } as Any? ?? NSNull(),
+            "lastVaultExportAt": lastExport.map { iso.string(from: $0) } as Any? ?? NSNull(),
+            "detail": ["capture": StatusProbe.describe(s.capture), "outboxStatus": outboxStatus,
+                       "problems": s.problems.map { "\($0.source): \($0.text)" },
+                       "capturePhase": capturePhase as Any? ?? NSNull()],
         ]
     }
 
@@ -374,21 +385,26 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // avoids the .terminateLater/reply handshake, which was seen to finish the work and
         // then never exit. What is left unsent stays in SQLite for the next launch.
         Scheduler.stop()
-        let logger = HabitEventLogger.shared
-        Shutdown.run([
-            .init(name: "finish the current turn", budget: 2, onCallingThread: true) { _ in
-                self.talkMonitor.resetStreak()
-                return nil
-            },
-            .init(name: "write queued trials", budget: 3) { _ in logger.waitUntilIdle(); return nil },
-            .init(name: "send queued trials", budget: 10) { deadline in
-                "\(OutboxSender.shared.drain(until: deadline)) left for next launch"
-            },
-            .init(name: "close the trial database", budget: 2) { _ in logger.close(); return nil },
-            .init(name: "stop the export and update check", budget: 1) { _ in ChatAndOutboxJobs.stopForQuit(); return nil },
-            .init(name: "stop the tunnel", budget: 2) { _ in self.tunnel.stop(grace: 0.5); return nil },
-        ], total: 18)
+        Shutdown.run(TrayAppManager.shutdownSteps(
+            finishTurn: { self.talkMonitor.resetStreak() }, logger: HabitEventLogger.shared,
+            drain: { OutboxSender.shared.drain(until: $0) }, stopJobs: { ChatAndOutboxJobs.stopForQuit() },
+            stopTunnel: { self.tunnel.stop(grace: 0.5) }), total: 18)
         return .terminateNow
+    }
+
+    /// The quit sequence. Order matters: queued trials are written, then sent, and only then
+    /// is the database closed (closing first strands them until the next launch).
+    static func shutdownSteps(finishTurn: @escaping () -> Void, logger: HabitEventLogger,
+                              drain: @escaping (Date) -> Int, stopJobs: @escaping () -> Void,
+                              stopTunnel: @escaping () -> Void) -> [Shutdown.Step] {
+        [
+            .init(name: "finish the current turn", budget: 2, onCallingThread: true) { _ in finishTurn(); return nil },
+            .init(name: "write queued trials", budget: 3) { _ in logger.waitUntilIdle(); return nil },
+            .init(name: "send queued trials", budget: 10) { deadline in "\(drain(deadline)) left for next launch" },
+            .init(name: "close the trial database", budget: 2) { _ in logger.close(); return nil },
+            .init(name: "stop the export and update check", budget: 1) { _ in stopJobs(); return nil },
+            .init(name: "stop the tunnel", budget: 2) { _ in stopTunnel(); return nil },
+        ]
     }
 
     @objc func quitApp() {

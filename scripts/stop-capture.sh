@@ -28,7 +28,6 @@ set -uo pipefail
 HABIT_DB="${HOME}/.ai-aggregator/behavior_experiments.sqlite"
 DOMAIN="gui/$(id -u)"
 
-AGENT_DIR="${HOME}/Library/LaunchAgents"
 LABEL_APP="com.benpollack.learner-desktop"
 LABEL_SCREENPIPE="screenpipe"
 

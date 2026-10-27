@@ -21,7 +21,7 @@
 # Hooks: git config core.hooksPath .githooks   (scripts/install-hooks.sh does this)
 #
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 
 LANE="${1:-light}"
 [ $# -gt 0 ] && shift

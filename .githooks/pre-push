@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Pushing to main is this repo's merge: medium and heavy lanes first.
+# Pushing to main is this repo's merge: the medium and heavy lanes first. The heavy lane
+# also checks the deployed GrowthBook design (read-only, over ssh ovh).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 scripts/test.sh medium
-exec scripts/test.sh heavy
+LEARNER_REMOTE_E2E=1 scripts/test.sh heavy

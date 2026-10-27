@@ -9,16 +9,22 @@ OUT_DIR="${OUT_DIR:-${PROJECT_DIR}/menu-bar-app}"
 BUNDLE_DIR="${OUT_DIR}/${APP_NAME}"
 TARGET_APP="/Users/benpollack/Applications/${APP_NAME}"
 
-echo "Compiling Swift menu bar binary..."
-(cd "${PROJECT_DIR}" && swift build -c release --product LearnerDesktop)
-cp "${PROJECT_DIR}/.build/release/LearnerDesktop" "${PROJECT_DIR}/menu-bar-app/learner-desktop"
+# LEARNER_BINARY: package an already-built binary instead of compiling (the heavy test
+# lane uses the debug build, so checking the bundle takes seconds, not a release build).
+if [ -n "${LEARNER_BINARY:-}" ]; then
+  BINARY="${LEARNER_BINARY}"
+else
+  echo "Compiling Swift menu bar binary..."
+  (cd "${PROJECT_DIR}" && swift build -c release --product LearnerDesktop)
+  BINARY="${PROJECT_DIR}/.build/release/LearnerDesktop"
+fi
 
 echo "Creating Application bundle structure..."
 rm -rf "${BUNDLE_DIR}"
 mkdir -p "${BUNDLE_DIR}/Contents/MacOS"
 mkdir -p "${BUNDLE_DIR}/Contents/Resources"
 
-cp "${PROJECT_DIR}/menu-bar-app/learner-desktop" "${BUNDLE_DIR}/Contents/MacOS/"
+cp "${BINARY}" "${BUNDLE_DIR}/Contents/MacOS/learner-desktop"
 chmod +x "${BUNDLE_DIR}/Contents/MacOS/learner-desktop"
 
 # The app runs the SSH tunnel itself, from its own bundle: a separate /bin/bash

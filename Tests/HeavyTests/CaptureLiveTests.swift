@@ -78,7 +78,8 @@ struct CaptureLiveTests {
     func liveSettingsMatchTheCommittedCapture() throws {
         let live = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: NSHomeDirectory() + "/.screenpipe/store.bin"))) as? [String: Any])["settings"] as? [String: Any] ?? [:]
         let expected = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: toolsRepoRoot() + "/config/screenpipe-settings.json"))) as? [String: Any])["settings"] as? [String: Any] ?? [:]
-        let drift = expected.filter { k, v in (v as? String) != "***REDACTED***" && !((live[k] as AnyObject?)?.isEqual(v) ?? (v is NSNull)) }.keys.sorted()
+        // Preflight's own comparison, so redacted entries mean the same thing here.
+        let drift = expected.filter { k, v in (v as? String) != Preflight.redacted && !(live[k].map { Preflight.equal($0, v) } ?? (v is NSNull)) }.keys.sorted()
         #expect(drift.isEmpty, "settings drifted from config/screenpipe-settings.json (update it if deliberate): \(drift)")
     }
 

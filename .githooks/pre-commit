@@ -1,8 +1,24 @@
 #!/usr/bin/env bash
-# Light lane on every commit (under a minute), plus the public-repo secret scan.
+# Every commit: the secret scan and the light lane, run against exactly what is being
+# committed (unstaged changes and untracked files are set aside while the lane runs).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-if command -v gitleaks >/dev/null; then
-  gitleaks git --staged . --redact --no-banner >/dev/null 2>&1 || { echo "gitleaks found a possible secret in the staged changes"; gitleaks git --staged . --redact --no-banner; exit 1; }
+
+if ! command -v gitleaks >/dev/null; then
+  echo "pre-commit: gitleaks is not installed (brew install gitleaks); refusing to commit unscanned" >&2
+  exit 1
 fi
-exec scripts/test.sh light
+gitleaks git --staged . --redact --no-banner >/dev/null 2>&1 || {
+  echo "pre-commit: gitleaks found a possible secret in the staged changes:" >&2
+  gitleaks git --staged . --redact --no-banner >&2 || true
+  exit 1
+}
+
+stashed=0
+if ! git diff --quiet || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+  git stash push --keep-index --include-untracked --quiet --message "pre-commit: unstaged changes" && stashed=1
+fi
+restore() { if [ "$stashed" = 1 ]; then git stash pop --quiet || echo "pre-commit: could not restore unstaged changes; they are in 'git stash list'" >&2; fi; }
+trap restore EXIT
+
+scripts/test.sh light

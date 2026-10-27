@@ -63,6 +63,33 @@ import TestSupport
         #expect(eventually(3) { find().isEmpty })
     }
 
+    @Test func orphanCleanupLeavesUnrelatedAndParentedProcessesAlone() {
+        let marker = "learner-orphan-keep-\(UUID().uuidString.prefix(8))"
+        // A live, parented process whose command line matches the marker: not an orphan.
+        let parented = Process()
+        parented.executableURL = URL(fileURLWithPath: "/bin/sh")
+        parented.arguments = ["-c", "exec -a \(marker) sleep 30"]
+        try? parented.run()
+        defer { parented.terminate() }
+        #expect(eventually(3) { !ChildProcess.run("/usr/bin/pgrep", ["-f", marker], timeout: 5).output.isEmpty })
+        #expect(ChildProcess.killOrphans(matching: marker, log: Log("Test")) == 0)
+        #expect(parented.isRunning)
+
+        // A pid file left by a crash, but the pid now belongs to an unrelated program.
+        let dir = TempDir()
+        let unrelated = Process()
+        unrelated.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        unrelated.arguments = ["30"]
+        try? unrelated.run()
+        defer { unrelated.terminate() }
+        try? String(unrelated.processIdentifier).write(toFile: dir.file("tunnel.pid"), atomically: true, encoding: .utf8)
+        let helper = ManagedHelper(name: "tunnel", executable: "/usr/bin/true", arguments: [], marker: "3200:127.0.0.1:3200", runtimeDir: dir.path)
+        DispatchQueue.main.sync { helper.start() }
+        Thread.sleep(forTimeInterval: 0.5)
+        #expect(unrelated.isRunning, "a recycled pid must not be killed")
+        helper.stop(grace: 0.2)
+    }
+
     @Test func aHelperThatCrashesIsRestartedWithBackoff() {
         let dir = TempDir()
         defer { dir.cleanup() }
@@ -70,11 +97,12 @@ import TestSupport
         let script = dir.write("crashy.sh", "#!/bin/bash\necho x >> \"\(launches)\"\nexit 1\n", executable: true)
         let helper = ManagedHelper(name: "crashy", executable: script, arguments: [], marker: "crashy.sh", runtimeDir: dir.path)
         DispatchQueue.main.sync { helper.start() }
-        // Restarts after 1 s, 2 s, 4 s ...: about three launches in 4.5 s, not dozens.
+        // Launches at 0 s, then after 1 s, 2 s, 4 s: three in the first 4.5 s, not dozens.
+        // A fixed wait, so a helper restarting with no backoff cannot pass early.
         let count = { ((try? String(contentsOfFile: launches, encoding: .utf8)) ?? "").split(separator: "\n").count }
-        #expect(eventually(6) { count() >= 3 })
+        Thread.sleep(forTimeInterval: 4.5)
         let seen = count()
-        #expect(seen <= 4)
+        #expect((3...4).contains(seen), "launched \(seen) times in 4.5 s")
         // The third exit is counted a moment after the third launch.
         #expect(eventually(3) { helper.problem != nil })
         helper.stop(grace: 0.5)
