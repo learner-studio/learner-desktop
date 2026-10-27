@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Light lane on every commit (under a minute), plus the public-repo secret scan.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+if command -v gitleaks >/dev/null; then
+  gitleaks git --staged . --redact --no-banner >/dev/null 2>&1 || { echo "gitleaks found a possible secret in the staged changes"; gitleaks git --staged . --redact --no-banner; exit 1; }
+fi
+exec scripts/test.sh light

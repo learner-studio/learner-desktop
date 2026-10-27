@@ -326,7 +326,7 @@ enum LearnerAPI {
     static func deviceKey() -> String? {
         if let k = ProcessInfo.processInfo.environment["LEARNER_API_KEY"], !k.isEmpty { return k }
         // Bounded: a locked keychain's prompt would otherwise stall the outbox queue.
-        let r = runBounded("/usr/bin/security", ["find-generic-password", "-s", "learner-server", "-a", clientId, "-w"], timeout: 10)
+        let r = ChildProcess.run("/usr/bin/security", ["find-generic-password", "-s", "learner-server", "-a", clientId, "-w"], timeout: 10)
         let key = r.output.trimmingCharacters(in: .whitespacesAndNewlines)
         return r.status == 0 && !key.isEmpty ? key : nil
     }

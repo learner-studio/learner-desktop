@@ -1,88 +1,65 @@
 #!/usr/bin/env bash
 #
-# test.sh — the whole test runner. No pytest, no dependencies, stdlib unittest only.
+# test.sh -- runs the test lanes. Every workflow (coach, trial outbox, chat export ->
+# voice -> archive, helpers, status) has end-to-end tests in each lane.
 #
-# Two lanes:
+#   light   Tests/LightTests    Fixtures and stand-ins only: no network, no live
+#                               screenpipe, no Bluetooth, no launchd. The whole lane
+#                               (tests, not the build) must finish in under 60 s.
+#                               Runs on every commit (.githooks/pre-commit).
+#   medium  Tests/MediumTests   Real child processes, the built app binary, local
+#                               stand-in servers, real timeouts. 60-180 s.
+#                               Runs before every push (.githooks/pre-push).
+#   heavy   Tests/HeavyTests    The live machine: screenpipe on :3030, ai-vault and
+#                               its logins, learner-server, the Pavlok if paired.
+#                               3+ min. Runs before every push. A suite skips (with
+#                               a reason) when its dependency is missing. Anything
+#                               that would stop the owner's real recording stack also
+#                               needs LEARNER_HEAVY_DESTRUCTIVE=1.
 #
-#   fast   tests/*.py            Pure and hermetic: no network, no database, no
-#                                launchd, no .docx corpus, no Swift compile. The
-#                                capture-script tests run the real shell scripts
-#                                but with every state-changing command stubbed on
-#                                PATH and HOME pointed at a throwaway directory.
-#                                Run this on every change.
-#
-#          tests/ts/*.test.ts    Also in the fast lane: `bun test tests/ts` (parser,
-#                                RPC client against a local mock server, baseline
-#                                mapping). Skipped with a note when bun is missing.
-#                                The ai-vault parser suite also reads ~/ai-vault-data
-#                                when it exists (read-only) and skips otherwise.
-#
-#   heavy  tests/heavy/*.py      Needs the real world: screenpipe on :3030, the
-#                                209-file .docx corpus, swiftc. Opt-in; each suite
-#                                skips rather than fails when its dependency is
-#                                missing. Sets AIAGG_HEAVY=1 for you.
-#
-# The destructive live capture-stack cycle (tests/heavy/test_capture_scripts_live.py)
-# stays skipped even in the heavy lane unless you also export
-# AIAGG_HEAVY_DESTRUCTIVE=1. It stops the owner's real recording stack.
-#
-# Usage:
-#   ./scripts/test.sh              # fast (default)
-#   ./scripts/test.sh fast
-#   ./scripts/test.sh heavy
-#   ./scripts/test.sh all
-#   ./scripts/test.sh fast -v      # extra args pass through to unittest
+# Usage: scripts/test.sh [light|medium|heavy|all] [extra swift test args]
+# Hooks: git config core.hooksPath .githooks   (scripts/install-hooks.sh does this)
 #
 set -uo pipefail
-
 cd "$(dirname "$0")/.."
 
-LANE="${1:-fast}"
+LANE="${1:-light}"
 [ $# -gt 0 ] && shift
 
-# unittest discovery only recurses into subdirectories that are importable
-# packages, which is why `-s tests` does not pick up tests/heavy. Do NOT add
-# tests/heavy/__init__.py -- the heavy lane would then run on every change.
-run_lane() {
-  local name="$1" dir="$2"; shift 2
-  printf '\n\033[1m==> %s lane (%s)\033[0m\n' "$name" "$dir"
-  python3 -m unittest discover -s "$dir" -p 'test_*.py' "$@"
+# Lane budgets in seconds (test time, after the build): min, max. 0 = no limit.
+budget() {
+  case "$1" in
+    light)  echo "0 60" ;;
+    medium) echo "0 180" ;;
+    heavy)  echo "0 0" ;;
+  esac
 }
 
-# The TypeScript half of the fast lane. Extra args are unittest's, so not passed on.
-run_ts_lane() {
-  printf '\n\033[1m==> fast lane (tests/ts, bun)\033[0m\n'
-  local bun_bin
-  bun_bin="$(command -v bun || true)"
-  [ -z "$bun_bin" ] && [ -x "${HOME}/.bun/bin/bun" ] && bun_bin="${HOME}/.bun/bin/bun"
-  if [ -z "$bun_bin" ]; then
-    echo "bun not found; skipping tests/ts"
-    return 0
+run_lane() {
+  local lane="$1"; shift
+  local target
+  target="$(tr '[:lower:]' '[:upper:]' <<< "${lane:0:1}")${lane:1}Tests"
+  printf '\n\033[1m==> %s lane (%s)\033[0m\n' "$lane" "$target"
+  # Build first so the budget measures the tests, not the compiler.
+  swift build --build-tests >/dev/null || { echo "build failed"; swift build --build-tests 2>&1 | grep -E "error" | head -20; return 1; }
+  local start end took status
+  start=$(date +%s)
+  [ "$lane" = heavy ] && export LEARNER_HEAVY=1
+  swift test --skip-build --filter "$target" "$@"
+  status=$?
+  end=$(date +%s)
+  took=$((end - start))
+  read -r _ max <<< "$(budget "$lane")"
+  printf '\033[1m<== %s lane: %s in %ss\033[0m\n' "$lane" "$([ $status -eq 0 ] && echo passed || echo FAILED)" "$took"
+  if [ "$status" -eq 0 ] && [ "$max" -gt 0 ] && [ "$took" -gt "$max" ]; then
+    echo "The $lane lane took ${took}s; its budget is ${max}s. Move slow tests to a heavier lane."
+    return 1
   fi
-  "$bun_bin" test tests/ts
+  return $status
 }
 
 case "$LANE" in
-  fast)
-    run_lane fast tests "$@"; py=$?
-    run_ts_lane; ts=$?
-    [ "$py" -eq 0 ] && [ "$ts" -eq 0 ]
-    ;;
-  heavy)
-    export AIAGG_HEAVY=1
-    run_lane heavy tests/heavy "$@"
-    ;;
-  all)
-    run_lane fast tests "$@" || exit $?
-    run_ts_lane || exit $?
-    export AIAGG_HEAVY=1
-    run_lane heavy tests/heavy "$@"
-    ;;
-  -h|--help)
-    sed -n '2,30p' "$0"; exit 0
-    ;;
-  *)
-    echo "unknown lane: ${LANE} (expected fast, heavy or all)" >&2
-    exit 2
-    ;;
+  light|medium|heavy) run_lane "$LANE" "$@" ;;
+  all) run_lane light "$@" && run_lane medium "$@" && run_lane heavy "$@" ;;
+  *) echo "usage: $0 [light|medium|heavy|all]"; exit 2 ;;
 esac

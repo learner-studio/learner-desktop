@@ -118,7 +118,7 @@ class SignInTest(unittest.TestCase):
     def test_sign_in_uses_your_browser_where_1password_and_passkeys_work(self):
         self.assertIn("VaultSignIn.start(provider)", self.src)
         self.assertNotIn("WKWebView", self.src)
-        self.assertNotIn(".command", self.src)
+        self.assertNotIn(".command\"", self.src)  # no Terminal .command script
         self.assertIn("browser.open(site.url)", self.src)
 
     def test_brave_is_the_default_and_chrome_can_be_chosen_in_settings(self):
@@ -147,7 +147,7 @@ class SignInTest(unittest.TestCase):
         self.assertIn('["setup", provider, "--cookies-file", path]', body)
         self.assertIn(".posixPermissions: 0o600", body)
         self.assertIn("defer { try? FileManager.default.removeItem(atPath: path) }", body)
-        self.assertLess(body.index("sites[provider] != nil"), body.index("runBounded(cli"))
+        self.assertLess(body.index("sites[provider] != nil"), body.index("ChildProcess.run(cli"))
 
     def test_a_refused_session_is_not_retried_in_a_loop(self):
         self.assertIn("$0 == tried ? nil", self.src)

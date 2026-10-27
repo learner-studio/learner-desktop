@@ -8,7 +8,8 @@ TARGET_APP="/Users/benpollack/Applications/${APP_NAME}"
 BUN_BIN="${HOME}/.bun/bin/bun"
 
 echo "Compiling Swift menu bar binary..."
-swiftc -O -lsqlite3 "${PROJECT_DIR}"/menu-bar-app/*.swift -o "${PROJECT_DIR}/menu-bar-app/learner-desktop"
+(cd "${PROJECT_DIR}" && swift build -c release --product LearnerDesktop)
+cp "${PROJECT_DIR}/.build/release/LearnerDesktop" "${PROJECT_DIR}/menu-bar-app/learner-desktop"
 
 echo "Creating Application bundle structure..."
 rm -rf "${BUNDLE_DIR}"

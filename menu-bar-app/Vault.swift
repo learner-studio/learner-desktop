@@ -132,7 +132,7 @@ final class VaultExport {
     /// Runs a command, streaming its output to vault-export.log. Returns the exit status
     /// (nil when it was stopped as stuck) and the output, for the outcome checks.
     private func runLogged(_ executable: String, _ args: [String], label: String) -> (Int32?, String) {
-        AppLog.rotate(helperLog: logPath)
+        LogFile.rotate(logPath)
         if !FileManager.default.fileExists(atPath: logPath) { FileManager.default.createFile(atPath: logPath, contents: nil) }
         let log = FileHandle(forWritingAtPath: logPath)
         log?.seekToEndOfFile()
@@ -208,14 +208,14 @@ final class VaultExport {
     }
 
     private static func descendants(of pid: pid_t) -> [pid_t] {
-        let kids = runBounded("/usr/bin/pgrep", ["-P", String(pid)], timeout: 5).output.split(separator: "\n").compactMap { pid_t($0) }
+        let kids = ChildProcess.run("/usr/bin/pgrep", ["-P", String(pid)], timeout: 5).output.split(separator: "\n").compactMap { pid_t($0) }
         return kids + kids.flatMap { descendants(of: $0) }
     }
 
     /// An export orphaned by a crash of this app (now parented to launchd) would run
     /// alongside the next one and trip ChatGPT's rate limit.
     private static func killOrphans() {
-        for line in runBounded("/bin/ps", ["-axo", "pid=,ppid=,command="], timeout: 5).output.split(separator: "\n") {
+        for line in ChildProcess.run("/bin/ps", ["-axo", "pid=,ppid=,command="], timeout: 5).output.split(separator: "\n") {
             let f = line.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
             guard f.count == 3, f[1] == "1", let pid = pid_t(f[0]),
                   f[2].contains("ai-vault backup") || f[2].contains("learner-watcher.js voice-transcripts") else { continue }
@@ -340,7 +340,7 @@ final class VaultSignIn {
         defer { try? FileManager.default.removeItem(atPath: path) }
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = (cli as NSString).deletingLastPathComponent + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-        let r = runBounded(cli, ["setup", provider, "--cookies-file", path], timeout: 90, environment: env, includeStderr: true)
+        let r = ChildProcess.run(cli, ["setup", provider, "--cookies-file", path], timeout: 90, env: env, stderr: true)
         guard let status = r.status else { return (false, "ai-vault setup did not finish in 90 s") }
         let ok = status == 0 && r.output.contains("Configuration saved")
         let last = r.output.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.last { !$0.isEmpty }
@@ -461,7 +461,7 @@ enum BrowserCookies {
     private static func safeStorageKey(_ browser: ChromiumBrowser) -> [UInt8]? {
         if let key = keys[browser.id] { return key }
         // Long enough to answer the Keychain prompt, but never forever.
-        let r = runBounded("/usr/bin/security", ["find-generic-password", "-w", "-s", browser.keychainService, "-a", browser.keychainAccount], timeout: 120)
+        let r = ChildProcess.run("/usr/bin/security", ["find-generic-password", "-w", "-s", browser.keychainService, "-a", browser.keychainAccount], timeout: 120)
         let password = r.output.trimmingCharacters(in: .newlines)
         guard r.status == 0, !password.isEmpty else {
             print("[VaultSignIn] could not read \(browser.keychainService) from the Keychain")

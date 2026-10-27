@@ -416,3 +416,318 @@ class PavlokDogIcon {
         return img
     }
 }
+
+
+// MARK: - Coach and Pavlok menu sections and actions
+
+extension TrayAppManager {
+    func addSpeakingCoachSection() {
+        header("Speaking Coach (Talk-Time Monitor)")
+        let callSuffix = talkMonitor.activeCallApp.map { " (\($0))" } ?? ""
+        if talkMonitor.isAlertActive {
+            _ = add("   🚨 Monologue Alert: \(talkMonitor.formattedDuration) continuous speech\(callSuffix)")
+            _ = add("   ✕ Dismiss Alert Toast", #selector(dismissToast))
+        } else if talkMonitor.isWarningActive {
+            _ = add("   ⚠️ Monologue Warning: \(talkMonitor.formattedDuration) continuous speech\(callSuffix)")
+        } else if let call = talkMonitor.activeCallApp {
+            let title = talkMonitor.activeCallTitle.map { " · \($0)" } ?? ""
+            _ = add("   🟢 Status: In call (\(call)\(title)) • Monitoring talk-time")
+        } else {
+            _ = add(talkMonitor.alertOnlyDuringCalls
+                ? "   🟢 Status: Standby (Monitoring for calls • Off-call quiet)"
+                : "   🟢 Status: Listening (All speech monitored: >30s warn / >1m alert)")
+        }
+        if talkMonitor.currentStreak > 0 {
+            _ = add("   ↺ Reset Speaking Streak (\(talkMonitor.formattedDuration))", #selector(resetStreakAction))
+        }
+        statusMenu.addItem(NSMenuItem.separator())
+    }
+
+    func pavlokMenuItem() -> NSMenuItem {
+        let pavlok = PavlokController.shared
+        let pavMenu = NSMenu()
+        let pavStatus = add("Connection: \(pavlok.connectionStatusText)", to: pavMenu)
+        pavStatus.image = PavlokDogIcon.image(connected: pavlok.isBleConnected, isScanning: pavlok.isBleScanning)
+        _ = add(pavlok.isEnabled ? "✓ Wearable Operant Feedback Enabled" : "○ Wearable Feedback Disabled (Safe Default)",
+                #selector(togglePavlokEnabled), to: pavMenu)
+
+        let comboMenu = NSMenu()
+        let combos = [
+            ("both_shock", "Both Shock (Default)", "⚡ Shock (30s: 15%) + ⚡ Shock (60s: 35%)  [Default: Both Shock]"),
+            ("vibe_shock", "Vibe (30s) + Shock (60s)", "📳 Vibe (30s: 30%) + ⚡ Shock (60s: 35%)    [Graduated: Vibe then Shock]"),
+            ("shock_vibe", "Shock (30s) + Vibe (60s)", "⚡ Shock (30s: 15%) + 📳 Vibe (60s: 60%)    [Inverted: Shock then Vibe]"),
+            ("both_vibe", "Both Vibration", "📳 Vibe (30s: 30%) + 📳 Vibe (60s: 60%)    [Gentle: Both Vibration]"),
+            ("both_dual", "Dual Shock + Vibe", "⚡📳 Dual Shock + Vibe (Both Thresholds)"),
+            ("all_zero", "All 0% (Silent)", "⚪ 0% All Modalities Disabled (Silent / Toast Only)")
+        ]
+        for (key, summary, label) in combos {
+            let isSel = pavlok.presetSummary == summary
+            let item = add("\(isSel ? "⦿ " : "○ ")\(label)", #selector(selectCuePreset(_:)), to: comboMenu)
+            item.representedObject = key
+            item.state = isSel ? .on : .off
+        }
+        add("🎛️ Cue Preset: \(pavlok.presetSummary)", to: pavMenu).submenu = comboMenu
+
+        // 30s / 60s panels: interactive, non-closing multi-select views.
+        let warnView = Pavlok30sSubmenuView()
+        let warnParent = add("⏱️ 30s Warning: \(pavlok.warningCueSummary)", to: pavMenu)
+        warnView.onStateChanged = { [weak self, weak warnParent] in
+            warnParent?.title = "⏱️ 30s Warning: \(PavlokController.shared.warningCueSummary)"
+            self?.updateTrayButton()
+        }
+        let alertView = Pavlok60sSubmenuView()
+        let alertParent = add("⏱️ 60s Hard Stop: \(pavlok.alertCueSummary)", to: pavMenu)
+        alertView.onStateChanged = { [weak self, weak alertParent] in
+            alertParent?.title = "⏱️ 60s Hard Stop: \(PavlokController.shared.alertCueSummary)"
+            self?.updateTrayButton()
+        }
+        for (parent, view) in [(warnParent, warnView as NSView), (alertParent, alertView as NSView)] {
+            let sub = NSMenu()
+            let holder = NSMenuItem()
+            holder.view = view
+            sub.addItem(holder)
+            parent.isEnabled = true
+            parent.submenu = sub
+        }
+        _ = add(pavlok.rewardGoodBehavior ? "✓ Good Behavior: Reward Vibration on Concise Turns (<30s)" : "○ Good Behavior: Reward Vibration Disabled",
+                #selector(toggleGoodBehaviorReward), to: pavMenu)
+        pavMenu.addItem(NSMenuItem.separator())
+        add("Keep Bluetooth Connected", #selector(togglePavlokConnection), to: pavMenu).state = pavlok.keepConnected ? .on : .off
+        _ = add("🔍 Scan & Connect via Bluetooth", #selector(scanPavlokBluetooth), to: pavMenu)
+        _ = add(pavlok.apiToken.isEmpty ? "🔑 Configure Cloud Backup Token (Optional)..." : "🔑 Change Cloud Backup Token (Configured)...",
+                #selector(promptPavlokToken), to: pavMenu)
+        let pavState = !pavlok.isEnabled ? "⚪ Disabled" : (pavlok.isBleConnected ? "🟢 Connected" : "🟡 Not connected")
+        let pavParent = NSMenuItem(title: "⚡ Pavlok: \(pavState)", action: nil, keyEquivalent: "")
+        pavParent.submenu = pavMenu
+        return pavParent
+    }
+
+    func addCoachSettings(to settings: NSMenu) {
+        _ = add(talkMonitor.alertOnlyDuringCalls ? "✓ Alert Only During Calls (Off-Call Silent)" : "○ Alert On All Monologues (Any App)",
+                #selector(toggleAlertOnlyDuringCalls), to: settings)
+        let mode = HabitExperimentManager.shared.currentMode
+        let armMenu = NSMenu()
+        for arm in HabitTreatmentArm.allCases {
+            add("\(mode == arm ? "✓ " : "   ")\(arm.displayName)", #selector(selectExperimentArm(_:)), to: armMenu).representedObject = arm.rawValue
+        }
+        let armParent = add("Select Active Intervention Condition...", to: settings)
+        armParent.isEnabled = true
+        armParent.submenu = armMenu
+    }
+
+    @objc func receivePavlokTest(_ notification: Notification) {
+        guard notification.object as? String == String(ProcessInfo.processInfo.processIdentifier),
+              let info = notification.userInfo,
+              let id = info["id"] as? String, UUID(uuidString: id) != nil,
+              let type = info["type"] as? String, ["vibe", "beep", "zap"].contains(type),
+              let level = info["intensity"] as? Int, (1...100).contains(level),
+              let sent = info["sent_at"] as? Double, abs(Date().timeIntervalSince1970 - sent) < 30,
+              !handledPavlokRequests.contains(id) else { return }
+        handledPavlokRequests.insert(id)
+        PavlokController.shared.testFire(type: type, operationID: id, intensityOverride: level) { ok, detail in
+            DistributedNotificationCenter.default().postNotificationName(
+                Notification.Name("com.benpollack.pavlok.test-result"), object: id,
+                userInfo: ["success": ok, "detail": detail], deliverImmediately: true)
+        }
+    }
+
+    // MARK: - Actions
+    @objc func dismissToast() {
+        MonologueToastController.shared.hide()
+        updateTrayButton()
+        rebuildMenu()
+    }
+
+    @objc func toggleAlertOnlyDuringCalls() {
+        talkMonitor.alertOnlyDuringCalls.toggle()
+        if talkMonitor.alertOnlyDuringCalls && talkMonitor.activeCallApp == nil {
+            MonologueToastController.shared.hide()
+        }
+        rebuildMenu()
+    }
+
+    @objc func resetStreakAction() {
+        talkMonitor.resetStreak()
+        updateTrayButton()
+        rebuildMenu()
+    }
+
+    // MARK: - Pavlok Actions
+    @objc func togglePavlokConnection() {
+        PavlokController.shared.keepConnected.toggle()
+        rebuildMenu()
+        updateTrayButton()
+    }
+
+    @objc func scanPavlokBluetooth() {
+        PavlokController.shared.keepConnected = true
+        PavlokController.shared.startBleScan(force: true)
+        rebuildMenu()
+        updateTrayButton()
+    }
+
+    @objc func togglePavlokEnabled() {
+        PavlokController.shared.isEnabled.toggle()
+        updateTrayButton()
+        rebuildMenu()
+    }
+
+    @objc func selectCuePreset(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String else { return }
+        switch key {
+        case "both_shock":
+            PavlokController.shared.warningShockIntensity = (PavlokController.shared.savedWarningShockIntensity > 0 ? PavlokController.shared.savedWarningShockIntensity : 15)
+            PavlokController.shared.warningVibeIntensity = 0
+            PavlokController.shared.warningBeepEnabled = false
+            PavlokController.shared.alertShockIntensity = (PavlokController.shared.savedAlertShockIntensity > 0 ? PavlokController.shared.savedAlertShockIntensity : 35)
+            PavlokController.shared.alertVibeIntensity = 0
+        case "vibe_shock":
+            PavlokController.shared.warningShockIntensity = 0
+            PavlokController.shared.warningVibeIntensity = (PavlokController.shared.savedWarningVibeIntensity > 0 ? PavlokController.shared.savedWarningVibeIntensity : 30)
+            PavlokController.shared.warningBeepEnabled = false
+            PavlokController.shared.alertShockIntensity = (PavlokController.shared.savedAlertShockIntensity > 0 ? PavlokController.shared.savedAlertShockIntensity : 35)
+            PavlokController.shared.alertVibeIntensity = 0
+        case "shock_vibe":
+            PavlokController.shared.warningShockIntensity = (PavlokController.shared.savedWarningShockIntensity > 0 ? PavlokController.shared.savedWarningShockIntensity : 15)
+            PavlokController.shared.warningVibeIntensity = 0
+            PavlokController.shared.warningBeepEnabled = false
+            PavlokController.shared.alertShockIntensity = 0
+            PavlokController.shared.alertVibeIntensity = (PavlokController.shared.savedAlertVibeIntensity > 0 ? PavlokController.shared.savedAlertVibeIntensity : 60)
+        case "both_vibe":
+            PavlokController.shared.warningShockIntensity = 0
+            PavlokController.shared.warningVibeIntensity = (PavlokController.shared.savedWarningVibeIntensity > 0 ? PavlokController.shared.savedWarningVibeIntensity : 30)
+            PavlokController.shared.warningBeepEnabled = false
+            PavlokController.shared.alertShockIntensity = 0
+            PavlokController.shared.alertVibeIntensity = (PavlokController.shared.savedAlertVibeIntensity > 0 ? PavlokController.shared.savedAlertVibeIntensity : 60)
+        case "both_dual":
+            PavlokController.shared.warningShockIntensity = (PavlokController.shared.savedWarningShockIntensity > 0 ? PavlokController.shared.savedWarningShockIntensity : 15)
+            PavlokController.shared.warningVibeIntensity = (PavlokController.shared.savedWarningVibeIntensity > 0 ? PavlokController.shared.savedWarningVibeIntensity : 30)
+            PavlokController.shared.alertShockIntensity = (PavlokController.shared.savedAlertShockIntensity > 0 ? PavlokController.shared.savedAlertShockIntensity : 35)
+            PavlokController.shared.alertVibeIntensity = (PavlokController.shared.savedAlertVibeIntensity > 0 ? PavlokController.shared.savedAlertVibeIntensity : 60)
+        case "all_zero":
+            PavlokController.shared.warningShockIntensity = 0
+            PavlokController.shared.warningVibeIntensity = 0
+            PavlokController.shared.warningBeepEnabled = false
+            PavlokController.shared.alertShockIntensity = 0
+            PavlokController.shared.alertVibeIntensity = 0
+        default:
+            break
+        }
+        rebuildMenu()
+        updateTrayButton()
+    }
+
+    @objc func toggle30sShockAction() {
+        PavlokController.shared.toggle30sShock()
+        rebuildMenu()
+        updateTrayButton()
+    }
+
+    @objc func toggle30sVibeAction() {
+        PavlokController.shared.toggle30sVibe()
+        rebuildMenu()
+        updateTrayButton()
+    }
+
+    @objc func toggle30sBeepAction() {
+        PavlokController.shared.toggle30sBeep()
+        rebuildMenu()
+        updateTrayButton()
+    }
+
+    @objc func toggle60sShockAction() {
+        PavlokController.shared.toggle60sShock()
+        rebuildMenu()
+        updateTrayButton()
+    }
+
+    @objc func toggle60sVibeAction() {
+        PavlokController.shared.toggle60sVibe()
+        rebuildMenu()
+        updateTrayButton()
+    }
+
+    @objc func select30sWarningCue(_ sender: NSMenuItem) {
+        if let key = sender.representedObject as? String {
+            PavlokController.shared.warningCue = key
+            rebuildMenu()
+            updateTrayButton()
+        }
+    }
+
+    @objc func select30sShockIntensity(_ sender: NSMenuItem) {
+        PavlokController.shared.warningShockIntensity = sender.tag
+        rebuildMenu()
+        updateTrayButton()
+    }
+
+    @objc func select30sVibeIntensity(_ sender: NSMenuItem) {
+        PavlokController.shared.warningVibeIntensity = sender.tag
+        rebuildMenu()
+        updateTrayButton()
+    }
+
+    @objc func select60sAlertCue(_ sender: NSMenuItem) {
+        if let key = sender.representedObject as? String {
+            PavlokController.shared.alertCue = key
+            rebuildMenu()
+            updateTrayButton()
+        }
+    }
+
+    @objc func select60sShockIntensity(_ sender: NSMenuItem) {
+        PavlokController.shared.alertShockIntensity = sender.tag
+        rebuildMenu()
+        updateTrayButton()
+    }
+
+    @objc func select60sVibeIntensity(_ sender: NSMenuItem) {
+        PavlokController.shared.alertVibeIntensity = sender.tag
+        rebuildMenu()
+        updateTrayButton()
+    }
+
+    @objc func testPavlok30sCue() {
+        PavlokController.shared.trigger30sWarning()
+    }
+
+    @objc func testPavlok60sCue() {
+        PavlokController.shared.trigger60sHardStop()
+    }
+
+    @objc func toggleGoodBehaviorReward() {
+        PavlokController.shared.rewardGoodBehavior.toggle()
+        rebuildMenu()
+    }
+
+    @objc func promptPavlokToken() {
+        let alert = NSAlert()
+        alert.messageText = "Pavlok API Token"
+        alert.informativeText = "Enter your Pavlok Personal API token (obtainable from pavlok.com account settings):"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        input.stringValue = PavlokController.shared.apiToken
+        alert.accessoryView = input
+
+        NSApp.activate(ignoringOtherApps: true)
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            let token = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            PavlokController.shared.apiToken = token
+            rebuildMenu()
+            updateTrayButton()
+        }
+    }
+
+    @objc func selectExperimentArm(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let arm = HabitTreatmentArm(rawValue: raw) else { return }
+        HabitExperimentManager.shared.currentMode = arm
+        print("[HabitExperiment] Switched experiment condition to: \(arm.displayName)")
+        fflush(stdout)
+        rebuildMenu()
+    }
+}
