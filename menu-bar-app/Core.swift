@@ -524,6 +524,13 @@ final class Job: Sendable {
 /// The app's one clock: a 1 s main-thread timer in .common mode (it keeps running while
 /// a menu is open). Each registered task runs every `every` seconds; every Job is ticked
 /// each second and decides for itself whether it is due.
+///
+/// Why not NSBackgroundActivityScheduler for the hourly jobs (Export, Archive): due-ness
+/// is the job's persisted nextRun, which a backoff, a rate limit's fixed retry, a block's
+/// recheck or a kick moves at any time. An OS activity would have to be torn down and
+/// rescheduled after every outcome, may defer the work by far more than a 15 min backoff
+/// asks for, and would be a second clock the tests cannot drive. A 1 s tick that compares
+/// two dates costs nothing measurable; the timer's tolerance lets macOS coalesce it.
 @MainActor
 enum Scheduler {
     private struct Task { let name: String; let every: TimeInterval; var last: Date; let run: @MainActor () -> Void }
@@ -539,6 +546,7 @@ enum Scheduler {
         guard timer == nil else { return }
         // On the main run loop, so it always fires on the main thread.
         let t = Timer(timeInterval: 1, repeats: true) { _ in MainActor.assumeIsolated { fire() } }
+        t.tolerance = 0.1
         RunLoop.main.add(t, forMode: .common)
         timer = t
         Log("Scheduler").info("started: \(tasks.map { "\($0.name) every \(Job.describe($0.every))" }.joined(separator: ", ")); jobs: \(Job.all.map(\.name).joined(separator: ", "))")
