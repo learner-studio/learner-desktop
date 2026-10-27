@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR="/Users/benpollack/code/learner-desktop"
+# BUNDLE_ONLY=1 builds and signs the bundle into OUT_DIR (default menu-bar-app/) and
+# stops there: no install, no launchctl. The heavy test lane uses it.
+PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="Learner Desktop.app"
-BUNDLE_DIR="${PROJECT_DIR}/menu-bar-app/${APP_NAME}"
+OUT_DIR="${OUT_DIR:-${PROJECT_DIR}/menu-bar-app}"
+BUNDLE_DIR="${OUT_DIR}/${APP_NAME}"
 TARGET_APP="/Users/benpollack/Applications/${APP_NAME}"
 BUN_BIN="${HOME}/.bun/bin/bun"
 
@@ -66,14 +69,20 @@ EOF
 # rebuilds. Ad-hoc signing (-) changes the code hash every build, and macOS TCC keys
 # its grants (Bluetooth, Documents, ...) to that identity -- so every rebuild re-prompted.
 # Referenced by name, not hash, so the annual certificate renewal does not break this.
-SIGN_IDENTITY="Apple Development: <owner> (TTR89UH3PK)"
-echo "Code-signing with: ${SIGN_IDENTITY}"
-if security find-identity -v -p codesigning | grep -q "${SIGN_IDENTITY}"; then
+# LEARNER_SIGN_IDENTITY overrides; otherwise the first Apple Development identity.
+SIGN_IDENTITY="${LEARNER_SIGN_IDENTITY:-$(security find-identity -v -p codesigning | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -1)}"
+echo "Code-signing with: ${SIGN_IDENTITY:-ad-hoc}"
+if [ -n "${SIGN_IDENTITY}" ] && security find-identity -v -p codesigning | grep -qF "${SIGN_IDENTITY}"; then
   codesign --force --sign "${SIGN_IDENTITY}" --timestamp=none "${BUNDLE_DIR}"
   codesign --verify --strict "${BUNDLE_DIR}"
 else
   echo "  ! signing identity not found in Keychain; falling back to ad-hoc (TCC will re-prompt per build)" >&2
   codesign --force --sign - "${BUNDLE_DIR}"
+fi
+
+if [ "${BUNDLE_ONLY:-0}" = 1 ]; then
+  echo "Built ${BUNDLE_DIR} (BUNDLE_ONLY: not installed)"
+  exit 0
 fi
 
 echo "Installing to ~/Applications/..."
