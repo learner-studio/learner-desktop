@@ -189,6 +189,12 @@ final class VaultExport {
             if v.candidates > 0 || v.stopped != nil { notes.append("voice: \(v.describe)") }
         }
 
+        // Interrupted by quit: not a failure. Leave the saved schedule alone, so the next
+        // launch resumes within minutes instead of waiting out a backoff.
+        if lock.withLock({ quitting }) {
+            log.info("export interrupted by quit; it resumes at the next launch")
+            return finish(notes + ["stopped for quit"], .idle)
+        }
         let allExpired = lock.withLock { config.providers.allSatisfy { expired[$0] != nil } }
         if allExpired {
             return finish(notes, .blocked("ai-vault login expired (\(config.providers.joined(separator: ", "))): Sign In Again"))

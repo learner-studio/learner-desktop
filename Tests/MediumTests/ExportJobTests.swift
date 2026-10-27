@@ -185,7 +185,11 @@ private final class ExportFixture {
         let started = Date()
         f.export.stopForQuit()
         #expect(Date().timeIntervalSince(started) < 2)
-        #expect(waitFor(5) { f.export.job.snapshot.lastRun != nil })
+        #expect(waitFor(5) { !f.export.isRunning })
+        // Not recorded as a failure: no backoff, no problem, the next launch resumes soon.
+        Thread.sleep(forTimeInterval: 0.3)
+        #expect(f.export.job.snapshot.failures == 0)
+        #expect(f.export.job.problem == nil)
         #expect(!isAlive(try #require(pid(in: f.dir.file("sh.pid")))))
         #expect(f.calls == ["claude"]) // chatgpt not started after quit
     }
