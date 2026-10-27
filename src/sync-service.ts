@@ -62,6 +62,8 @@ export class SyncService {
   private queue = new Set<string>()
   private draining: Promise<void> | null = null
   private retryTimer: ReturnType<typeof setTimeout> | null = null
+  /** Set while sending keeps failing; the menu-bar app turns red when it lasts. */
+  private problemSince: string | null = null
 
   constructor(
     private readonly api: LearnerApiClient,
@@ -138,6 +140,7 @@ export class SyncService {
         res = await this.api.archiveConversationDocuments(batch.map((d) => d.document))
       } catch (err) {
         if (err instanceof NoApiKeyError) {
+          this.noteProblem('no device key')
           if (!this.noKeyLogged) {
             this.log('[Sync] no device key (LEARNER_API_KEY or Keychain learner-server/ben-mbp); will retry later')
             this.noKeyLogged = true
@@ -152,6 +155,7 @@ export class SyncService {
         case 'ok': {
           work.shift()
           attempt = 0
+          this.clearProblem()
           for (const d of batch) {
             this.ledger.record({
               filePath: d.filePath,
@@ -189,20 +193,34 @@ export class SyncService {
           break
         }
         case 'auth':
+          this.noteProblem(`device key refused (HTTP ${res.status})`)
           this.log(`[Sync] key problem: HTTP ${res.status} from ${this.api.baseUrl}; stopping, will retry later`)
           return { synced, parked, requests, stopped: 'key-problem', remaining: work.flat() }
         case 'transient': {
           const wait = this.backoffMs(attempt++)
+          this.noteProblem(res.status === null ? `network error (${res.error ?? 'unknown'})` : `HTTP ${res.status}`)
           this.log(`[Sync] ${res.status === null ? `network error (${res.error ?? 'unknown'})` : `HTTP ${res.status}`}; retrying in ${Math.round(wait / 1000)}s`)
           await this.sleep(wait)
           break
         }
         case 'unexpected':
+          this.noteProblem(`unexpected HTTP ${res.status}`)
           this.log(`[Sync] unexpected HTTP ${res.status} from ${this.api.baseUrl}; stopping, will retry later`)
           return { synced, parked, requests, stopped: 'unexpected-status', remaining: work.flat() }
       }
     }
     return { synced, parked, requests, stopped: null, remaining: [] }
+  }
+
+  private noteProblem(problem: string): void {
+    this.problemSince ??= new Date().toISOString()
+    this.ledger.updateStatusFile({ problem, problemSince: this.problemSince })
+  }
+
+  private clearProblem(): void {
+    if (this.problemSince === null) return
+    this.problemSince = null
+    this.ledger.updateStatusFile({ problem: null, problemSince: null })
   }
 
   /** One sweep over the given files (default: the whole export). */
@@ -214,7 +232,10 @@ export class SyncService {
       lastRunAt: new Date().toISOString(),
       stopped: sent.stopped,
       pending: sent.remaining.length,
+      problem: sent.stopped ? `stopped: ${sent.stopped}` : null,
+      problemSince: sent.stopped ? this.problemSince : null,
     })
+    if (!sent.stopped) this.problemSince = null
     return {
       discovered: files.length,
       alreadyUpToDate: c.upToDate,

@@ -1096,9 +1096,22 @@ class PavlokController: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         isBleScanning = false
         peripheral.delegate = self
         peripheral.discoverServices(nil)
+        // Connected but unusable (discovery stalled) would never reconnect on its own.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+            guard let self = self, peripheral.state == .connected,
+                  self.shockCharacteristic == nil && self.vibeCharacteristic == nil else { return }
+            self.dropUnusable(peripheral, "no stimulus characteristics 15 s after connecting")
+        }
         DispatchQueue.main.async { [weak self] in
             self?.onStatusChanged?()
         }
+    }
+
+    /// Disconnecting hands it to didDisconnectPeripheral, which reconnects with backoff.
+    private func dropUnusable(_ peripheral: CBPeripheral, _ why: String) {
+        print("[Pavlok BLE] ⚠️ Connected but unusable (\(why)); reconnecting")
+        fflush(stdout)
+        centralManager?.cancelPeripheralConnection(peripheral)
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
@@ -1130,7 +1143,7 @@ class PavlokController: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     // MARK: - CBPeripheralDelegate
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         if let error = error {
-            print("[Pavlok BLE] ⚠️ Service discovery error: \(error.localizedDescription)")
+            dropUnusable(peripheral, "service discovery: \(error.localizedDescription)")
             return
         }
         for service in peripheral.services ?? [] {
@@ -1140,7 +1153,7 @@ class PavlokController: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         if let error = error {
-            print("[Pavlok BLE] ⚠️ Characteristic discovery error: \(error.localizedDescription)")
+            dropUnusable(peripheral, "characteristic discovery: \(error.localizedDescription)")
             return
         }
         for char in service.characteristics ?? [] {
@@ -1506,7 +1519,27 @@ class HabitEventLogger {
 
     private let dbPath: String
     private var db: OpaquePointer?
+    private var closed = false
+    /// Turns whose insert failed (disk full, locked, DB would not open): retried on the
+    /// next turn instead of dropped. Lost only if the app quits before the DB recovers.
+    private var unwritten: [Turn] = []
     private let queue = DispatchQueue(label: "com.benpollack.habit-logger", qos: .utility)
+
+    private struct Turn {
+        let eventId: String, sessionId: String, callApp: String?, callCategory: String, timestamp: String
+        let habitType: String, treatmentArm: String, turnDurationSec: Double, wordsSpoken: Int
+        let warningFiredAt: Double?, shockFiredAt: Double?, latencyToYieldSec: Double?
+        let breached30s: Bool, breached60s: Bool, wasRewarded: Bool, metaJson: String
+    }
+
+    /// For the tray: trials are not being saved.
+    var problem: String? {
+        queue.sync {
+            if closed { return nil }
+            if db == nil { return "the trial database will not open" }
+            return unwritten.isEmpty ? nil : "\(unwritten.count) trial(s) not yet saved"
+        }
+    }
 
     init() {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -1518,11 +1551,21 @@ class HabitEventLogger {
     }
 
     private func openAndInitDb() {
-        queue.async {
-            if sqlite3_open(self.dbPath, &self.db) != SQLITE_OK {
-                print("[HabitLogger] ❌ Failed to open SQLite DB at \(self.dbPath)")
-                return
-            }
+        queue.async { _ = self.openLocked() }
+    }
+
+    /// On `queue`. Retried on each turn while it fails.
+    private func openLocked() -> Bool {
+        if db != nil { return true }
+        guard !closed else { return false }
+        var handle: OpaquePointer?
+        if sqlite3_open(dbPath, &handle) != SQLITE_OK {
+            sqlite3_close(handle)
+            print("[HabitLogger] ❌ Failed to open SQLite DB at \(dbPath); will retry on the next turn")
+            return false
+        }
+        db = handle
+        do {
             sqlite3_busy_timeout(self.db, 5000)
             let createSql = """
             CREATE TABLE IF NOT EXISTS habit_events (
@@ -1547,9 +1590,13 @@ class HabitEventLogger {
             CREATE INDEX IF NOT EXISTS idx_habits_unsynced ON habit_events(synced_to_server);
             """
             if sqlite3_exec(self.db, createSql, nil, nil, nil) != SQLITE_OK {
-                print("[HabitLogger] ❌ Failed to initialize schema")
+                print("[HabitLogger] ❌ Failed to initialize schema; will retry on the next turn")
+                sqlite3_close(db)
+                db = nil
+                return false
             }
         }
+        return true
     }
 
     func logTurn(
@@ -1570,73 +1617,69 @@ class HabitEventLogger {
         metadata: [String: Any] = [:]
     ) {
         queue.async {
-            guard let db = self.db else {
+            guard !self.closed else {
                 print("[HabitLogger] Dropped a turn logged after shutdown (DB closed).")
                 return
             }
-            let eventId = UUID().uuidString.lowercased()
             // When the app drains a backlog of transcriptions, many turns finish within the
             // same wall-clock second. Stamp the row with when the turn was actually spoken
             // (audio clock where available), not when it happened to be written.
-            let isoTimestamp = ISO8601DateFormatter().string(from: occurredAt ?? Date())
-            let metaJson = (try? JSONSerialization.data(withJSONObject: metadata)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
-
-            let sql = """
-            INSERT INTO habit_events (
-                event_id, session_id, call_app, call_category, timestamp,
-                habit_type, treatment_arm, turn_duration_sec, words_spoken,
-                warning_fired_at, shock_fired_at, latency_to_yield_sec,
-                breached_30s, breached_60s, was_rewarded, metadata, synced_to_server
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0);
-            """
-
-            var stmt: OpaquePointer?
-            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
-                let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-                sqlite3_bind_text(stmt, 1, (eventId as NSString).utf8String, -1, SQLITE_TRANSIENT)
-                sqlite3_bind_text(stmt, 2, (sessionId as NSString).utf8String, -1, SQLITE_TRANSIENT)
-                sqlite3_bind_text(stmt, 3, ((callApp ?? "Solo Mic") as NSString).utf8String, -1, SQLITE_TRANSIENT)
-                sqlite3_bind_text(stmt, 4, (callCategory as NSString).utf8String, -1, SQLITE_TRANSIENT)
-                sqlite3_bind_text(stmt, 5, (isoTimestamp as NSString).utf8String, -1, SQLITE_TRANSIENT)
-                sqlite3_bind_text(stmt, 6, (habitType as NSString).utf8String, -1, SQLITE_TRANSIENT)
-                sqlite3_bind_text(stmt, 7, (treatmentArm as NSString).utf8String, -1, SQLITE_TRANSIENT)
-                sqlite3_bind_double(stmt, 8, turnDurationSec)
-                sqlite3_bind_int(stmt, 9, Int32(wordsSpoken))
-
-                if let w = warningFiredAt {
-                    sqlite3_bind_double(stmt, 10, w)
-                } else {
-                    sqlite3_bind_null(stmt, 10)
-                }
-
-                if let s = shockFiredAt {
-                    sqlite3_bind_double(stmt, 11, s)
-                } else {
-                    sqlite3_bind_null(stmt, 11)
-                }
-
-                if let l = latencyToYieldSec {
-                    sqlite3_bind_double(stmt, 12, l)
-                } else {
-                    sqlite3_bind_null(stmt, 12)
-                }
-
-                sqlite3_bind_int(stmt, 13, breached30s ? 1 : 0)
-                sqlite3_bind_int(stmt, 14, breached60s ? 1 : 0)
-                sqlite3_bind_int(stmt, 15, wasRewarded ? 1 : 0)
-                sqlite3_bind_text(stmt, 16, (metaJson as NSString).utf8String, -1, SQLITE_TRANSIENT)
-
-                if sqlite3_step(stmt) == SQLITE_DONE {
-                    print("[HabitLogger] ✅ Logged \(habitType): arm=\(treatmentArm), dur=\(String(format: "%.1f", turnDurationSec))s, yieldLatency=\(latencyToYieldSec.map { String(format: "%.1f", $0) + "s" } ?? "none"), 30s=\(breached30s)")
-                } else {
-                    print("[HabitLogger] ❌ sqlite3_step failed: \(String(cString: sqlite3_errmsg(db)))")
-                }
-                sqlite3_finalize(stmt)
-            } else {
-                print("[HabitLogger] ❌ sqlite3_prepare_v2 failed: \(String(cString: sqlite3_errmsg(db)))")
-            }
+            let turn = Turn(
+                eventId: UUID().uuidString.lowercased(), sessionId: sessionId, callApp: callApp, callCategory: callCategory,
+                timestamp: ISO8601DateFormatter().string(from: occurredAt ?? Date()), habitType: habitType,
+                treatmentArm: treatmentArm, turnDurationSec: turnDurationSec, wordsSpoken: wordsSpoken,
+                warningFiredAt: warningFiredAt, shockFiredAt: shockFiredAt, latencyToYieldSec: latencyToYieldSec,
+                breached30s: breached30s, breached60s: breached60s, wasRewarded: wasRewarded,
+                metaJson: (try? JSONSerialization.data(withJSONObject: metadata)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}")
+            self.unwritten.append(turn)
+            guard self.openLocked() else { return }
+            // Oldest first; stop at the first failure and keep the rest for the next turn.
+            while let next = self.unwritten.first, self.insert(next) { self.unwritten.removeFirst() }
             fflush(stdout)
         }
+    }
+
+    /// On `queue`, with the DB open.
+    private func insert(_ t: Turn) -> Bool {
+        let sql = """
+        INSERT OR IGNORE INTO habit_events (
+            event_id, session_id, call_app, call_category, timestamp,
+            habit_type, treatment_arm, turn_duration_sec, words_spoken,
+            warning_fired_at, shock_fired_at, latency_to_yield_sec,
+            breached_30s, breached_60s, was_rewarded, metadata, synced_to_server
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0);
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            print("[HabitLogger] ❌ sqlite3_prepare_v2 failed: \(String(cString: sqlite3_errmsg(db))); will retry")
+            return false
+        }
+        defer { sqlite3_finalize(stmt) }
+        let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        func text(_ i: Int32, _ v: String) { sqlite3_bind_text(stmt, i, (v as NSString).utf8String, -1, SQLITE_TRANSIENT) }
+        func real(_ i: Int32, _ v: Double?) { if let v = v { sqlite3_bind_double(stmt, i, v) } else { sqlite3_bind_null(stmt, i) } }
+        text(1, t.eventId)
+        text(2, t.sessionId)
+        text(3, t.callApp ?? "Solo Mic")
+        text(4, t.callCategory)
+        text(5, t.timestamp)
+        text(6, t.habitType)
+        text(7, t.treatmentArm)
+        sqlite3_bind_double(stmt, 8, t.turnDurationSec)
+        sqlite3_bind_int(stmt, 9, Int32(t.wordsSpoken))
+        real(10, t.warningFiredAt)
+        real(11, t.shockFiredAt)
+        real(12, t.latencyToYieldSec)
+        sqlite3_bind_int(stmt, 13, t.breached30s ? 1 : 0)
+        sqlite3_bind_int(stmt, 14, t.breached60s ? 1 : 0)
+        sqlite3_bind_int(stmt, 15, t.wasRewarded ? 1 : 0)
+        text(16, t.metaJson)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            print("[HabitLogger] ❌ sqlite3_step failed: \(String(cString: sqlite3_errmsg(db))); will retry")
+            return false
+        }
+        print("[HabitLogger] ✅ Logged \(t.habitType): arm=\(t.treatmentArm), dur=\(String(format: "%.1f", t.turnDurationSec))s, yieldLatency=\(t.latencyToYieldSec.map { String(format: "%.1f", $0) + "s" } ?? "none"), 30s=\(t.breached30s)")
+        return true
     }
 
     /// Block until every queued insert has been written. Used by clean shutdown so the
@@ -1648,6 +1691,11 @@ class HabitEventLogger {
     /// Close the SQLite handle. Further logTurn calls become no-ops rather than crashes.
     func close() {
         queue.sync {
+            if !self.unwritten.isEmpty, self.openLocked() {
+                while let next = self.unwritten.first, self.insert(next) { self.unwritten.removeFirst() }
+            }
+            if !self.unwritten.isEmpty { print("[HabitLogger] ❌ \(self.unwritten.count) trial(s) could not be saved before quit") }
+            self.closed = true
             if let db = self.db {
                 sqlite3_close(db)
                 self.db = nil
@@ -1733,19 +1781,22 @@ class HabitEventLogger {
         return legacy.date(from: raw).map { ISO8601DateFormatter().string(from: $0) } ?? raw
     }
 
-    func mark(_ eventIds: [String], as state: Int) {
-        guard !eventIds.isEmpty else { return }
-        queue.sync {
-            guard let db = self.db else { return }
+    /// False when the rows could not be updated; the caller must not treat them as sent.
+    @discardableResult
+    func mark(_ eventIds: [String], as state: Int) -> Bool {
+        guard !eventIds.isEmpty else { return true }
+        return queue.sync {
+            guard let db = self.db else { return false }
             let placeholders = Array(repeating: "?", count: eventIds.count).joined(separator: ",")
             var stmt: OpaquePointer?
-            guard sqlite3_prepare_v2(db, "UPDATE habit_events SET synced_to_server = \(state) WHERE event_id IN (\(placeholders));", -1, &stmt, nil) == SQLITE_OK else { return }
+            guard sqlite3_prepare_v2(db, "UPDATE habit_events SET synced_to_server = \(state) WHERE event_id IN (\(placeholders));", -1, &stmt, nil) == SQLITE_OK else { return false }
             let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
             for (i, id) in eventIds.enumerated() {
                 sqlite3_bind_text(stmt, Int32(i + 1), (id as NSString).utf8String, -1, SQLITE_TRANSIENT)
             }
-            sqlite3_step(stmt)
+            let done = sqlite3_step(stmt) == SQLITE_DONE
             sqlite3_finalize(stmt)
+            return done
         }
     }
 
@@ -1779,17 +1830,10 @@ enum LearnerAPI {
     /// through /usr/bin/security, which that item trusts, so a rebuilt app is not prompted.
     static func deviceKey() -> String? {
         if let k = ProcessInfo.processInfo.environment["LEARNER_API_KEY"], !k.isEmpty { return k }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        p.arguments = ["find-generic-password", "-s", "learner-server", "-a", clientId, "-w"]
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = FileHandle.nullDevice
-        guard (try? p.run()) != nil else { return nil }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        let key = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return p.terminationStatus == 0 && !key.isEmpty ? key : nil
+        // Bounded: a locked keychain's prompt would otherwise stall the outbox queue.
+        let r = runBounded("/usr/bin/security", ["find-generic-password", "-s", "learner-server", "-a", clientId, "-w"], timeout: 10)
+        let key = r.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return r.status == 0 && !key.isEmpty ? key : nil
     }
 
     /// POST {"data": input} to /rpc/<name>. Status 0 means no response at all.
@@ -1879,7 +1923,9 @@ final class OutboxSender {
         let (status, body) = LearnerAPI.call("recordHabitEvents", ["clientId": LearnerAPI.clientId, "events": events], key: key)
         switch status {
         case 200..<300:
-            logger.mark(ids, as: 1)
+            // The server dedupes by eventId, so a resend after a failed mark is harmless,
+            // but it must back off rather than resend in a tight loop.
+            guard logger.mark(ids, as: 1) else { return markFailed() }
             lastSentAt = Date()
             backoff = 2
             lastStatus = "sent \(ids.count) (\((body as? [String: Any])?["accepted"] ?? "?") accepted, \((body as? [String: Any])?["duplicates"] ?? "?") duplicates)"
@@ -1890,7 +1936,7 @@ final class OutboxSender {
                 batchLimit = max(1, ids.count / 2)
                 return .more
             }
-            logger.mark(ids, as: 2)
+            guard logger.mark(ids, as: 2) else { return markFailed() }
             lastStatus = "parked event \(ids[0]): \((body as? [String: Any])?["message"] ?? "rejected")"
             log(lastStatus)
             return .more
@@ -1900,13 +1946,28 @@ final class OutboxSender {
             nextAttempt = Date().addingTimeInterval(300)
             lastStatus = "device key refused (\(status))"
         case 413:
-            batchLimit = max(1, ids.count / 2)
+            if ids.count > 1 {
+                batchLimit = max(1, ids.count / 2)
+                return .more
+            }
+            // One event too large on its own will never fit: park it like a 422.
+            guard logger.mark(ids, as: 2) else { return markFailed() }
+            lastStatus = "parked event \(ids[0]): too large (413)"
+            log(lastStatus)
             return .more
         default:
             nextAttempt = Date().addingTimeInterval(backoff * Double.random(in: 0.5...1.0))
             backoff = min(backoff * 2, 300)
             lastStatus = status == 0 ? "server unreachable" : "server error \(status)"
         }
+        log(lastStatus)
+        return .failed
+    }
+
+    private func markFailed() -> Step {
+        nextAttempt = Date().addingTimeInterval(backoff)
+        backoff = min(backoff * 2, 300)
+        lastStatus = "could not update the local outbox database"
         log(lastStatus)
         return .failed
     }
@@ -1943,7 +2004,7 @@ final class ManagedHelper {
     private var process: Process?
     private var logHandle: FileHandle?
     private var stopping = false
-    private var startedAt = Date.distantPast
+    private(set) var startedAt = Date.distantPast
     private var restartDelay: TimeInterval = 1
 
     init(name: String, executable: String, arguments: [String], marker: String) {
@@ -1992,10 +2053,14 @@ final class ManagedHelper {
         do {
             try p.run()
         } catch {
-            // Only a missing or non-executable binary gets here; retrying would not help.
+            // A missing binary, or one being replaced (bun upgrade): keep trying, backing off.
             try? log?.close()
-            print("[Helpers] Could not start \(name): \(error.localizedDescription)")
+            restartDelay = min(restartDelay * 2, 60)
+            print("[Helpers] Could not start \(name): \(error.localizedDescription); retrying in \(Int(restartDelay))s")
             fflush(stdout)
+            DispatchQueue.main.asyncAfter(deadline: .now() + restartDelay) { [weak self] in
+                self?.launch()
+            }
             return
         }
         process = p
@@ -2062,19 +2127,55 @@ final class ManagedHelper {
     }
 }
 
+/// Runs a short helper program; returns its exit status (nil if it could not start or
+/// overran `timeout`) and its output. Never waits forever: at the deadline it gets
+/// SIGTERM, then SIGKILL 2 s later, and output still held open by a grandchild is
+/// abandoned after a second.
+func runBounded(_ executable: String, _ args: [String], timeout: TimeInterval,
+                environment: [String: String]? = nil, includeStderr: Bool = false) -> (status: Int32?, output: String) {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: executable)
+    p.arguments = args
+    if let env = environment { p.environment = env }
+    p.standardInput = FileHandle.nullDevice
+    let out = Pipe()
+    p.standardOutput = out
+    p.standardError = includeStderr ? out : FileHandle.nullDevice
+    let lock = NSLock()
+    var data = Data()
+    var eof = false
+    out.fileHandleForReading.readabilityHandler = { h in
+        let chunk = h.availableData
+        lock.lock()
+        if chunk.isEmpty { eof = true; h.readabilityHandler = nil } else { data.append(chunk) }
+        lock.unlock()
+    }
+    guard (try? p.run()) != nil else {
+        out.fileHandleForReading.readabilityHandler = nil
+        return (nil, "")
+    }
+    let deadline = Date().addingTimeInterval(timeout)
+    while p.isRunning && Date() < deadline { usleep(20_000) }
+    let overran = p.isRunning
+    if overran {
+        p.terminate()
+        let hard = Date().addingTimeInterval(2)
+        while p.isRunning && Date() < hard { usleep(20_000) }
+        if p.isRunning { kill(p.processIdentifier, SIGKILL) }
+    }
+    p.waitUntilExit()
+    let drained = Date().addingTimeInterval(1)
+    while Date() < drained && !(lock.withLock { eof }) { usleep(10_000) }
+    out.fileHandleForReading.readabilityHandler = nil
+    let text = lock.withLock { String(data: data, encoding: .utf8) ?? "" }
+    return (overran ? nil : p.terminationStatus, text)
+}
+
 /// A process's command line, optionally followed by the environment it was started with
 /// (readable for the current user's own processes).
 func processCommandLine(_ pid: pid_t, includeEnvironment: Bool = false) -> String? {
-    let ps = Process()
-    ps.executableURL = URL(fileURLWithPath: "/bin/ps")
-    ps.arguments = (includeEnvironment ? ["-wwE"] : []) + ["-p", String(pid), "-o", "command="]
-    let out = Pipe()
-    ps.standardOutput = out
-    ps.standardError = FileHandle.nullDevice
-    guard (try? ps.run()) != nil else { return nil }
-    let data = out.fileHandleForReading.readDataToEndOfFile()
-    ps.waitUntilExit()
-    return ps.terminationStatus == 0 ? String(data: data, encoding: .utf8) : nil
+    let r = runBounded("/bin/ps", (includeEnvironment ? ["-wwE"] : []) + ["-p", String(pid), "-o", "command="], timeout: 5)
+    return r.status == 0 ? r.output : nil
 }
 
 // MARK: - AI Vault export
@@ -2088,8 +2189,14 @@ func processCommandLine(_ pid: pid_t, includeEnvironment: Bool = false) -> Strin
 final class VaultExport {
     static let shared = VaultExport()
     static let interval: TimeInterval = 6 * 3600
-    static let perProviderTimeout: TimeInterval = 30 * 60
+    /// A run that is still printing is left alone; one silent this long is stuck (ai-vault
+    /// prints a line per conversation and waits at most ~25 s between them).
+    static let stallTimeout: TimeInterval = 10 * 60
+    static let maxRunTime: TimeInterval = 4 * 3600
+    static let killGrace: TimeInterval = 15
     static let rateLimitRetry: TimeInterval = 30 * 60
+    /// After a failure (crash, stall, failed fetches): 15 min, doubling up to `interval`.
+    static let failureRetryBase: TimeInterval = 15 * 60
     static let providers = ["claude", "chatgpt"]
 
     private let work = DispatchQueue(label: "com.benpollack.vault-export", qos: .utility)
@@ -2097,9 +2204,12 @@ final class VaultExport {
     private var nextRun = Date().addingTimeInterval(120)
     private var running = false
     private var rerun = false
+    private var failures = 0
+    private var current: Process?
+    private let currentLock = NSLock()
 
     static let loginExpiredPattern = "Authentication failed|cookies appear to be expired|Organization ID not available|API request failed: 40[13]"
-    static let failedPattern = "Errors: [1-9]|Completed with [1-9][0-9]* errors"
+    static let failedPattern = "Errors: [1-9]|Completed with [1-9][0-9]* errors|✗ Failed:|browser has been closed"
     private(set) var expiredLogins: Set<String> = []
     private(set) var lastRun: Date?
     private(set) var lastSummary = "not run yet"
@@ -2125,21 +2235,25 @@ final class VaultExport {
         running = true
         nextRun = Date().addingTimeInterval(VaultExport.interval)
         work.async {
+            VaultExport.killOrphans()
             var expired: Set<String> = []
             var notes: [String] = []
             var rateLimited = false
+            var failed = false
             for provider in VaultExport.providers {
                 let (status, output) = self.backup(provider)
                 // ai-vault exits 0 even when its summary lists errors, so read the output.
                 if output.range(of: VaultExport.loginExpiredPattern, options: .regularExpression) != nil {
                     expired.insert(provider)
                     notes.append("\(provider): login expired")
-                } else if status == nil {
-                    notes.append("\(provider): timed out")
                 } else if output.contains("API request failed: 429") {
                     rateLimited = true
                     notes.append("\(provider): rate limited, retrying in 30 min")
+                } else if status == nil {
+                    failed = true
+                    notes.append("\(provider): stuck, stopped")
                 } else if output.range(of: VaultExport.failedPattern, options: .regularExpression) != nil {
+                    failed = true
                     notes.append("\(provider): failed (see vault-export.log)")
                 } else {
                     notes.append("\(provider): \(status == 0 ? "ok" : "exit \(status!)")")
@@ -2147,8 +2261,9 @@ final class VaultExport {
             }
             // ai-vault drops ChatGPT voice transcripts; write them back in (see voice-transcripts.ts).
             if !expired.contains("chatgpt") {
-                let (_, output) = self.fillVoiceTranscripts()
+                let (status, output) = self.fillVoiceTranscripts()
                 if output.contains("stopped: rate-limited") { rateLimited = true }
+                else if status != 0 { failed = true; notes.append("voice transcripts: failed (see vault-export.log)") }
                 if let m = output.range(of: #"[0-9]+ updated \([0-9]+ messages\)"#, options: .regularExpression), !output[m].hasPrefix("0 ") {
                     notes.append("voice transcripts: \(output[m])")
                 }
@@ -2158,6 +2273,14 @@ final class VaultExport {
                 self.lastRun = Date()
                 self.lastSummary = notes.joined(separator: ", ")
                 self.running = false
+                // --only-new resumes where a run stopped, so retrying soon loses nothing.
+                self.failures = failed ? self.failures + 1 : 0
+                if failed {
+                    let wait = min(VaultExport.interval, VaultExport.failureRetryBase * pow(2, Double(self.failures - 1)))
+                    self.nextRun = min(self.nextRun, Date().addingTimeInterval(wait))
+                    notes.append("retrying in \(Int(wait / 60)) min")
+                    self.lastSummary = notes.joined(separator: ", ")
+                }
                 if rateLimited { self.nextRun = min(self.nextRun, Date().addingTimeInterval(VaultExport.rateLimitRetry)) }
                 print("[VaultExport] \(self.lastSummary)")
                 self.onFinished?()
@@ -2179,10 +2302,16 @@ final class VaultExport {
         return runLogged(NSHomeDirectory() + "/.bun/bin/bun", [script, "voice-transcripts"], label: "voice-transcripts")
     }
 
-    /// Runs a command, appending its output to vault-export.log. Returns the exit status
-    /// (nil on timeout) and the output, for the auth check.
+    /// Runs a command, streaming its output to vault-export.log. Returns the exit status
+    /// (nil when it was stopped as stuck) and the output, for the outcome checks.
     private func runLogged(_ executable: String, _ args: [String], label: String) -> (Int32?, String) {
         AppLog.rotate(helperLog: logPath)
+        if !FileManager.default.fileExists(atPath: logPath) { FileManager.default.createFile(atPath: logPath, contents: nil) }
+        let log = FileHandle(forWritingAtPath: logPath)
+        log?.seekToEndOfFile()
+        log?.write(Data("=== \(Date()) \(label)\n".utf8))
+        defer { try? log?.close() }
+
         let p = Process()
         p.executableURL = URL(fileURLWithPath: executable)
         p.arguments = args
@@ -2195,28 +2324,77 @@ final class VaultExport {
         p.standardOutput = out
         p.standardError = out
         var data = Data()
+        var lastOutput = Date()
         let reader = DispatchQueue(label: "vault-export-read")
         out.fileHandleForReading.readabilityHandler = { h in
             let chunk = h.availableData
-            reader.sync { data.append(chunk) }
+            guard !chunk.isEmpty else { h.readabilityHandler = nil; return }
+            reader.sync {
+                data.append(chunk)
+                lastOutput = Date()
+                log?.write(chunk)
+            }
         }
         guard (try? p.run()) != nil else { return (126, "could not start \(label)") }
-        let deadline = Date().addingTimeInterval(VaultExport.perProviderTimeout)
-        while p.isRunning && Date() < deadline { usleep(500_000) }
-        let timedOut = p.isRunning
-        if timedOut { p.terminate() }
+        setCurrent(p)
+        defer { setCurrent(nil) }
+        let started = Date()
+        var stuck: String?
+        while p.isRunning {
+            usleep(500_000)
+            let silent = Date().timeIntervalSince(reader.sync { lastOutput })
+            if silent > VaultExport.stallTimeout { stuck = "no output for \(Int(silent / 60)) min" }
+            else if Date().timeIntervalSince(started) > VaultExport.maxRunTime { stuck = "running over \(Int(VaultExport.maxRunTime / 3600)) h" }
+            if let why = stuck {
+                print("[VaultExport] \(label): \(why); stopping it")
+                VaultExport.stop(p)
+                break
+            }
+        }
         p.waitUntilExit()
         out.fileHandleForReading.readabilityHandler = nil
         let text = reader.sync { String(data: data, encoding: .utf8) ?? "" }
-        if let h = FileHandle(forWritingAtPath: logPath) ?? {
-            FileManager.default.createFile(atPath: logPath, contents: nil)
-            return FileHandle(forWritingAtPath: logPath)
-        }() {
-            h.seekToEndOfFile()
-            h.write(Data("=== \(Date()) \(label)\(timedOut ? " (timed out)" : "")\n\(text)\n".utf8))
-            try? h.close()
+        if let why = stuck { log?.write(Data("\n=== stopped: \(why)\n".utf8)) }
+        return (stuck == nil ? p.terminationStatus : nil, text)
+    }
+
+    private func setCurrent(_ p: Process?) {
+        currentLock.lock(); current = p; currentLock.unlock()
+    }
+
+    /// On quit: an export left running would outlive the app and race the next launch's.
+    func stopForQuit() {
+        currentLock.lock(); let p = current; currentLock.unlock()
+        // Shutdown has seconds, not a grace period.
+        if let p = p, p.isRunning { VaultExport.stop(p, grace: 0) }
+    }
+
+    /// SIGTERM, then SIGKILL for it and its children (the browser) after a grace period.
+    /// ai-vault can sit in its own SIGTERM handler forever once its browser has died.
+    static func stop(_ p: Process, grace: TimeInterval = killGrace) {
+        let pid = p.processIdentifier
+        let tree = [pid] + descendants(of: pid)
+        p.terminate()
+        let deadline = Date().addingTimeInterval(grace)
+        while p.isRunning && Date() < deadline { usleep(200_000) }
+        for child in tree where kill(child, 0) == 0 { kill(child, SIGKILL) }
+    }
+
+    private static func descendants(of pid: pid_t) -> [pid_t] {
+        let kids = runBounded("/usr/bin/pgrep", ["-P", String(pid)], timeout: 5).output.split(separator: "\n").compactMap { pid_t($0) }
+        return kids + kids.flatMap { descendants(of: $0) }
+    }
+
+    /// An export orphaned by a crash of this app (now parented to launchd) would run
+    /// alongside the next one and trip ChatGPT's rate limit.
+    private static func killOrphans() {
+        for line in runBounded("/bin/ps", ["-axo", "pid=,ppid=,command="], timeout: 5).output.split(separator: "\n") {
+            let f = line.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
+            guard f.count == 3, f[1] == "1", let pid = pid_t(f[0]),
+                  f[2].contains("ai-vault backup") || f[2].contains("learner-watcher.js voice-transcripts") else { continue }
+            print("[VaultExport] stopping an export left over from an earlier launch (pid \(pid))")
+            kill(pid, SIGKILL)
         }
-        return (timedOut ? nil : p.terminationStatus, text)
     }
 
     /// ai-vault is installed under nvm; pick the newest node version that has it.
@@ -2333,22 +2511,13 @@ final class VaultSignIn {
             return (false, "could not write the cookies file")
         }
         defer { try? FileManager.default.removeItem(atPath: path) }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: cli)
-        p.arguments = ["setup", provider, "--cookies-file", path]
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = (cli as NSString).deletingLastPathComponent + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-        p.environment = env
-        p.standardInput = FileHandle.nullDevice
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = out
-        guard (try? p.run()) != nil else { return (false, "could not start ai-vault") }
-        let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        p.waitUntilExit()
-        let ok = p.terminationStatus == 0 && text.contains("Configuration saved")
-        let last = text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.last { !$0.isEmpty }
-        return (ok, ok ? "ok" : String((last ?? "exit \(p.terminationStatus)").prefix(160)))
+        let r = runBounded(cli, ["setup", provider, "--cookies-file", path], timeout: 90, environment: env, includeStderr: true)
+        guard let status = r.status else { return (false, "ai-vault setup did not finish in 90 s") }
+        let ok = status == 0 && r.output.contains("Configuration saved")
+        let last = r.output.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.last { !$0.isEmpty }
+        return (ok, ok ? "ok" : String((last ?? "exit \(status)").prefix(160)))
     }
 }
 
@@ -2464,17 +2633,10 @@ enum BrowserCookies {
     /// Asked through /usr/bin/security so an Always Allow survives rebuilds of this app.
     private static func safeStorageKey(_ browser: ChromiumBrowser) -> [UInt8]? {
         if let key = keys[browser.id] { return key }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        p.arguments = ["find-generic-password", "-w", "-s", browser.keychainService, "-a", browser.keychainAccount]
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = FileHandle.nullDevice
-        guard (try? p.run()) != nil else { return nil }
-        let raw = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        guard p.terminationStatus == 0,
-              let password = String(data: raw, encoding: .utf8)?.trimmingCharacters(in: .newlines), !password.isEmpty else {
+        // Long enough to answer the Keychain prompt, but never forever.
+        let r = runBounded("/usr/bin/security", ["find-generic-password", "-w", "-s", browser.keychainService, "-a", browser.keychainAccount], timeout: 120)
+        let password = r.output.trimmingCharacters(in: .newlines)
+        guard r.status == 0, !password.isEmpty else {
             print("[VaultSignIn] could not read \(browser.keychainService) from the Keychain")
             return nil
         }
@@ -2627,6 +2789,10 @@ final class ScreenpipeUpdateCheck {
             print("[UpdateCheck] Still running after \(Int(Self.timeoutSeconds / 60)) min; stopping it")
             fflush(stdout)
             p.terminate()
+            // Ignoring SIGTERM must not leave a check "running" forever.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+                if p.isRunning { kill(p.processIdentifier, SIGKILL) }
+            }
         }
     }
 
@@ -2719,6 +2885,9 @@ class TalkTimeMonitor: NSObject {
     private var lastTurnBoundaryAt: Date?
     private(set) var activeCallApp: String?
     private(set) var activeCallTitle: String?
+    /// Last /meetings poll that answered; a failed poll says nothing about the call.
+    private var lastCallPollOK = Date()
+    static let callPollOutageEndsCall: TimeInterval = 120
     private(set) var activeSessionId: String = "solo_" + UUID().uuidString.prefix(8).lowercased()
 
     // Pavlok debouncing flags
@@ -2976,15 +3145,20 @@ class TalkTimeMonitor: NSObject {
         guard let url = URL(string: "http://localhost:3030/meetings") else { return }
         var req = URLRequest(url: url)
         req.timeoutInterval = 2.0
-        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+        URLSession.shared.dataTask(with: req) { [weak self] data, response, _ in
             guard let self = self else { return }
             var newApp: String?
             var newTitle: String?
-            if let data = data,
-               let meetings = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
-               let active = meetings.first(where: { ($0["meeting_end"] as? String) == nil }) {
-                newApp = active["meeting_app"] as? String
-                newTitle = active["title"] as? String
+            if let data = data, (response as? HTTPURLResponse)?.statusCode == 200,
+               let meetings = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+                self.lastCallPollOK = Date()
+                if let active = meetings.first(where: { ($0["meeting_end"] as? String) == nil }) {
+                    newApp = active["meeting_app"] as? String
+                    newTitle = active["title"] as? String
+                }
+            } else if Date().timeIntervalSince(self.lastCallPollOK) < TalkTimeMonitor.callPollOutageEndsCall {
+                // A timeout or screenpipe restart: keep the call as it is rather than splitting it.
+                return
             }
             if newApp != self.activeCallApp {
                 if let app = newApp {
@@ -3838,6 +4012,12 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// learner-server answers GET /api/health (public; no key involved).
     var isServerReachable: Bool = false
+    /// A watcher problem that has lasted (from its status.json), or nil when it is sending.
+    var watcherProblem: String?
+    var watcherParked = 0
+    static let watcherProblemGrace: TimeInterval = 10 * 60
+    /// The watcher sweeps hourly; no status update for this long means it is not working.
+    static let watcherStaleAfter: TimeInterval = 150 * 60
 
     /// The app's own LaunchAgent. If it is switched off in System Settings -> Login Items,
     /// launchd skips it at login -- and the tunnel and watcher with it -- so a manual start
@@ -3853,7 +4033,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     lazy var watcher = ManagedHelper(
         name: "watcher", executable: "/Users/benpollack/.bun/bin/bun",
         arguments: [URL(fileURLWithPath: Bundle.main.resourcePath ?? "").appendingPathComponent("learner-watcher.js").path,
-                    "watch", "--no-initial-sync"],
+                    "watch"],
         marker: "learner-watcher.js")
 
     /// launchctl bootout / kickstart -k and stop-capture.sh deliver SIGTERM. Route it
@@ -4012,7 +4192,9 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let serverState = !isServerReachable ? "🔴 unreachable" : outbox.keyProblem ? "🔑 no working device key" : "🟢 reachable"
         statusMenu.addItem(NSMenuItem(title: "☁️ learner-server: \(serverState)", action: nil, keyEquivalent: ""))
         _ = add("   └─ 📤 \(HabitEventLogger.shared.getUnsyncedCount()) queued | last: \(outbox.lastStatus)"
-            + " | Tunnel \(tunnel.isRunning ? "🟢" : "🔴") | Watcher \(watcher.isRunning ? "🟢" : "🔴")")
+            + " | Tunnel \(tunnel.isRunning ? "🟢" : "🔴") | Watcher \(watcher.isRunning ? (watcherProblem == nil ? "🟢" : "🔴") : "🔴")")
+        if let problem = watcherProblem { _ = add("   ⚠️ Chats not sending: \(problem)") }
+        if watcherParked > 0 { _ = add("   ⚠️ \(watcherParked) chat(s) refused by the server (see watcher log)") }
         _ = add("   ⚡ Send Queued Trials Now", #selector(triggerHabitSync))
         if needsLoginApproval {
             _ = add("   ⚠️ Won't start at login: allow Learner Desktop in Login Items...", #selector(openLoginItemsSettings))
@@ -4143,7 +4325,33 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
             ScreenpipeUpdateCheck.shared.observe(appVersion: appVersion)
         }
         VaultExport.shared.tick()
+        updateWatcherStatus()
         OutboxSender.shared.tick(heartbeat: { [weak self] in self?.heartbeatInput() ?? [:] })
+    }
+
+    /// Reads ~/.ai-aggregator/status.json, which the watcher writes after each sweep and
+    /// while sending keeps failing.
+    func updateWatcherStatus() {
+        let path = NSHomeDirectory() + "/.ai-aggregator/status.json"
+        guard watcher.isRunning,
+              let data = FileManager.default.contents(atPath: path),
+              let status = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            watcherProblem = nil
+            return
+        }
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let date = { (key: String) in (status[key] as? String).flatMap { iso.date(from: $0) } }
+        watcherParked = status["failed"] as? Int ?? 0
+        let started = watcher.startedAt
+        if let problem = status["problem"] as? String, let since = date("problemSince"),
+           Date().timeIntervalSince(since) > TrayAppManager.watcherProblemGrace {
+            watcherProblem = "\(problem) since \(DateFormatter.localizedString(from: since, dateStyle: .none, timeStyle: .short))"
+        } else if Date().timeIntervalSince(max(date("lastUpdated") ?? .distantPast, started)) > TrayAppManager.watcherStaleAfter {
+            watcherProblem = "no sweep since \(date("lastUpdated").map { DateFormatter.localizedString(from: $0, dateStyle: .short, timeStyle: .short) } ?? "start")"
+        } else {
+            watcherProblem = nil
+        }
     }
 
     /// recordAppHeartbeat input (contract/desktop.ts, RecordAppHeartbeatInput).
@@ -4269,11 +4477,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// reboot screenpipe started signed out and recorded nothing for ten days. Setting it
     /// in launchd's user environment covers every screenpipe launched from now on.
     func setScreenpipeSkipFlag() {
-        let setenv = Process()
-        setenv.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        setenv.arguments = ["setenv", "SCREENPIPE_SKIP_ONBOARDING", "1"]
-        try? setenv.run()
-        setenv.waitUntilExit()
+        _ = runBounded("/bin/launchctl", ["setenv", "SCREENPIPE_SKIP_ONBOARDING", "1"], timeout: 10)
     }
 
     /// The screenpipe process last checked for the flag, so each launch is checked once.
@@ -4379,6 +4583,12 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else if !VaultExport.shared.expiredLogins.isEmpty {
             baseTitle = "🧠 🔴 VAULT"
             button.toolTip = "Learner Desktop\nAI Vault login expired (\(VaultExport.shared.expiredLogins.sorted().joined(separator: ", "))): no new chats are exported.\nOpen the menu and choose Sign In Again."
+        } else if let problem = HabitEventLogger.shared.problem {
+            baseTitle = "🧠 🔴 DB"
+            button.toolTip = "Learner Desktop\nHabit trials are not being saved: \(problem)"
+        } else if let problem = watcherProblem {
+            baseTitle = "🧠 🔴 SYNC"
+            button.toolTip = "Learner Desktop\nChats are not reaching learner-server: \(problem).\nSee View Watcher Log in Troubleshooting."
         } else if isScreenpipeDegraded {
             baseTitle = "🧠 🟡 \(vaultCount)"
             button.toolTip = "Learner Desktop\nScreenpipe idle/degraded"
@@ -4697,6 +4907,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         fflush(stdout)
         watcher.stop()
         tunnel.stop()
+        VaultExport.shared.stopForQuit()
         print("[Shutdown] Clean shutdown complete.")
         fflush(stdout)
         return .terminateNow

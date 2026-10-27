@@ -54,9 +54,56 @@ class VaultExportOutcomeTest(unittest.TestCase):
         self.assertIn('if !expired.contains("chatgpt")', run)
         self.assertIn('[script, "voice-transcripts"]', src)
 
+    def test_a_crashed_browser_counts_as_a_failure(self):
+        sample = "[1047/1239] ✗ Failed: A title - browser.newContext: Target page, context or browser has been closed"
+        self.assertRegex(sample, pattern("failedPattern"))
+        self.assertNotRegex(sample, pattern("loginExpiredPattern"))
+
     def test_a_clean_run_is_ok(self):
         self.assertNotRegex(OK, pattern("loginExpiredPattern"))
         self.assertNotRegex(OK, pattern("failedPattern"))
+
+
+class DurabilityTest(unittest.TestCase):
+    """The export run of 10-27 hung for 50 min: ai-vault's browser died, it ignored SIGTERM,
+    and the app waited forever, so no export or sign-in rerun could start."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(SWIFT, encoding="utf-8") as fh:
+            src = fh.read()
+        cls.cls = src[src.index("final class VaultExport {"):src.index("// MARK: - AI Vault sign-in")]
+        cls.src = src
+
+    def body(self, start):
+        b = self.cls[self.cls.index(start):]
+        return b[:b.index("\n    }\n")]
+
+    def test_a_quiet_run_is_stopped_but_a_long_busy_one_is_not(self):
+        self.assertIn("static let stallTimeout: TimeInterval = 10 * 60", self.cls)
+        self.assertIn("static let maxRunTime: TimeInterval = 4 * 3600", self.cls)
+        self.assertNotIn("perProviderTimeout", self.cls)
+        run = self.body("private func runLogged(")
+        self.assertIn("lastOutput = Date()", run)
+        self.assertIn("> VaultExport.stallTimeout", run)
+
+    def test_stopping_escalates_to_sigkill_for_the_whole_tree(self):
+        stop = self.body("static func stop(_ p: Process")
+        self.assertLess(stop.index("descendants(of: pid)"), stop.index("p.terminate()"))
+        self.assertLess(stop.index("p.terminate()"), stop.index("kill(child, SIGKILL)"))
+
+    def test_failures_retry_with_backoff_not_in_six_hours(self):
+        self.assertIn("static let failureRetryBase: TimeInterval = 15 * 60", self.cls)
+        self.assertIn("VaultExport.failureRetryBase * pow(2, Double(self.failures - 1))", self.cls)
+        self.assertIn("self.failures = failed ? self.failures + 1 : 0", self.cls)
+
+    def test_output_is_logged_as_it_arrives(self):
+        self.assertIn("log?.write(chunk)", self.body("private func runLogged("))
+
+    def test_no_export_outlives_the_app_or_runs_twice(self):
+        self.assertIn("VaultExport.shared.stopForQuit()", self.src)
+        run = self.body("    func runNow() {")
+        self.assertIn("VaultExport.killOrphans()", run)
 
 
 class SignInTest(unittest.TestCase):
@@ -105,7 +152,7 @@ class SignInTest(unittest.TestCase):
         self.assertIn('["setup", provider, "--cookies-file", path]', body)
         self.assertIn(".posixPermissions: 0o600", body)
         self.assertIn("defer { try? FileManager.default.removeItem(atPath: path) }", body)
-        self.assertLess(body.index("sites[provider] != nil"), body.index("p.arguments"))
+        self.assertLess(body.index("sites[provider] != nil"), body.index("runBounded(cli"))
 
     def test_a_refused_session_is_not_retried_in_a_loop(self):
         self.assertIn("$0 == tried ? nil", self.src)

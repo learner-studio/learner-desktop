@@ -13,14 +13,15 @@ if [ ! -x "$AUTOSSH_BIN" ]; then
   AUTOSSH_BIN="$(command -v autossh || command -v ssh)"
 fi
 
-# Check if port is already listening and responsive
-if lsof -i :$PORT >/dev/null 2>&1; then
+# Check if port is already listening and responsive. Listeners only: a browser with
+# GrowthBook open also holds a socket on the port and must not be killed.
+if lsof -ti tcp:$PORT -sTCP:LISTEN >/dev/null 2>&1; then
   if curl -s --max-time 2 -o /dev/null "http://127.0.0.1:${PORT}/" 2>/dev/null; then
     echo "Tunnel on port ${PORT} is already active and healthy."
     exit 0
   else
     echo "Port ${PORT} is in use but unresponsive. Killing stale processes..."
-    lsof -ti :$PORT | xargs kill -9 2>/dev/null || true
+    lsof -ti tcp:$PORT -sTCP:LISTEN | xargs kill -9 2>/dev/null || true
     sleep 1
   fi
 fi

@@ -109,31 +109,56 @@ export async function openChatGpt(): Promise<ChatGptSession> {
   const cookies = config?.providers?.chatgpt?.cookies
   if (!cookies) throw new Error('ai-vault has no ChatGPT login')
   const scraper = new BrowserScraper()
-  await scraper.init()
-  const page = await scraper.createPage({ cookies, domain: '.chatgpt.com' })
-  await page.goto('https://chatgpt.com', { waitUntil: 'domcontentloaded', timeout: 30000 })
-  const token: string | null = await page.evaluate(async () => {
-    const res = await fetch('/api/auth/session', { credentials: 'include' })
-    return res.ok ? ((await res.json())?.accessToken ?? null) : null
+  await withTimeout(scraper.init(), 60_000, 'starting the browser')
+  // From here on the browser is running: any failure must close it, not leak it.
+  try {
+    const page = await scraper.createPage({ cookies, domain: '.chatgpt.com' })
+    await page.goto('https://chatgpt.com', { waitUntil: 'domcontentloaded', timeout: 30_000 })
+    const token: string | null = await withTimeout(
+      page.evaluate(async () => {
+        const res = await fetch('/api/auth/session', { credentials: 'include', signal: AbortSignal.timeout(30_000) })
+        return res.ok ? ((await res.json())?.accessToken ?? null) : null
+      }),
+      45_000,
+      'reading the ChatGPT session',
+    )
+    if (!token) throw new Error('ChatGPT login expired')
+    return {
+      // Status 0: no answer in time; counted as a failure for that conversation.
+      fetchConversation: (id) =>
+        withTimeout(
+          page.evaluate(
+            async ({ id, token }: { id: string; token: string }) => {
+              try {
+                const res = await fetch(`/backend-api/conversation/${encodeURIComponent(id)}`, {
+                  credentials: 'include',
+                  headers: { Authorization: `Bearer ${token}` },
+                  signal: AbortSignal.timeout(30_000),
+                })
+                return { status: res.status, body: res.ok ? await res.json() : undefined }
+              } catch {
+                return { status: 0 }
+              }
+            },
+            { id, token },
+          ),
+          45_000,
+          `fetching ${id}`,
+        ).catch(() => ({ status: 0 })),
+      close: () => scraper.close(),
+    }
+  } catch (err) {
+    await scraper.close().catch(() => {})
+    throw err
+  }
+}
+
+function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`timed out ${what}`)), ms)
   })
-  if (!token) {
-    await scraper.close()
-    throw new Error('ChatGPT login expired')
-  }
-  return {
-    fetchConversation: (id) =>
-      page.evaluate(
-        async ({ id, token }: { id: string; token: string }) => {
-          const res = await fetch(`/backend-api/conversation/${encodeURIComponent(id)}`, {
-            credentials: 'include',
-            headers: { Authorization: `Bearer ${token}` },
-          })
-          return { status: res.status, body: res.ok ? await res.json() : undefined }
-        },
-        { id, token },
-      ),
-    close: () => scraper.close(),
-  }
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer))
 }
 
 export interface VoiceSummary {
@@ -142,7 +167,7 @@ export interface VoiceSummary {
   filled: number
   missing: number
   failed: number
-  stopped: 'rate-limited' | 'login-expired' | null
+  stopped: 'rate-limited' | 'login-expired' | 'unreachable' | null
 }
 
 /** Fills every ChatGPT conversation that has blank voice sections. Stops at the first 429. */
@@ -154,10 +179,13 @@ export async function fillVoiceTranscripts(
   const summary: VoiceSummary = { candidates: candidates.length, updated: 0, filled: 0, missing: 0, failed: 0, stopped: null }
   if (candidates.length === 0) return summary
   const session = await (opts.open ?? openChatGpt)()
+  let consecutiveFailures = 0
   try {
     for (const [i, file] of candidates.entries()) {
       if (i > 0) await new Promise((r) => setTimeout(r, opts.delayMs))
       const id = file.split('/').at(-2)!
+      // A line per conversation: the app stops a run that goes quiet for 10 minutes.
+      opts.log(`[Voice] ${i + 1}/${candidates.length} ${id}`)
       const res = await session.fetchConversation(id)
       if (res.status === 429) {
         summary.stopped = 'rate-limited'
@@ -170,8 +198,14 @@ export async function fillVoiceTranscripts(
       if (!res.body) {
         summary.failed++
         opts.log(`[Voice] ${id}: HTTP ${res.status}`)
+        // Five in a row is an outage, not a bad conversation: stop and let the next run retry.
+        if (++consecutiveFailures >= 5) {
+          summary.stopped = 'unreachable'
+          break
+        }
         continue
       }
+      consecutiveFailures = 0
       const md = readFileSync(file, 'utf8')
       const result = fillTranscripts(md, transcriptsByTime(res.body))
       summary.missing += result.missing

@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ArchiveConversationDocumentsInput } from '../../contract/desktop.js'
@@ -225,5 +225,31 @@ describe('SyncService against the mock server', () => {
     await svc.enqueue(files)
     expect(seen.length).toBe(1)
     svc.stop() // clears the retry timer
+  })
+
+  test('a failure that keeps going is written to status.json for the tray, and cleared on success', async () => {
+    const statusFile = join(dir, 'status.json')
+    const status = () => JSON.parse(readFileSync(statusFile, 'utf8'))
+    let calls = 0
+    handler = () => (++calls <= 2 ? new Response('down', { status: 503 }) : ok(5))
+    const { svc, ledger } = service()
+    let during: { problem: string | null; problemSince: string | null } | null = null
+    const real = ledger.updateStatusFile.bind(ledger)
+    ledger.updateStatusFile = (extra = {}) => {
+      real(extra)
+      if (calls === 1 && during === null) during = status()
+    }
+    await svc.syncFiles(files)
+    expect(during!.problem).toBe('HTTP 503')
+    expect(during!.problemSince).toBeString()
+    expect(status().problem).toBeNull()
+  })
+
+  test('a stopped sweep leaves its problem in status.json', async () => {
+    const { svc } = service({ key: null })
+    await svc.syncFiles(files)
+    const s = JSON.parse(readFileSync(join(dir, 'status.json'), 'utf8'))
+    expect(s.problem).toBe('stopped: no-key')
+    expect(s.problemSince).toBeString()
   })
 })

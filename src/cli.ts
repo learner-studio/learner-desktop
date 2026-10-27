@@ -63,8 +63,7 @@ program
 program
   .command('watch')
   .description('Watch the ai-vault export and archive conversations as they change')
-  .option('--no-initial-sync', 'Skip the initial sweep over the whole export on start')
-  .action(async (options) => {
+  .action(async () => {
     const ledger = new SyncLedger()
     const service = new SyncService(new LearnerApiClient(), ledger)
     ledger.updateStatusFile()
@@ -72,15 +71,21 @@ program
     const watcher = new AggregatorWatcher(service)
     watcher.start([config.paths.aiVaultData])
 
-    if (options.initialSync) {
-      console.log('Running initial sweep...')
+    // File events only cover changes made while watching. A full sweep on start catches
+    // what was exported while the watcher was down (and any retries a restart dropped);
+    // the hourly one covers events macOS drops. Unchanged files cost a hash each.
+    const sweep = (why: string) => {
+      console.log(`[Watcher] ${why} sweep`)
       service.enqueue(service.findConversationFiles()).catch((err) => {
-        console.error(`Initial sweep failed: ${(err as Error).message}`)
+        console.error(`[Watcher] ${why} sweep failed: ${(err as Error).message}`)
       })
     }
+    sweep('startup')
+    const hourly = setInterval(() => sweep('hourly'), config.sync.sweepIntervalMs)
 
     const cleanup = () => {
       console.log('\nShutting down watcher...')
+      clearInterval(hourly)
       watcher.stop()
       ledger.close()
       process.exit(0)
@@ -102,7 +107,14 @@ program
       console.log(`[Voice] ${n} of ${files.length} ChatGPT conversations have voice messages without text`)
       return
     }
-    const s = await fillVoiceTranscripts(files, { delayMs: options.delay, limit: options.limit, log: console.log })
+    let s
+    try {
+      s = await fillVoiceTranscripts(files, { delayMs: options.delay, limit: options.limit, log: console.log })
+    } catch (err) {
+      // e.g. "ChatGPT login expired": exit non-zero so the app counts the run as failed.
+      console.log(`[Voice] could not run: ${(err as Error).message}`)
+      process.exit(1)
+    }
     console.log(
       `[Voice] ${s.candidates} conversations need transcripts: ${s.updated} updated (${s.filled} messages), ` +
         `${s.missing} messages without a transcript, ${s.failed} failed` + (s.stopped ? `; stopped: ${s.stopped}` : ''),

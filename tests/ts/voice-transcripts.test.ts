@@ -148,4 +148,22 @@ describe('voice transcripts', () => {
     expect(hasVoiceGaps(readFileSync(files[0], 'utf8'))).toBe(false)
     expect(readFileSync(files[2], 'utf8')).toBe(VOICE_MD)
   })
+
+  test('five failed fetches in a row stop the run as an outage', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'voice-'))
+    const files = Array.from({ length: 8 }, (_, i) => {
+      mkdirSync(join(root, `c${i}`))
+      const f = join(root, `c${i}`, 'conversation.md')
+      writeFileSync(f, VOICE_MD)
+      return f
+    })
+    let asked = 0
+    const s = await fillVoiceTranscripts(files, {
+      delayMs: 0,
+      log: () => {},
+      open: async () => ({ fetchConversation: async () => (asked++, { status: 0 }), close: async () => {} }),
+    })
+    expect(asked).toBe(5)
+    expect(s).toMatchObject({ failed: 5, stopped: 'unreachable', updated: 0 })
+  })
 })

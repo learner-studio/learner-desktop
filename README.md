@@ -57,7 +57,7 @@ security add-generic-password -s learner-server -a ben-mbp -w   # store the devi
 ### One app, one login item
 
 Learner Desktop runs the transcript watcher (`src/cli.ts watch`, compiled to one file,
-`learner-watcher.js watch --no-initial-sync`) as a child process from its own bundle. It
+`learner-watcher.js watch`) as a child process from its own bundle. It
 restarts it if it exits and stops it on quit. Its output goes to
 `~/.ai-aggregator/logs/watcher.log`; the app's own to `menubar.log`.
 

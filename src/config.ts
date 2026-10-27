@@ -27,5 +27,7 @@ export const config = {
     backoffMaxMs: 300_000,
     /** No key, or the key was refused: try the pending work again after this long. */
     retryLaterMs: 600_000,
+    /** Full sweep this often while watching: covers file events macOS drops. */
+    sweepIntervalMs: 3_600_000,
   },
 }
