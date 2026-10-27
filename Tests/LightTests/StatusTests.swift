@@ -13,6 +13,11 @@ import TestSupport
         #expect(t.kind == "ok" && t.title == "🧠 🟢 633")
     }
 
+    @Test func beforeTheFirstCheckItSaysStartingNotHealthy() {
+        #expect(TrayState.make(AppStatus(), coach: CoachLive()).kind == "starting")
+        #expect(TrayState.make(AppStatus(), coach: CoachLive(alert: true, duration: "1:01")).kind == "talk-alert")
+    }
+
     @Test func eachProblemHasItsOwnTrayState() {
         func kind(_ change: (inout AppStatus) -> Void, coach: CoachLive = CoachLive()) -> String {
             var s = healthy

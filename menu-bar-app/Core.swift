@@ -419,6 +419,7 @@ final class Job {
             let now = Date()
             switch outcome {
             case .idle:
+                if !quiet { log.info("nothing to do (\(took))") }
                 state.nextRun = now.addingTimeInterval(period)
                 return
             case let .ok(summary, next):

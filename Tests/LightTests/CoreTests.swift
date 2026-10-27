@@ -111,6 +111,17 @@ import TestSupport
         }
     }
 
+    @Test func anIdleRunOfANonQuietJobSaysSo() {
+        withJobDir { _ in
+            let job = Job("idle-\(UUID().uuidString.prefix(6))", period: 60, backoff: Backoff(base: 1, max: 1)) { _ in .idle }
+            let lines = capturingLog {
+                job.kick("test")
+                _ = eventually(0.5) { false }   // the run takes milliseconds
+            }
+            #expect(lines.contains { $0.contains("nothing to do") })
+        }
+    }
+
     @Test func blockedWaitsForAKickAndIsAProblemAtOnce() {
         withJobDir { _ in
             var blocked = true

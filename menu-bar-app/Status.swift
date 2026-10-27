@@ -64,6 +64,9 @@ struct TrayState: Equatable {
             return TrayState(kind: "talk-warning", title: "🗣️ ⚠️ \(coach.duration)",
                              tooltip: "Talk-time warning: continuous speech for \(coach.duration)\(call)")
         }
+        if s.capture == .unknown && s.problems.isEmpty {
+            return TrayState(kind: "starting", title: "🧠 …", tooltip: "Learner Desktop\nChecking screenpipe, the server and the jobs…")
+        }
         if s.loginItemBlocked {
             return TrayState(kind: "login-item", title: "🧠 🔴 LOGIN",
                              tooltip: "Learner Desktop\nSwitched off in Login Items: it will not start at login")
