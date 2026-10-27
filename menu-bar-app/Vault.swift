@@ -38,6 +38,9 @@ final class VaultExport {
         var killGrace: TimeInterval = 15
         var rateLimitRetry: TimeInterval = 30 * 60
         var failureBackoff = Backoff(base: 15 * 60, max: 6 * 3600)
+        /// A failing export reaches the tray once it has failed this long (a rate limit or
+        /// one stuck run that the next retry gets past does not).
+        var problemGrace: TimeInterval = 3600
         /// Left by a crash of this app (parented to launchd): would race the next export.
         var orphanMarkers = ["ai-vault backup", "learner-watcher.js voice-transcripts"]
         /// nil: no voice step.
@@ -78,7 +81,7 @@ final class VaultExport {
         self.config = config
         expired = VaultExport.loadLogins(config.loginsPath, log: log)
         job = Job(config.jobName, period: config.period, firstRun: config.firstRun, backoff: config.failureBackoff,
-                  problemGrace: 0) { [weak self] _ in self?.runOnce() ?? .idle }
+                  problemGrace: config.problemGrace) { [weak self] _ in self?.runOnce() ?? .idle }
     }
 
     // MARK: Status for the menu
