@@ -15,7 +15,7 @@ final class VoiceTranscripts {
     struct Config {
         var root = Paths.vault
         var baseURL = "https://chatgpt.com"
-        var aiVaultConfig = NSHomeDirectory() + "/.ai-vault/config.json"
+        var aiVaultConfig = Paths.aiVaultConfig
         /// Conversations whose transcripts ChatGPT does not have: not fetched again until the file changes.
         var memoPath = Paths.data + "/voice-transcripts.json"
         var delay: TimeInterval = 3

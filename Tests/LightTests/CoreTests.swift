@@ -4,7 +4,7 @@ import Testing
 import TestSupport
 
 // The shared workflow primitives every workflow runs through (Core.swift).
-// Serialized: AppLog.sink and Job.stateDir are process-wide.
+// Serialized within the suite; log capture is locked and each test has its own job folder.
 @Suite("Core primitives", .serialized) struct CoreTests {
 
     @Test func backoffDoublesFromTheBaseUpToTheCapAndResets() {
@@ -61,11 +61,11 @@ import TestSupport
 
     // MARK: Job
 
+    /// Each test's jobs keep their state in their own folder (never the shared Job.stateDir,
+    /// which other suites use in parallel).
     private func withJobDir(_ body: (TempDir) -> Void) {
         let dir = TempDir("jobs")
-        let saved = Job.stateDir
-        Job.stateDir = dir.path
-        defer { Job.stateDir = saved; dir.cleanup() }
+        defer { dir.cleanup() }
         body(dir)
     }
 
@@ -74,8 +74,8 @@ import TestSupport
     }
 
     @Test func okSchedulesTheNextRunAPeriodLater() {
-        withJobDir { _ in
-            let job = Job("ok-\(UUID().uuidString.prefix(6))", period: 3600, backoff: Backoff(base: 60, max: 600)) { _ in .ok("done") }
+        withJobDir { dir in
+            let job = Job("ok-\(UUID().uuidString.prefix(6))", period: 3600, backoff: Backoff(base: 60, max: 600), stateDir: dir.path) { _ in .ok("done") }
             job.kick("test")
             #expect(waitForRun(job, after: nil))
             let s = job.snapshot
@@ -85,9 +85,9 @@ import TestSupport
     }
 
     @Test func failuresBackOffAndBecomeAProblemAfterTheGrace() {
-        withJobDir { _ in
+        withJobDir { dir in
             let job = Job("fail-\(UUID().uuidString.prefix(6))", period: 3600, backoff: Backoff(base: 60, max: 600, jitter: 0),
-                          problemGrace: 0) { _ in .failed("server down") }
+                          problemGrace: 0, stateDir: dir.path) { _ in .failed("server down") }
             job.kick("test")
             #expect(waitForRun(job, after: nil))
             #expect(job.snapshot.failures == 1)
@@ -101,8 +101,8 @@ import TestSupport
     }
 
     @Test func aRetryAfterOverridesTheBackoff() {
-        withJobDir { _ in
-            let job = Job("rate-\(UUID().uuidString.prefix(6))", period: 3600, backoff: Backoff(base: 60, max: 600)) { _ in
+        withJobDir { dir in
+            let job = Job("rate-\(UUID().uuidString.prefix(6))", period: 3600, backoff: Backoff(base: 60, max: 600), stateDir: dir.path) { _ in
                 .failed("rate limited", retryAfter: 1800)
             }
             job.kick("test")
@@ -112,8 +112,8 @@ import TestSupport
     }
 
     @Test func anIdleRunOfANonQuietJobSaysSo() {
-        withJobDir { _ in
-            let job = Job("idle-\(UUID().uuidString.prefix(6))", period: 60, backoff: Backoff(base: 1, max: 1)) { _ in .idle }
+        withJobDir { dir in
+            let job = Job("idle-\(UUID().uuidString.prefix(6))", period: 60, backoff: Backoff(base: 1, max: 1), stateDir: dir.path) { _ in .idle }
             let lines = capturingLog {
                 job.kick("test")
                 _ = eventually(0.5) { false }   // the run takes milliseconds
@@ -123,10 +123,10 @@ import TestSupport
     }
 
     @Test func blockedWaitsForAKickAndIsAProblemAtOnce() {
-        withJobDir { _ in
+        withJobDir { dir in
             var blocked = true
             let job = Job("blk-\(UUID().uuidString.prefix(6))", period: 1, backoff: Backoff(base: 1, max: 1),
-                          problemGrace: 3600) { _ in blocked ? .blocked("login expired") : .ok("fine") }
+                          problemGrace: 3600, stateDir: dir.path) { _ in blocked ? .blocked("login expired") : .ok("fine") }
             job.kick("test")
             #expect(waitForRun(job, after: nil))
             #expect(job.problem == "login expired")
@@ -143,11 +143,11 @@ import TestSupport
     }
 
     @Test func aKickWhileRunningQueuesExactlyOneRerun() {
-        withJobDir { _ in
+        withJobDir { dir in
             let gate = DispatchSemaphore(value: 0)
             var runs = 0
             let lock = NSLock()
-            let job = Job("single-\(UUID().uuidString.prefix(6))", period: 3600, backoff: Backoff(base: 1, max: 1)) { _ in
+            let job = Job("single-\(UUID().uuidString.prefix(6))", period: 3600, backoff: Backoff(base: 1, max: 1), stateDir: dir.path) { _ in
                 lock.withLock { runs += 1 }
                 if lock.withLock({ runs }) == 1 { gate.wait() }
                 return .ok("run")
@@ -163,13 +163,13 @@ import TestSupport
     }
 
     @Test func stateSurvivesARestart() {
-        withJobDir { _ in
+        withJobDir { dir in
             let name = "persist-\(UUID().uuidString.prefix(6))"
-            let a = Job(name, period: 3600, backoff: Backoff(base: 600, max: 6000, jitter: 0)) { _ in .failed("down") }
+            let a = Job(name, period: 3600, backoff: Backoff(base: 600, max: 6000, jitter: 0), stateDir: dir.path) { _ in .failed("down") }
             a.kick("test")
             #expect(waitForRun(a, after: nil))
             // A new launch: the backoff and the failure are remembered, not reset to "run in 2 min".
-            let b = Job(name, period: 3600, firstRun: 120, backoff: Backoff(base: 600, max: 6000, jitter: 0)) { _ in .ok("up") }
+            let b = Job(name, period: 3600, firstRun: 120, backoff: Backoff(base: 600, max: 6000, jitter: 0), stateDir: dir.path) { _ in .ok("up") }
             #expect(b.snapshot.failures == 1)
             #expect(b.snapshot.summary == "down")
             #expect(b.snapshot.nextRun.timeIntervalSinceNow > 500)

@@ -15,10 +15,20 @@ import CommonCrypto
 /// Where the app keeps its data. One place, so the test lanes can move it all to a
 /// throwaway folder (LEARNER_DATA_DIR, AI_VAULT_DATA) and never touch the real files.
 enum Paths {
-    static let data = ProcessInfo.processInfo.environment["LEARNER_DATA_DIR"] ?? NSHomeDirectory() + "/.ai-aggregator"
+    private static let env = ProcessInfo.processInfo.environment
+    /// A test process (`swift test`) never defaults to the real folders: only the heavy
+    /// lane (LEARNER_HEAVY=1) reads them, and an explicit override always wins.
+    static let underTest = ["swiftpm-testing-helper", "xctest"].contains(ProcessInfo.processInfo.processName)
+        && env["LEARNER_HEAVY"] != "1"
+    private static let scratch = NSTemporaryDirectory() + "learner-test-\(getpid())"
+    private static func real(_ path: String, _ testName: String) -> String { underTest ? "\(scratch)/\(testName)" : path }
+
+    static let data = env["LEARNER_DATA_DIR"] ?? real(NSHomeDirectory() + "/.ai-aggregator", "data")
     static let logs = data + "/logs"
     /// ai-vault's export (its own default location).
-    static let vault = ProcessInfo.processInfo.environment["AI_VAULT_DATA"] ?? NSHomeDirectory() + "/ai-vault-data"
+    static let vault = env["AI_VAULT_DATA"] ?? real(NSHomeDirectory() + "/ai-vault-data", "ai-vault-data")
+    /// ai-vault's logins and settings.
+    static let aiVaultConfig = env["AI_VAULT_CONFIG"] ?? real(NSHomeDirectory() + "/.ai-vault/config.json", "ai-vault-config.json")
 }
 
 // MARK: - Logging
@@ -348,7 +358,8 @@ final class Job {
     private let statePath: String
 
     init(_ name: String, period: TimeInterval, firstRun: TimeInterval = 0, backoff: Backoff,
-         problemGrace: TimeInterval = 0, quiet: Bool = false, body: @escaping (Job) -> Outcome) {
+         problemGrace: TimeInterval = 0, quiet: Bool = false, stateDir: String = Job.stateDir,
+         body: @escaping (Job) -> Outcome) {
         self.name = name
         self.log = Log(name)
         self.period = period
@@ -357,8 +368,8 @@ final class Job {
         self.quiet = quiet
         self.body = body
         self.queue = DispatchQueue(label: "learner.job.\(name)", qos: .utility)
-        try? FileManager.default.createDirectory(atPath: Job.stateDir, withIntermediateDirectories: true)
-        statePath = "\(Job.stateDir)/\(name).json"
+        try? FileManager.default.createDirectory(atPath: stateDir, withIntermediateDirectories: true)
+        statePath = "\(stateDir)/\(name).json"
         let fresh = State(nextRun: Date().addingTimeInterval(firstRun))
         if let data = FileManager.default.contents(atPath: statePath),
            var saved = try? JSONDecoder().decode(State.self, from: data) {

@@ -28,7 +28,7 @@ final class VaultExport {
         var env: [String: String]?
         var logPath = Paths.logs + "/vault-export.log"
         var loginsPath = Paths.data + "/vault-logins.json"
-        var aiVaultConfig = NSHomeDirectory() + "/.ai-vault/config.json"
+        var aiVaultConfig = Paths.aiVaultConfig
         var period: TimeInterval = 3600
         var firstRun: TimeInterval = 120
         /// A run that is still printing is left alone; one silent this long is stuck (ai-vault
@@ -329,7 +329,7 @@ final class VaultSignIn {
     }
 
     private static func savedSession(_ provider: String, site: Site) -> String? {
-        guard let data = FileManager.default.contents(atPath: NSHomeDirectory() + "/.ai-vault/config.json") else { return nil }
+        guard let data = FileManager.default.contents(atPath: Paths.aiVaultConfig) else { return nil }
         guard let config = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             log.warn("~/.ai-vault/config.json is not JSON")
             return nil
