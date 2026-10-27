@@ -80,6 +80,30 @@ func settle(_ condition: () -> Bool = { false }, within seconds: Double = 1) asy
         #expect(heard.count == 3)
     }
 
+    @Test func audioTimeComesFromTheChunkUnderBothStampingRules() async {
+        // Before 10-27 a transcription row carried its chunk's start; since, screenpipe stamps
+        // it with chunk start + start_time (and end_time 0). Either way the span starts at
+        // chunk start + start_time, never with the offset counted twice.
+        let sp = CannedScreenpipe()
+        let source = ScreenpipeSpeechSource(api: sp.api)
+        sp.maxId = ["meeting_transcript_segments": 0, "audio_transcriptions": 900]
+        var heard: [SpeechSpan] = []
+        source.poll(now: Date()) { heard += $0 }
+        await settle { source.background.watermark != nil }
+        let t = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
+        sp.background = [
+            ["id": 901, "transcription": "the old way of stamping", "timestamp": iso(t), "chunk_timestamp": iso(t),
+             "start_time": 1.5, "end_time": 3, "file_path": "/x/input (Microphone).mp4"],
+            ["id": 902, "transcription": "the new way of stamping", "timestamp": ISO8601DateFormatter().string(from: t.addingTimeInterval(13)),
+             "chunk_timestamp": iso(t.addingTimeInterval(10)), "start_time": 3, "end_time": 0, "file_path": "/x/input (Microphone).mp4"],
+        ]
+        source.poll(now: t.addingTimeInterval(20)) { heard += $0 }
+        await settle { heard.count == 2 }
+        #expect(abs(heard[0].start.timeIntervalSince(t) - 1.5) < 0.01)
+        #expect(abs(heard[1].start.timeIntervalSince(t) - 13) < 0.01, "offset counted twice: \(heard[1].start.timeIntervalSince(t))")
+        #expect(heard[1].end >= heard[1].start)
+    }
+
     @Test func bothScreenpipeDateFormatsParse() {
         #expect(ScreenpipeSpeechSource.parseDate("2026-10-21T16:10:12-04:00") != nil)
         #expect(ScreenpipeSpeechSource.parseDate("2026-10-21T15:12:11.241-04:00") != nil)

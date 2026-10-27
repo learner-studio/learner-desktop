@@ -186,7 +186,7 @@ final class ScreenpipeSpeechSource: SpeechSource {
         "SELECT id, device_type, transcript, captured_at FROM meeting_transcript_segments WHERE id > \($0) ORDER BY id ASC LIMIT 50;"
     }
     let background = Stream(name: "background transcripts", table: "audio_transcriptions") {
-        "SELECT t.id, t.audio_chunk_id, t.transcription, t.timestamp, t.start_time, t.end_time, c.file_path FROM audio_transcriptions t JOIN audio_chunks c ON t.audio_chunk_id = c.id WHERE t.id > \($0) ORDER BY t.id ASC LIMIT 50;"
+        "SELECT t.id, t.audio_chunk_id, t.transcription, t.timestamp, c.timestamp AS chunk_timestamp, t.start_time, t.end_time, c.file_path FROM audio_transcriptions t JOIN audio_chunks c ON t.audio_chunk_id = c.id WHERE t.id > \($0) ORDER BY t.id ASC LIMIT 50;"
     }
     /// Audio already delivered by the live stream.
     private(set) var liveCoveredUntil: Date?
@@ -221,7 +221,10 @@ final class ScreenpipeSpeechSource: SpeechSource {
         let path = row["file_path"] as? String ?? ""
         let startOffset = (row["start_time"] as? NSNumber)?.doubleValue ?? 0
         let endOffset = max(startOffset, (row["end_time"] as? NSNumber)?.doubleValue ?? 0)
-        let chunk = (row["timestamp"] as? String).flatMap(ScreenpipeSpeechSource.parseDate)
+        // Audio time = the CHUNK's start + start_time. (Since 10-27 screenpipe stamps the
+        // transcription row itself with chunk start + start_time; adding start_time to that
+        // would count the offset twice. Older rows carried the chunk start in both.)
+        let chunk = ((row["chunk_timestamp"] ?? row["timestamp"]) as? String).flatMap(ScreenpipeSpeechSource.parseDate)
         let start = chunk.map { $0.addingTimeInterval(startOffset) } ?? now
         if let covered = liveCoveredUntil, chunk != nil, start <= covered { return nil }
         return SpeechSpan(speaker: path.contains("input") || path.contains("Microphone") ? .me : .other,

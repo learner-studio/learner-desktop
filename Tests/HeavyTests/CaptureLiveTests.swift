@@ -68,11 +68,18 @@ struct CaptureLiveTests {
         #expect(bad.isEmpty, "timestamps the app would fail to parse: \(bad.prefix(5))")
     }
 
-    @Test func aTranscriptionCarriesItsChunksStartTime() throws {
-        // Audio time = chunk timestamp + start_time; a write-time stamp would shift every turn.
-        let rows = try #require(Live.sql("SELECT t.timestamp t_ts, c.timestamp c_ts FROM audio_transcriptions t JOIN audio_chunks c ON t.audio_chunk_id=c.id ORDER BY t.id DESC LIMIT 20;") as? [[String: Any]])
-        let mismatched = rows.filter { ($0["t_ts"] as? String) != ($0["c_ts"] as? String) }
-        #expect(mismatched.isEmpty)
+    @Test func aTranscriptionIsStampedFromItsChunkNotWhenItWasWritten() throws {
+        // The coach takes audio time from the chunk (chunk timestamp + start_time). screenpipe
+        // has stamped transcriptions with the chunk start (before 10-27) and with chunk start +
+        // start_time (since); both are audio time. A write-time stamp would shift every turn.
+        let rows = try #require(Live.sql("SELECT t.timestamp t_ts, c.timestamp c_ts, t.start_time FROM audio_transcriptions t JOIN audio_chunks c ON t.audio_chunk_id=c.id ORDER BY t.id DESC LIMIT 20;") as? [[String: Any]])
+        let parse = { (v: Any?) in (v as? String).flatMap(ScreenpipeSpeechSource.parseDate) }
+        let off = rows.filter { r in
+            guard let t = parse(r["t_ts"]), let c = parse(r["c_ts"]) else { return true }
+            let start = (r["start_time"] as? NSNumber)?.doubleValue ?? 0
+            return abs(t.timeIntervalSince(c)) > 0.01 && abs(t.timeIntervalSince(c) - start) > 0.05
+        }
+        #expect(off.isEmpty, "rows whose stamp is neither the chunk start nor chunk start + start_time: \(off.prefix(3))")
     }
 
     @Test(.enabled(if: FileManager.default.fileExists(atPath: NSHomeDirectory() + "/.screenpipe/store.bin"), "no ~/.screenpipe/store.bin"))
