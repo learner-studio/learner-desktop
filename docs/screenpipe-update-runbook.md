@@ -48,8 +48,8 @@ Record each as ✓ or ✗ with the evidence.
   `open -g -a /Applications/screenpipe.app` is screenpipe's own way to resume recording.
   `sleep 30`, then check again.
 - **Preflight fails only on the two version lines** and every other check passes: start
-  the new phase. Run `python3 scripts/start-capture-phase.py --dry-run`, then
-  `python3 scripts/start-capture-phase.py`. That ends the current GrowthBook phase, starts
+  the new phase with the installed app's tool (run from this repository):
+  `"/Users/benpollack/Applications/Learner Desktop.app/Contents/MacOS/learner-desktop" tool start-capture-phase --dry-run`, then the same without `--dry-run`. That ends the current GrowthBook phase, starts
   one named `screenpipe <app> / engine <engine>`, and re-pins
   `config/screenpipe-settings.json`. Run the preflight again, then commit only that file
   to the current branch: `git add config/screenpipe-settings.json` and

@@ -23,7 +23,7 @@
       "Bash(open -g -a /Applications/screenpipe.app)",
       "Bash(./scripts/preflight-capture.sh)",
       "Bash(./scripts/test.sh)",
-      "Bash(python3 scripts/start-capture-phase.py:*)",
+      "Bash(\"/Users/benpollack/Applications/Learner Desktop.app/Contents/MacOS/learner-desktop\" tool start-capture-phase:*)",
       "Bash(git status:*)",
       "Bash(git diff:*)",
       "Bash(git log:*)",

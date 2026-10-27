@@ -74,14 +74,13 @@ AIAGG_COACH_E2E_DIR="$PWD/data/verification/reward-$(date +%s)" \
 python3 -m unittest discover -s tests/heavy -p test_speaking_coach_reward_device.py -v
 ```
 
-Read-only server configuration/SQL test, using that completed reward fixture:
+Read-only server configuration/SQL test (`Tests/HeavyTests/GrowthBookRemoteTests.swift`;
+the exposure query runs read-only against fictional rows built inside the query):
 
 ```sh
-AIAGG_HEAVY=1 AIAGG_REMOTE_E2E=1 \
-AIAGG_SETTINGS_E2E_FIXTURE="/absolute/path/to/reward-device/habit_events.json" \
-python3 tests/heavy/test_growthbook_settings_design.py -v
+LEARNER_REMOTE_E2E=1 scripts/test.sh heavy --filter GrowthBookRemote
 ```
 
-`scripts/configure-speaking-coach-growthbook.py` prints the design by default.
+`learner-desktop tool growthbook-design` prints the design by default.
 Its `--apply` command refuses to overwrite an existing revision; inspect current
 configuration before adapting it for a future change.
