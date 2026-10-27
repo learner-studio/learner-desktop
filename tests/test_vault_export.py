@@ -42,5 +42,35 @@ class VaultExportOutcomeTest(unittest.TestCase):
         self.assertNotRegex(OK, pattern("failedPattern"))
 
 
+class SignInTest(unittest.TestCase):
+    """An expired login turns the tray red and the menu opens the sign-in wizard."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(SWIFT, encoding="utf-8") as fh:
+            cls.src = fh.read()
+
+    def test_the_tray_shows_the_error(self):
+        self.assertIn('!VaultExport.shared.expiredLogins.isEmpty {\n            baseTitle = "🧠 🔴 VAULT"', self.src)
+
+    def test_each_expired_login_has_a_sign_in_item(self):
+        self.assertIn('login expired — Sign In Again...", #selector(signInToVault(_:))).representedObject = provider', self.src)
+
+    def test_the_wizard_takes_the_provider_as_an_argument_not_a_flag(self):
+        # `ai-vault setup --provider x` is not a valid invocation.
+        self.assertIn('"\\(cli)" setup \\(provider)', self.src)
+        self.assertNotIn("setup --provider", self.src)
+
+    def test_only_known_providers_reach_the_shell_script(self):
+        body = self.src[self.src.index("func openSignIn("):]
+        self.assertLess(body.index("VaultExport.providers.contains(provider)"), body.index("let script"))
+
+    def test_finishing_sign_in_triggers_an_export(self):
+        tick = self.src[self.src.index("    func tick() {\n        guard !running else { return }"):]
+        tick = tick[:tick.index("\n    }\n")]
+        self.assertIn("loginDoneMarker", tick)
+        self.assertIn("runNow()", tick)
+
+
 if __name__ == "__main__":
     unittest.main()

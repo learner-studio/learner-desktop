@@ -2081,8 +2081,9 @@ func processCommandLine(_ pid: pid_t, includeEnvironment: Bool = false) -> Strin
 /// Pulls new ChatGPT and Claude conversations into ~/ai-vault-data with the `ai-vault`
 /// CLI, where the transcript watcher picks them up and archives them on learner-server.
 /// Nothing scheduled this before, so nothing new was exported after 2026-09-07. ai-vault
-/// logs in with browser cookies that expire; that shows up as "Authentication failed",
-/// and the menu then says which login to refresh (`ai-vault setup --provider <name>`).
+/// logs in with browser cookies that expire. An expired login turns the tray red and the
+/// menu offers "Sign In Again", which opens `ai-vault setup <provider>` in Terminal; when
+/// that finishes it leaves `loginDoneMarker`, and the next poll runs an export straight away.
 final class VaultExport {
     static let shared = VaultExport()
     static let interval: TimeInterval = 6 * 3600
@@ -2096,14 +2097,46 @@ final class VaultExport {
 
     static let loginExpiredPattern = "Authentication failed|cookies appear to be expired|Organization ID not available|API request failed: 40[13]"
     static let failedPattern = "Errors: [1-9]|Completed with [1-9][0-9]* errors"
+    static let loginDoneMarker = NSHomeDirectory() + "/.ai-aggregator/vault-login-done"
     private(set) var expiredLogins: Set<String> = []
     private(set) var lastRun: Date?
     private(set) var lastSummary = "not run yet"
 
     /// Called on the 8 s status poll.
     func tick() {
-        guard !running, Date() >= nextRun else { return }
-        runNow()
+        guard !running else { return }
+        if FileManager.default.fileExists(atPath: VaultExport.loginDoneMarker) {
+            try? FileManager.default.removeItem(atPath: VaultExport.loginDoneMarker)
+            print("[VaultExport] sign-in finished; exporting now")
+            runNow()
+        } else if Date() >= nextRun {
+            runNow()
+        }
+    }
+
+    /// Opens Terminal on the interactive `ai-vault setup <provider>` wizard. A .command file
+    /// opens in Terminal without the Automation permission that scripting Terminal needs.
+    func openSignIn(_ provider: String) {
+        guard VaultExport.providers.contains(provider), let cli = VaultExport.cliPath() else { return }
+        let path = NSHomeDirectory() + "/.ai-aggregator/ai-vault-sign-in-\(provider).command"
+        let script = """
+        #!/bin/zsh
+        export PATH="\((cli as NSString).deletingLastPathComponent):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+        echo "Signing ai-vault in to \(provider). Follow the prompts."
+        echo
+        "\(cli)" setup \(provider)
+        touch "\(VaultExport.loginDoneMarker)"
+        echo
+        echo "Done. Learner Desktop will run an export within a few seconds; you can close this window."
+        """
+        do {
+            try script.write(toFile: path, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
+            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+            print("[VaultExport] opened sign-in for \(provider)")
+        } catch {
+            print("[VaultExport] could not open sign-in for \(provider): \(error.localizedDescription)")
+        }
     }
 
     func runNow() {
@@ -3676,7 +3709,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let export = VaultExport.shared
         _ = add("   └─ Last export: " + (export.lastRun.map { DateFormatter.localizedString(from: $0, dateStyle: .none, timeStyle: .short) + " — " } ?? "") + export.lastSummary)
         for provider in export.expiredLogins.sorted() {
-            _ = add("   ⚠️ \(provider) login expired — run: ai-vault setup --provider \(provider)")
+            add("   ⚠️ \(provider) login expired — Sign In Again...", #selector(signInToVault(_:))).representedObject = provider
         }
         _ = add("   📥 Pull Latest Chats (Incremental Sweep)", #selector(pullVaultChats))
 
@@ -4043,6 +4076,9 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else if !isScreenpipeHealthy && !isScreenpipeDegraded {
             baseTitle = "🧠 🔴 SP"
             button.toolTip = "Learner Desktop\nScreenpipe stopped"
+        } else if !VaultExport.shared.expiredLogins.isEmpty {
+            baseTitle = "🧠 🔴 VAULT"
+            button.toolTip = "Learner Desktop\nAI Vault login expired (\(VaultExport.shared.expiredLogins.sorted().joined(separator: ", "))): no new chats are exported.\nOpen the menu and choose Sign In Again."
         } else if isScreenpipeDegraded {
             baseTitle = "🧠 🟡 \(vaultCount)"
             button.toolTip = "Learner Desktop\nScreenpipe idle/degraded"
@@ -4253,6 +4289,11 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
             rebuildMenu()
             updateTrayButton()
         }
+    }
+
+    @objc func signInToVault(_ sender: NSMenuItem) {
+        guard let provider = sender.representedObject as? String else { return }
+        VaultExport.shared.openSignIn(provider)
     }
 
     @objc func pullVaultChats() {
