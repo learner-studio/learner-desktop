@@ -166,6 +166,8 @@ final class MicSpeechSource: SpeechSource {
             log.warn("\(problem!); timing your speech from screenpipe instead")
             return false
         case .notDetermined:
+            problem = "waiting for microphone permission (answer the macOS prompt); timing from screenpipe until then"
+            log.info("asking for microphone permission; timing your speech from screenpipe until it is granted")
             AVCaptureDevice.requestAccess(for: .audio) { granted in
                 Task { @MainActor in
                     if granted { self.start() } else { self.problem = "microphone access denied"; self.log.warn("microphone access denied") }
