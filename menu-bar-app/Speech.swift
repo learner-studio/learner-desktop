@@ -79,6 +79,43 @@ final class SileroVAD: @unchecked Sendable {
 /// holds at least 256 ms of speech frames (the rule benchmarked at F1 0.93, onset ~0.3 s);
 /// from then on every speech frame extends the span, which starts at the first speech frame
 /// of that second. Pure, so it is tested exactly.
+/// The microphone watchdog's rule: frames must keep moving while the mic runs. Silent past
+/// `first` seconds, restart; while it stays silent, restart again after doubling waits (up to
+/// `cap`), so a mic that never comes back is not restarted in a loop.
+struct StallWatch {
+    enum Verdict: Equatable { case flowing, waiting, restart(silentFor: TimeInterval) }
+    let first: TimeInterval
+    let cap: TimeInterval
+    private(set) var since: Date?
+    private var lastFrames = 0
+    private var nextRestart: TimeInterval = 0
+    private var wait: TimeInterval = 0
+
+    init(first: TimeInterval = 10, cap: TimeInterval = 600) { self.first = first; self.cap = cap }
+
+    /// After (re)starting the engine: frames are counted from here.
+    mutating func started(frames: Int) { lastFrames = frames }
+
+    mutating func check(frames: Int, now: Date) -> Verdict {
+        if frames != lastFrames {
+            lastFrames = frames
+            since = nil
+            return .flowing
+        }
+        guard let since = since else {
+            self.since = now
+            wait = first
+            nextRestart = first
+            return .waiting
+        }
+        let silent = now.timeIntervalSince(since)
+        guard silent > nextRestart else { return .waiting }
+        wait = min(wait * 2, cap)
+        nextRestart = silent + wait
+        return .restart(silentFor: silent)
+    }
+}
+
 struct VADSegmenter {
     var threshold: Float = 0.5
     var minSpeechFrames = 8          // 8 × 32 ms = 256 ms
@@ -138,6 +175,8 @@ final class MicSpeechSource: SpeechSource {
     private let state = Locked<VADState>(VADState())
     private(set) var problem: String?
     private var started = false
+    private var configObserver: NSObjectProtocol?
+    private var stall = StallWatch()
 
     struct VADState {
         var segmenter = VADSegmenter()
@@ -189,10 +228,16 @@ final class MicSpeechSource: SpeechSource {
         input.installTap(onBus: 0, bufferSize: 4096, format: format,
                          block: MicSpeechSource.tap(format: format, target: target, converter: converter,
                                                     state: state, queue: queue, log: log))
+        // A new input device (AirPods connecting, a mic unplugged) stops the engine and
+        // changes the format: start again on the new one.
+        configObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.restart(why: "the audio input changed") }
+        }
         do {
             try engine.start()
             started = true
-            problem = nil
+            if stall.since == nil { problem = nil }
+            stall.started(frames: framesScored)
             log.info("listening on \(format.sampleRate / 1000) kHz \(format.channelCount)-channel input; Silero VAD on device")
             return true
         } catch {
@@ -251,9 +296,30 @@ final class MicSpeechSource: SpeechSource {
 
     func stop() {
         guard started else { return }
+        if let o = configObserver { NotificationCenter.default.removeObserver(o) }
+        configObserver = nil
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         started = false
+    }
+
+    func restart(why: String) {
+        log.warn("\(why); restarting the microphone")
+        stop()
+        if !start() { log.warn("microphone did not restart: \(problem ?? "unknown")") }
+    }
+
+    /// Called each poll: frames must keep arriving while the microphone runs.
+    private func watchdog(now: Date) {
+        switch stall.check(frames: framesScored, now: now) {
+        case .flowing:
+            if problem?.hasPrefix("no audio") == true { problem = nil; log.info("audio arriving again") }
+        case .waiting:
+            break
+        case .restart(let silentFor):
+            problem = "no audio from the microphone for \(Job.describe(silentFor))"
+            restart(why: problem!)
+        }
     }
 
     func poll(now: Date, deliver: @escaping @MainActor ([SpeechSpan]) -> Void) {
@@ -263,6 +329,7 @@ final class MicSpeechSource: SpeechSource {
                                capturedAt: span.start, path: "silero_vad", label: "silero \(String(format: "%.1f", span.end.timeIntervalSince(span.start))) s")]
         }
         guard started else { return screenpipe.poll(now: now, deliver: deliver) }
+        watchdog(now: now)
         if !mine.isEmpty { deliver(mine) }
         screenpipe.poll(now: now) { spans in
             // screenpipe's spans for the owner only add their words now; Silero times the turn.

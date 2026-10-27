@@ -143,3 +143,39 @@ struct SpeechTests {
         #expect(state.withLock { $0.segmenter.take() } != nil, "no speech heard through the callback")
     }
 }
+
+// The microphone watchdog: a stalled mic (frames stop moving) is restarted after 10 s, then
+// after doubling waits while it stays silent, never in a tight loop; audio flowing again resets it.
+@Suite("Microphone watchdog", .tags(.light, .coach))
+struct StallWatchTests {
+    @Test func aStalledMicIsRestartedWithBackoffAndResetByAudio() {
+        let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+        var w = StallWatch()
+        w.started(frames: 100)
+        #expect(w.check(frames: 131, now: t0) == .flowing)
+        #expect(w.check(frames: 131, now: t0.addingTimeInterval(1)) == .waiting)
+        #expect(w.check(frames: 131, now: t0.addingTimeInterval(10)) == .waiting)
+        #expect(w.check(frames: 131, now: t0.addingTimeInterval(12)) == .restart(silentFor: 11))
+        // Still silent: not again at 12 s or 20 s, but after a 20 s wait (31+ s), then 40 s more.
+        #expect(w.check(frames: 131, now: t0.addingTimeInterval(20)) == .waiting)
+        #expect(w.check(frames: 131, now: t0.addingTimeInterval(32)) == .waiting)
+        #expect(w.check(frames: 131, now: t0.addingTimeInterval(33)) == .restart(silentFor: 32))
+        #expect(w.check(frames: 131, now: t0.addingTimeInterval(72)) == .waiting)
+        #expect(w.check(frames: 131, now: t0.addingTimeInterval(74)) == .restart(silentFor: 73))
+        // Waits stop growing at the cap.
+        var capped = StallWatch(first: 10, cap: 30)
+        _ = capped.check(frames: 0, now: t0)
+        var restarts: [TimeInterval] = []
+        for s in stride(from: 1.0, through: 200, by: 1) {
+            if case .restart(let silent) = capped.check(frames: 0, now: t0.addingTimeInterval(s)) { restarts.append(silent) }
+        }
+        #expect(restarts.count >= 6, "\(restarts)")
+        #expect(zip(restarts, restarts.dropFirst()).allSatisfy { $1 - $0 <= 31 }, "\(restarts)")
+        // Audio again: reset, and the next stall waits the first 10 s again.
+        #expect(w.check(frames: 140, now: t0.addingTimeInterval(80)) == .flowing)
+        #expect(w.since == nil)
+        #expect(w.check(frames: 140, now: t0.addingTimeInterval(81)) == .waiting)
+        #expect(w.check(frames: 140, now: t0.addingTimeInterval(90)) == .waiting)
+        #expect(w.check(frames: 140, now: t0.addingTimeInterval(92)) == .restart(silentFor: 11))
+    }
+}
