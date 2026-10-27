@@ -20,23 +20,35 @@ final class ManagedHelper {
     private let marker: String
     private let logPath: String
     private let pidPath: String
+    private let log: Log
     private var process: Process?
     private var logHandle: FileHandle?
     private var stopping = false
     private(set) var startedAt = Date.distantPast
-    private var restartDelay: TimeInterval = 1
+    /// Restarts back off 1 s doubling to 60 s; a run that stayed up a minute resets it.
+    private var backoff = Backoff(base: 1, max: 60, jitter: 0)
+    static let healthyAfter: TimeInterval = 60
 
-    init(name: String, executable: String, arguments: [String], marker: String) {
+    init(name: String, executable: String, arguments: [String], marker: String,
+         runtimeDir: String = NSHomeDirectory() + "/.ai-aggregator") {
         self.name = name
         self.executable = executable
         self.arguments = arguments
         self.marker = marker
-        let runtimeDir = NSHomeDirectory() + "/.ai-aggregator"
+        self.log = Log("Helper:\(name)")
         logPath = runtimeDir + "/logs/\(name).log"
         pidPath = runtimeDir + "/\(name).pid"
+        try? FileManager.default.createDirectory(atPath: runtimeDir + "/logs", withIntermediateDirectories: true)
     }
 
     var isRunning: Bool { process?.isRunning ?? false }
+
+    /// For the tray: down, or restarting again and again.
+    var problem: String? {
+        if stopping { return nil }
+        if !isRunning { return "\(name) is not running" }
+        return backoff.failures >= 3 ? "\(name) keeps exiting (\(backoff.failures) restarts)" : nil
+    }
 
     func start() {
         stopping = false
@@ -44,27 +56,26 @@ final class ManagedHelper {
         launch()
     }
 
+    /// Stops (blocking, off the main thread) and starts again on the main thread.
     func restart() {
-        stop()
-        start()
+        log.info("restart requested")
+        DispatchQueue.global(qos: .userInitiated).async {
+            self.stop()
+            DispatchQueue.main.async { self.start() }
+        }
     }
 
     private func launch() {
         guard !stopping, !isRunning else { return }
-        let fm = FileManager.default
-        if !fm.fileExists(atPath: logPath) { fm.createFile(atPath: logPath, contents: nil) }
-        LogFile.rotate(logPath)
-        if !fm.fileExists(atPath: logPath) { fm.createFile(atPath: logPath, contents: nil) }
-        let log = FileHandle(forWritingAtPath: logPath)
-        log?.seekToEndOfFile()
-
+        let out = LogFile.open(logPath)
         let p = Process()
         p.executableURL = URL(fileURLWithPath: executable)
         p.arguments = arguments
-        p.currentDirectoryURL = URL(fileURLWithPath: NSHomeDirectory() + "/.ai-aggregator")
-        if let log = log {
-            p.standardOutput = log
-            p.standardError = log
+        p.currentDirectoryURL = URL(fileURLWithPath: (pidPath as NSString).deletingLastPathComponent)
+        p.environment = ChildProcess.toolEnvironment
+        if let out = out {
+            p.standardOutput = out
+            p.standardError = out
         }
         p.terminationHandler = { [weak self] proc in
             DispatchQueue.main.async { self?.exited(proc) }
@@ -72,22 +83,19 @@ final class ManagedHelper {
         do {
             try p.run()
         } catch {
-            // A missing binary, or one being replaced (bun upgrade): keep trying, backing off.
-            try? log?.close()
-            restartDelay = min(restartDelay * 2, 60)
-            print("[Helpers] Could not start \(name): \(error.localizedDescription); retrying in \(Int(restartDelay))s")
-            fflush(stdout)
-            DispatchQueue.main.asyncAfter(deadline: .now() + restartDelay) { [weak self] in
-                self?.launch()
-            }
+            // A missing binary, or one being replaced: keep trying, backing off.
+            try? out?.close()
+            let wait = backoff.failed()
+            log.error("could not start: \(error.localizedDescription); retrying in \(Job.describe(wait))")
+            DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in self?.launch() }
             return
         }
         process = p
-        logHandle = log
+        logHandle = out
         startedAt = Date()
-        try? String(p.processIdentifier).write(toFile: pidPath, atomically: true, encoding: .utf8)
-        print("[Helpers] Started \(name) (pid \(p.processIdentifier))")
-        fflush(stdout)
+        do { try String(p.processIdentifier).write(toFile: pidPath, atomically: true, encoding: .utf8) }
+        catch { log.warn("cannot write \(pidPath): \(error.localizedDescription); a crash would leave it orphaned") }
+        log.info("started (pid \(p.processIdentifier))")
     }
 
     private func exited(_ proc: Process) {
@@ -99,29 +107,20 @@ final class ManagedHelper {
         if stopping { return }
         // One that stayed up a minute was healthy, so bring it back promptly; one that dies
         // straight away (no network, port already held) backs off instead of spinning.
-        restartDelay = Date().timeIntervalSince(startedAt) > 60 ? 1 : min(restartDelay * 2, 60)
-        print("[Helpers] \(name) exited (status \(proc.terminationStatus)); restarting in \(Int(restartDelay))s")
-        fflush(stdout)
-        DispatchQueue.main.asyncAfter(deadline: .now() + restartDelay) { [weak self] in
-            self?.launch()
-        }
+        if Date().timeIntervalSince(startedAt) > ManagedHelper.healthyAfter { backoff.succeeded() }
+        let wait = backoff.failed()
+        log.warn("exited (status \(proc.terminationStatus)) after \(Job.describe(Date().timeIntervalSince(startedAt))); restarting in \(Job.describe(wait))")
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in self?.launch() }
     }
 
-    /// SIGTERM, then SIGKILL if it is still running after `timeout`. Blocks the caller.
-    func stop(timeout: TimeInterval = 5) {
+    /// SIGTERM, then SIGKILL for it and its children (autossh's ssh) after `grace`. Blocks
+    /// the caller, so call it off the main thread except at quit.
+    func stop(grace: TimeInterval = 5) {
         stopping = true
         guard let p = process else { return }
         if p.isRunning {
-            p.terminate()
-            var deadline = Date().addingTimeInterval(timeout)
-            while p.isRunning && Date() < deadline { usleep(100_000) }
-            if p.isRunning {
-                kill(p.processIdentifier, SIGKILL)
-                deadline = Date().addingTimeInterval(2)
-                while p.isRunning && Date() < deadline { usleep(100_000) }
-            }
-            print("[Helpers] Stopped \(name)")
-            fflush(stdout)
+            ChildProcess.stop(p, grace: grace)
+            log.info("stopped")
         }
         process = nil
         try? logHandle?.close()
@@ -137,11 +136,11 @@ final class ManagedHelper {
         guard let text = try? String(contentsOfFile: pidPath, encoding: .utf8),
               let pid = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 1,
               let command = ChildProcess.commandLine(pid), command.contains(marker) else { return }
-        print("[Helpers] Stopping \(name) left over from a previous run (pid \(pid))")
-        fflush(stdout)
+        log.warn("stopping one left over from a previous run (pid \(pid))")
+        let tree = [pid] + ChildProcess.descendants(of: pid)
         kill(pid, SIGTERM)
         let deadline = Date().addingTimeInterval(3)
         while kill(pid, 0) == 0 && Date() < deadline { usleep(100_000) }
-        if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
+        for p in tree where kill(p, 0) == 0 { kill(p, SIGKILL) }
     }
 }

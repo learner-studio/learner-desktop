@@ -36,6 +36,8 @@ enum AppLog {
     static let maxBytes: UInt64 = 10_000_000
     static let repeatWindow: TimeInterval = 600
 
+    /// Tests capture lines here instead of stdout.
+    static var sink: ((String) -> Void)?
     private static let lock = NSLock()
     private static var lastSeen: [String: (at: Date, held: Int)] = [:]
     private static var writes = 0
@@ -69,7 +71,9 @@ enum AppLog {
             if lastSeen.count > 2000 { lastSeen.removeAll() }
             lastSeen[key] = (now, 0)
         }
-        Swift.print("\(stamp.string(from: now)) \(text)")
+        let stamped = "\(stamp.string(from: now)) \(text)"
+        if let sink = sink { sink(stamped); return }
+        Swift.print(stamped)
         fflush(stdout)
         writes += 1
         if writes % 500 == 0 { rotate() }
@@ -313,6 +317,8 @@ final class Job {
     }
 
     static private(set) var all: [Job] = []
+    /// Where job state is kept; tests point it at a temp directory.
+    static var stateDir = NSHomeDirectory() + "/.ai-aggregator/jobs"
 
     let name: String
     let log: Log
@@ -340,9 +346,8 @@ final class Job {
         self.quiet = quiet
         self.body = body
         self.queue = DispatchQueue(label: "learner.job.\(name)", qos: .utility)
-        let dir = NSHomeDirectory() + "/.ai-aggregator/jobs"
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        statePath = "\(dir)/\(name).json"
+        try? FileManager.default.createDirectory(atPath: Job.stateDir, withIntermediateDirectories: true)
+        statePath = "\(Job.stateDir)/\(name).json"
         let fresh = State(nextRun: Date().addingTimeInterval(firstRun))
         if let data = FileManager.default.contents(atPath: statePath),
            var saved = try? JSONDecoder().decode(State.self, from: data) {
@@ -415,7 +420,9 @@ final class Job {
                 state.summary = summary
                 state.nextRun = now.addingTimeInterval(next ?? period)
             case let .failed(summary, retryAfter):
-                let wait = retryAfter ?? backoff.failed()
+                // A fixed retry (a rate limit's) still counts as an attempt.
+                let backedOff = backoff.failed()
+                let wait = retryAfter ?? backedOff
                 state.failures = backoff.failures
                 state.problemSince = state.problemSince ?? now
                 state.summary = summary
