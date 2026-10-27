@@ -24,7 +24,7 @@ enum VaultReport {
         var problems: [String] = []
     }
 
-    typealias Parser = (_ path: String) -> Summary
+    typealias Parser = @Sendable (_ path: String) -> Summary
 
     static func main(_ args: [String], io: ToolIO, parse: Parser) -> Int32 {
         if args.contains("-h") || args.contains("--help") {

@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
-import CoreBluetooth
+// CBUUID and friends predate Sendable annotations; the controller uses them on main only.
+@preconcurrency import CoreBluetooth
 
 // The Pavlok wristband: direct Bluetooth first (an acknowledged write, <15 ms), the Pavlok
 // cloud relay as a fallback for automatic cues. Every send reports a typed result and
@@ -32,7 +33,7 @@ enum Transport: String {
     }
 }
 
-struct StimulusResult {
+struct StimulusResult: Sendable {
     let delivered: Bool
     let transport: Transport
     let detail: String
@@ -54,11 +55,12 @@ struct StimulusContext {
 }
 
 /// A wristband the coach can cue. Completion always comes, on the main thread.
+@MainActor
 protocol Wearable: AnyObject {
     /// Stimuli are switched on in settings.
     var isEnabled: Bool { get }
     func send(_ modality: Modality, intensity: Int, reason: String, context: StimulusContext,
-              completion: @escaping (StimulusResult) -> Void)
+              completion: @escaping @MainActor (StimulusResult) -> Void)
 }
 
 // MARK: - Packets
@@ -116,7 +118,7 @@ struct PavlokCloud {
     var timeout: TimeInterval = 4
 
     func send(_ m: Modality, intensity: Int, reason: String, token: String,
-              completion: @escaping (StimulusResult) -> Void) {
+              completion: @escaping @MainActor (StimulusResult) -> Void) {
         var req = URLRequest(url: endpoint)
         req.httpMethod = "POST"
         req.setValue(token, forHTTPHeaderField: "Authorization")
@@ -140,7 +142,7 @@ struct PavlokCloud {
     }
 
     /// Whether the token is accepted (for the menu's status line).
-    func check(token: String, completion: @escaping (Bool) -> Void) {
+    func check(token: String, completion: @escaping @MainActor (Bool) -> Void) {
         var req = URLRequest(url: userEndpoint)
         req.setValue(token, forHTTPHeaderField: "Authorization")
         req.timeoutInterval = 3
@@ -153,7 +155,9 @@ struct PavlokCloud {
 
 // MARK: - Controller
 
-final class PavlokController: NSObject, Wearable, CBCentralManagerDelegate, CBPeripheralDelegate {
+@MainActor
+// The CoreBluetooth callbacks arrive on main: the central is created with `queue: .main`.
+final class PavlokController: NSObject, Wearable, @preconcurrency CBCentralManagerDelegate, @preconcurrency CBPeripheralDelegate {
     static let shared = PavlokController(settings: .shared, logger: .shared)
 
     /// Consecutive failed connects to the remembered wristband before scanning afresh.
@@ -187,7 +191,7 @@ final class PavlokController: NSObject, Wearable, CBCentralManagerDelegate, CBPe
     private var reconnectWork: DispatchWorkItem?
     /// Consecutive connects that never became usable.
     private var failedConnects = 0
-    private var pendingWrites: [CBUUID: (id: UUID, completion: (StimulusResult) -> Void)] = [:]
+    private var pendingWrites: [CBUUID: (id: UUID, completion: @MainActor (StimulusResult) -> Void)] = [:]
     /// The headless test fire holds the link without touching the saved settings.
     var holdConnection = false {
         didSet { applyConnectionWish() }
@@ -474,7 +478,7 @@ final class PavlokController: NSObject, Wearable, CBCentralManagerDelegate, CBPe
     }
 
     /// An acknowledged write: only the wristband's ack counts as delivered.
-    private func write(_ data: Data, to c: CBCharacteristic, on p: CBPeripheral, completion: @escaping (StimulusResult) -> Void) {
+    private func write(_ data: Data, to c: CBCharacteristic, on p: CBPeripheral, completion: @escaping @MainActor (StimulusResult) -> Void) {
         guard pendingWrites[c.uuid] == nil else {
             return completion(StimulusResult(delivered: false, transport: .ble, detail: "previous BLE stimulus still awaiting acknowledgement"))
         }
@@ -496,11 +500,11 @@ final class PavlokController: NSObject, Wearable, CBCentralManagerDelegate, CBPe
     // MARK: Sending
 
     func send(_ m: Modality, intensity: Int, reason: String, context: StimulusContext,
-              completion: @escaping (StimulusResult) -> Void) {
+              completion: @escaping @MainActor (StimulusResult) -> Void) {
         let level = max(1, min(100, intensity))
         audit(m, level, reason, context, phase: "requested", result: nil)
         let started = Date()
-        let finish: (StimulusResult) -> Void = { [weak self] result in
+        let finish: @MainActor (StimulusResult) -> Void = { [weak self] result in
             guard let self = self else { return }
             self.audit(m, level, reason, context, phase: "result", result: result, started: started)
             let line = "\(m.rawValue) \(level)% \(result.delivered ? "delivered" : "FAILED") via \(result.transport.rawValue): \(result.detail) (\(reason))"
@@ -560,15 +564,15 @@ final class PavlokController: NSObject, Wearable, CBCentralManagerDelegate, CBPe
     /// Fires one stimulus because a human asked (the --pavlok-test-fire command or the
     /// resident request it forwards). Waits up to `wait` for the link; Bluetooth only.
     func testFire(_ m: Modality, intensity: Int, operationId: String = UUID().uuidString.lowercased(),
-                  wait: TimeInterval = 15, completion: @escaping (TestFireResult) -> Void) {
+                  wait: TimeInterval = 15, completion: @escaping @MainActor (TestFireResult) -> Void) {
         let context = StimulusContext(sessionId: "manual_test_" + operationId, arm: "manual_test",
                                       callApp: "Manual device test", manual: true, operationId: operationId)
-        func finish(_ r: StimulusResult) {
-            isTestFiring = false
+        let finish: @MainActor (StimulusResult) -> Void = { r in
+            self.isTestFiring = false
             let fired = TestFireResult(modality: m, intensity: intensity, result: r, at: Date())
-            log.info("test fire: \(fired.line)")
+            self.log.info("test fire: \(fired.line)")
             completion(fired)
-            statusChanged()
+            self.statusChanged()
         }
         guard !isTestFiring else {
             return completion(TestFireResult(modality: m, intensity: intensity, result: .notSent("a test is already in progress"), at: Date()))
@@ -582,18 +586,22 @@ final class PavlokController: NSObject, Wearable, CBCentralManagerDelegate, CBPe
         // Wait for the characteristic, not merely the connection. .common keeps it running
         // while a menu is open.
         let deadline = Date().addingTimeInterval(wait)
-        let timer = Timer(timeInterval: 0.15, repeats: true) { [weak self] timer in
-            guard let self = self else { return timer.invalidate() }
+        // On the main run loop, so it fires on the main thread. Returns whether it is done.
+        let poll: @MainActor () -> Bool = { [weak self] in
+            guard let self = self else { return true }
             if !self.connectionRequested {
-                timer.invalidate()
                 finish(.notSent("Bluetooth connection is switched off"))
             } else if self.isReady(for: m) {
-                timer.invalidate()
                 self.send(m, intensity: intensity, reason: "Manual test fire", context: context, completion: finish)
             } else if Date() >= deadline {
-                timer.invalidate()
                 finish(.notSent("Bluetooth not ready after \(Int(wait)) s; still reconnecting in the background"))
+            } else {
+                return false
             }
+            return true
+        }
+        let timer = Timer(timeInterval: 0.15, repeats: true) { timer in
+            if MainActor.assumeIsolated(poll) { timer.invalidate() }
         }
         RunLoop.main.add(timer, forMode: .common)
     }
@@ -660,6 +668,7 @@ struct PavlokTestRequest {
 
 /// `--pavlok-test-fire`: fires one stimulus and exits. Through the running app when there
 /// is one (it holds the link), else by connecting itself. Saved settings are never changed.
+@MainActor
 func runPavlokTestFireCLI() {
     guard let args = PavlokTestFireArgs.parse(CommandLine.arguments) else {
         FileHandle.standardError.write(Data(PavlokTestFireArgs.usage.utf8))
@@ -672,7 +681,7 @@ func runPavlokTestFireCLI() {
     let terminal = dup(STDOUT_FILENO)
     try? FileManager.default.createDirectory(atPath: (AppLog.path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
     freopen(AppLog.path, "a", stdout)
-    func verdict(_ line: String) {
+    @Sendable func verdict(_ line: String) {
         log.info(line)
         var bytes = Array(("[Pavlok TestFire] " + line + "\n").utf8)
         if terminal >= 0 { _ = write(terminal, &bytes, bytes.count) }
@@ -706,7 +715,7 @@ func runPavlokTestFireCLI() {
     // arrive late or never -- which looks exactly like a band that is not there.
     let activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled],
                                                          reason: "Pavlok headless test fire")
-    func done(_ code: Int32) -> Never {
+    let done: @MainActor (Int32) -> Never = { code in
         HabitEventLogger.shared.close()
         ProcessInfo.processInfo.endActivity(activity)
         exit(code)

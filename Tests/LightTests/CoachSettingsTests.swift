@@ -3,6 +3,7 @@ import Testing
 @testable import LearnerDesktop
 import TestSupport
 
+@MainActor
 @Suite("Coach settings and arms", .quietLog) struct CoachSettingsTests {
     @Test func armAssignmentIsAStableHashOfTheSession() {
         // Pinned: the same session must land in the same arm in every process and release.

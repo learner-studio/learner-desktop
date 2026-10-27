@@ -151,11 +151,11 @@ func accepted(_ s: StubTransport.Seen) -> HTTPReply {
     @Test func theHeartbeatIsBuiltOnlyWhenItIsSent() {
         let f = OutboxFixture(turns: 0) { _ in StubTransport.json(200, ["data": ["serverTime": "2026-10-27T12:00:00Z"]]) }
         #expect(describe(f.sender.sendHeartbeat()) == "idle") // no input provider yet
-        var built = 0
-        f.sender.setHeartbeatInput { built += 1; return ["clientId": "ben-mbp", "outboxDepth": 0] }
-        #expect(built == 0)
+        let built = Locked(0)
+        f.sender.setHeartbeatInput { built.withLock { $0 += 1 }; return ["clientId": "ben-mbp", "outboxDepth": 0] }
+        #expect(built.value == 0)
         #expect(describe(f.sender.sendHeartbeat()) == "ok: sent")
-        #expect(built == 1)
+        #expect(built.value == 1)
         #expect(f.stub.seen.first?.path == "/rpc/recordAppHeartbeat")
         #expect((f.stub.seen.first?.body?["data"] as? [String: Any])?["outboxDepth"] as? Int == 0)
         f.stub.handler = { _ in StubTransport.status(401) }
@@ -214,12 +214,11 @@ func accepted(_ s: StubTransport.Seen) -> HTTPReply {
 
 /// Answers nothing, after waiting out each call's timeout; records the timeouts it was given.
 final class SlowTransport: HTTPTransport {
-    private let lock = NSLock()
-    private var given: [TimeInterval] = []
-    var timeouts: [TimeInterval] { lock.withLock { given } }
+    private let given = Locked<[TimeInterval]>([])
+    var timeouts: [TimeInterval] { given.value }
 
     func send(_ request: URLRequest, timeout: TimeInterval) -> HTTPReply {
-        lock.withLock { given.append(timeout) }
+        given.withLock { $0.append(timeout) }
         Thread.sleep(forTimeInterval: timeout)
         return HTTPReply(status: 0, body: nil, error: "no answer in \(Int(timeout)) s")
     }

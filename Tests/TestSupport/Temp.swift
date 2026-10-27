@@ -55,11 +55,13 @@ public func pid(in path: String) -> pid_t? {
 /// Captures app log lines for one test at a time (the log sink is process-wide and
 /// suites run in parallel). Returns the lines written while `body` ran.
 private let captureLock = NSLock()
+private let dropLine: @Sendable (String) -> Void = { _ in }
+// nonisolated(unsafe): only read and written while holding `captureLock`.
 nonisolated(unsafe) private var quietOutsideCaptures = false
 public func capturingLog(_ body: () throws -> Void) rethrows -> [String] {
     captureLock.lock()
     // Reset the sink BEFORE releasing the lock, or the next test's sink gets reset.
-    defer { LogSink.set(quietOutsideCaptures ? { _ in } : nil); captureLock.unlock() }
+    defer { LogSink.set(quietOutsideCaptures ? dropLine : nil); captureLock.unlock() }
     let lines = LockedLines()
     LogSink.set { lines.append($0) }
     try body()
@@ -80,7 +82,7 @@ public func silenceUncapturedLog() {
     captureLock.lock()
     defer { captureLock.unlock() }
     quietOutsideCaptures = true
-    LogSink.set { _ in }
+    LogSink.set(dropLine)
 }
 
 /// The live machine's state, for heavy tests that need the owner present: screenpipe pauses

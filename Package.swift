@@ -8,13 +8,13 @@ import PackageDescription
 
 let package = Package(
     name: "LearnerDesktop",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v15)],
     targets: [
         .executableTarget(
             name: "LearnerDesktop",
             path: "menu-bar-app",
             exclude: ["com.benpollack.learner-desktop.plist", "learner-desktop", "Learner Desktop.app"],
-            swiftSettings: [.swiftLanguageMode(.v5)],
+            swiftSettings: [.swiftLanguageMode(.v6)],
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         .target(name: "TestSupport", path: "Tests/TestSupport", swiftSettings: [.swiftLanguageMode(.v5)]),

@@ -117,12 +117,12 @@ private final class UpdateCheckFixture {
     @Test func aVersionChangeRunsOnceAfterItSettles() {
         let f = UpdateCheckFixture(claude: "#!/bin/sh\necho '{\"type\":\"result\",\"session_id\":\"s-3\",\"result\":\"STATUS: OK\"}'\n")
         var c = f.check.config
-        var version = "1.0.0"
-        c.installedVersion = { version }
+        let version = Locked("1.0.0")
+        c.installedVersion = { version.value }
         c.settleSeconds = 0.5
         let check = ScreenpipeUpdateCheck(config: c)
         #expect(describe(check.runOnce()) == "idle") // baseline
-        version = "1.0.1"
+        version.value = "1.0.1"
         #expect(describe(check.runOnce()) == "idle") // seen, settling
         Thread.sleep(forTimeInterval: 0.6)
         #expect(describe(check.runOnce()) == "ok: STATUS: OK")

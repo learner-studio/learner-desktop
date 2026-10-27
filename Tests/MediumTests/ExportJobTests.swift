@@ -25,10 +25,11 @@ private let fakeAiVault = """
 private final class ExportFixture {
     let dir = TempDir("export")
     let job = JobName("export")
-    var afterRuns = 0
+    private let runsAfter = Locked(0)
+    var afterRuns: Int { runsAfter.value }
     let export: VaultExport
 
-    init(voice: VoiceTranscripts? = nil, cli: String? = nil, afterRun: (() -> Void)? = nil, configure: (inout VaultExport.Config) -> Void = { _ in }) {
+    init(voice: VoiceTranscripts? = nil, cli: String? = nil, afterRun: (@Sendable () -> Void)? = nil, configure: (inout VaultExport.Config) -> Void = { _ in }) {
         let script = dir.write("bin/ai-vault", fakeAiVault, mode: 0o755)
         dir.write("ai-vault-config.json", "{}")
         var c = VaultExport.Config()
@@ -46,10 +47,8 @@ private final class ExportFixture {
         c.orphanMarkers = []
         c.voice = voice
         configure(&c)
-        weak var box: ExportFixture?
-        c.afterRun = { box?.afterRuns += 1; afterRun?() }
+        c.afterRun = { [runsAfter] in runsAfter.withLock { $0 += 1 }; afterRun?() }
         export = VaultExport(config: c)
-        box = self
     }
 
     func output(_ provider: String, _ text: String, status: Int = 0) {

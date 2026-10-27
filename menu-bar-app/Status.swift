@@ -112,16 +112,16 @@ enum HTTPProbe {
 
     static func send(_ request: URLRequest) -> Response {
         let done = DispatchSemaphore(value: 0)
-        var result = Response(status: 0, data: nil, error: "no response")
+        let result = Locked(Response(status: 0, data: nil, error: "no response"))
         URLSession.shared.dataTask(with: request) { data, response, error in
-            result = Response(status: (response as? HTTPURLResponse)?.statusCode ?? 0, data: data,
-                              error: error?.localizedDescription)
+            result.value = Response(status: (response as? HTTPURLResponse)?.statusCode ?? 0, data: data,
+                                    error: error?.localizedDescription)
             done.signal()
         }.resume()
         if done.wait(timeout: .now() + request.timeoutInterval + 1) == .timedOut {
             return Response(status: 0, data: nil, error: "timed out")
         }
-        return result
+        return result.value
     }
 
     static func get(_ url: String, timeout: TimeInterval = 2) -> Response {
@@ -145,9 +145,21 @@ enum HTTPProbe {
 /// Collects AppStatus. Every change between two collections is logged under [Status].
 enum StatusProbe {
     static let log = Log("Status")
-    static var screenpipeURL = "http://localhost:3030"
-    static var serverHealthURL = LearnerAPI.baseURL + "/api/health"
-    static var vaultRoot = Paths.vault
+    private static let urls = Locked((screenpipe: "http://localhost:3030", serverHealth: LearnerAPI.baseURL + "/api/health",
+                                      vaultRoot: Paths.vault))
+    /// Tests point these at stand-ins.
+    static var screenpipeURL: String {
+        get { urls.value.screenpipe }
+        set { urls.withLock { $0.screenpipe = newValue } }
+    }
+    static var serverHealthURL: String {
+        get { urls.value.serverHealth }
+        set { urls.withLock { $0.serverHealth = newValue } }
+    }
+    static var vaultRoot: String {
+        get { urls.value.vaultRoot }
+        set { urls.withLock { $0.vaultRoot = newValue } }
+    }
     static let audioDevices = ["MacBook Pro Microphone (input)", "System Audio (output)"]
 
     /// Blocking; run by the Status job.
@@ -183,9 +195,8 @@ enum StatusProbe {
     /// screenpipe's /health. Restarts its audio devices when it reports none active.
     /// Restarting screenpipe's audio after it lost its devices: backs off 1 min doubling to
     /// 30 min while screenpipe keeps refusing, instead of retrying on every 8 s check.
-    private static var audioRestart = Backoff(base: 60, max: 1800, jitter: 0)
-    private static var nextAudioRestart = Date.distantPast
-    private static let restartLock = NSLock()
+    private struct AudioRestart { var backoff = Backoff(base: 60, max: 1800, jitter: 0), next = Date.distantPast }
+    private static let audioRestart = Locked(AudioRestart())
 
     static func screenpipe() -> AppStatus.Capture {
         let r = HTTPProbe.get(screenpipeURL + "/health")
@@ -203,7 +214,7 @@ enum StatusProbe {
             return .degraded("paused: \(capture["reason"] as? String ?? capture["status"] as? String ?? "waiting")")
         }
         if waiting { return .recording }
-        if capture["active_audio_devices"] as? Int == 0 { restartAudio() } else { restartLock.withLock { audioRestart.succeeded() } }
+        if capture["active_audio_devices"] as? Int == 0 { restartAudio() } else { audioRestart.withLock { $0.backoff.succeeded() } }
         let status = json["status"] as? String ?? "unknown"
         let frames = json["frame_status"] as? String ?? "unknown"
         let audio = json["audio_status"] as? String ?? "unknown"
@@ -213,7 +224,7 @@ enum StatusProbe {
     }
 
     private static func restartAudio() {
-        let due = restartLock.withLock { Date() >= nextAudioRestart }
+        let due = Date() >= audioRestart.value.next
         guard due else { return }
         log.warn("screenpipe reports no active audio devices; starting \(audioDevices.joined(separator: ", "))")
         var failed = false
@@ -225,20 +236,19 @@ enum StatusProbe {
                 log.warn("could not start \(device): \(said ?? start.error ?? "HTTP \(start.status)")")
             }
         }
-        restartLock.withLock {
+        audioRestart.withLock { r in
             if failed {
-                let wait = audioRestart.failed()
-                nextAudioRestart = Date().addingTimeInterval(wait)
+                let wait = r.backoff.failed()
+                r.next = Date().addingTimeInterval(wait)
                 log.warn("next audio restart in \(Job.describe(wait))")
             } else {
-                audioRestart.succeeded()
-                nextAudioRestart = .distantPast
+                r = AudioRestart()
             }
         }
     }
 
     /// Tests: forget the restart backoff.
-    static func resetAudioRestart() { restartLock.withLock { audioRestart.succeeded(); nextAudioRestart = .distantPast } }
+    static func resetAudioRestart() { audioRestart.value = AudioRestart() }
 
     static func logChanges(from a: AppStatus, to b: AppStatus, serverError: String?) {
         if a.capture != b.capture { log.info("screenpipe: \(describe(a.capture)) -> \(describe(b.capture))") }

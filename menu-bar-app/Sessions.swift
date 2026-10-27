@@ -22,10 +22,10 @@ enum CLISessions {
     private static let env = ProcessInfo.processInfo.environment
 
     /// Where learner-server is checked out (LEARNER_SERVER_REPO overrides).
-    static var repo = env["LEARNER_SERVER_REPO"] ?? NSHomeDirectory() + "/code/learner-server"
+    static let repo = env["LEARNER_SERVER_REPO"] ?? NSHomeDirectory() + "/code/learner-server"
     static var entry: String { repo + "/clients/uploader/src/index.ts" }
     /// The uploader's state folder (its own LEARNER_UPLOAD_STATE_DIR, else ~/.learner/uploader).
-    static var stateDir = env["LEARNER_UPLOAD_STATE_DIR"] ?? NSHomeDirectory() + "/.learner/uploader"
+    static let stateDir = env["LEARNER_UPLOAD_STATE_DIR"] ?? NSHomeDirectory() + "/.learner/uploader"
     static var statusPath: String { stateDir + "/status.json" }
 
     static var serverOnThisMac: Bool {
@@ -44,7 +44,7 @@ enum CLISessions {
     ]
 
     /// The uploader helper, or nil when learner-server runs on this Mac.
-    static func helper(key: @escaping () -> String?) -> ManagedHelper? {
+    static func helper(key: @escaping @Sendable () -> String?) -> ManagedHelper? {
         guard !serverOnThisMac else { return nil }
         return ManagedHelper(
             name: "uploader", executable: NSHomeDirectory() + "/.bun/bin/bun",

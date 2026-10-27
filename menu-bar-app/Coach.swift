@@ -12,12 +12,14 @@ import Foundation
 
 /// The visual cue every arm gets, baseline included: the arms differ only in what they
 /// add on top of it.
+@MainActor
 protocol CoachToast: AnyObject {
     func show(streak: TimeInterval, callApp: String?)
     func hide()
 }
 
 /// A floating panel that screen sharing and recording cannot see (sharingType = .none).
+@MainActor
 final class MonologueToastController: NSObject, CoachToast {
     static let shared = MonologueToastController()
 
@@ -99,7 +101,7 @@ final class MonologueToastController: NSObject, CoachToast {
     @objc func hide() {
         guard let p = panel, isShowing else { return }
         isShowing = false
-        NSAnimationContext.runAnimationGroup({ $0.duration = 0.2; p.animator().alphaValue = 0 }, completionHandler: { p.orderOut(nil) })
+        NSAnimationContext.runAnimationGroup({ $0.duration = 0.2; p.animator().alphaValue = 0 }, completionHandler: { [weak self] in MainActor.assumeIsolated { self?.panel?.orderOut(nil) } })
     }
 }
 
@@ -152,6 +154,7 @@ struct TreatmentSettings: Equatable {
 // MARK: - Coach
 
 
+@MainActor
 final class SpeakingCoach {
     static let shared: SpeakingCoach = {
         let api = ScreenpipeAPI.shared
@@ -161,13 +164,13 @@ final class SpeakingCoach {
     }()
 
     /// A turn shorter than this is a grunt, not a yield.
-    static let rewardMinSec: TimeInterval = 5
+    nonisolated static let rewardMinSec: TimeInterval = 5
     /// Turns shorter than this are not written.
-    static let minTurnSec: TimeInterval = 2
+    nonisolated static let minTurnSec: TimeInterval = 2
     /// Longest pause inside one turn (a 10 s chunk plus Whisper's margin).
-    static let silenceTimeout: TimeInterval = 14
+    nonisolated static let silenceTimeout: TimeInterval = 14
     /// Above this arrival lag the turn's timing is marked suspect.
-    static let maxTrustedIngestLagSec: TimeInterval = 10
+    nonisolated static let maxTrustedIngestLagSec: TimeInterval = 10
     /// A failing call poll ends the call only after this long without an answer.
     var callOutageGrace: TimeInterval = 120
     /// A turn's row waits at most this long for its stimulus and reward results.

@@ -4,6 +4,7 @@ import Testing
 import TestSupport
 
 /// A screenpipe that answers from a table in memory.
+@MainActor
 final class CannedScreenpipe {
     var meetings: Any = [[String: Any]]()
     var maxId: [String: Int] = ["meeting_transcript_segments": 0, "audio_transcriptions": 0]

@@ -25,12 +25,14 @@ private func defaultsValue(_ key: String) -> String? {
     return r.ok ? r.output.trimmingCharacters(in: .whitespacesAndNewlines) : nil
 }
 
+@MainActor
 final class SilentWearable: Wearable {
     var isEnabled = false
     func send(_ m: Modality, intensity: Int, reason: String, context: StimulusContext,
-              completion: @escaping (StimulusResult) -> Void) { completion(.notSent("heavy test")) }
+              completion: @escaping @MainActor (StimulusResult) -> Void) { completion(.notSent("heavy test")) }
 }
 
+@MainActor
 final class TimedToast: CoachToast {
     var firstShown: Date?
     func show(streak: TimeInterval, callApp: String?) { firstShown = firstShown ?? Date() }

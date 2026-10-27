@@ -64,14 +64,15 @@ private func read(_ relative: String) -> String { (try? String(contentsOfFile: V
 
     // MARK: Phase tag
 
-    @Test func everyTurnCarriesTheCapturePhase() throws {
+    @MainActor @Test func everyTurnCarriesTheCapturePhase() throws {
         // The same versions as the test below: CaptureEnvironment is process-wide.
         CaptureEnvironment.screenpipeAppVersion = "2.7.1"
         CaptureEnvironment.screenpipeVersion = "0.3.0"
         let rig = CoachRig(mode: .baseline)
         rig.monologue(0, 12)
         rig.say(13, 14, speaker: .other)
-        let m = meta(try #require(rig.rows.first))
+        let row = try #require(rig.rows.first)
+        let m = meta(row)
         #expect(m["capture_phase"] as? String == "screenpipe 2.7.1 / engine 0.3.0")
         #expect(m["screenpipe_app_version"] as? String == "2.7.1")
         #expect(m["screenpipe_version"] as? String == "0.3.0")

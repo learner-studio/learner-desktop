@@ -26,12 +26,14 @@ final class FakeScreenpipeData {
     }
 }
 
+@MainActor
 final class QuietWearable: Wearable {
     var isEnabled = false
     func send(_ m: Modality, intensity: Int, reason: String, context: StimulusContext,
-              completion: @escaping (StimulusResult) -> Void) { completion(.notSent("off")) }
+              completion: @escaping @MainActor (StimulusResult) -> Void) { completion(.notSent("off")) }
 }
 
+@MainActor
 final class QuietToast: CoachToast {
     func show(streak: TimeInterval, callApp: String?) {}
     func hide() {}

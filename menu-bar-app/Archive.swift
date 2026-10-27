@@ -553,7 +553,8 @@ enum ConversationContract {
 ///   synced   archived by archiveConversationDocuments
 ///   failed   refused by the server (400/422, or 413 on its own): parked until the file changes
 ///   skipped  no messages with text (empty or audio-only export): nothing to send
-final class ArchiveLedger {
+// @unchecked: the SQLite handle is only touched under `lock`.
+final class ArchiveLedger: @unchecked Sendable {
     struct Row: Equatable {
         let contentHash: String
         let documentId: String
@@ -736,8 +737,8 @@ final class ArchiveLedger {
 ///   other       failed
 ///
 /// Logs carry document ids and counts only, never titles or message text.
-final class Archive {
-    struct Config {
+final class Archive: Sendable {
+    struct Config: Sendable {
         var jobName = "Archive"
         var root = Paths.vault
         var ledgerPath = Paths.data + "/sync-ledger.sqlite"
@@ -790,13 +791,16 @@ final class Archive {
 
     let config: Config
     let rpc: LearnerRPC
-    private(set) var job: Job!
+    // nonisolated(unsafe): assigned once at the end of init (its body needs `self`); only read after.
+    nonisolated(unsafe) private(set) var job: Job!
     private let log = Log("Archive")
-    private let lock = NSLock()
-    private var ledgerHandle: ArchiveLedger?
-    private var lastSummary = "not run yet"
-    private var lastSweep: Date?
-    private var filesByProvider: [String: Int] = [:]
+    private struct State {
+        var ledger: ArchiveLedger?
+        var lastSummary = "not run yet"
+        var lastSweep: Date?
+        var filesByProvider: [String: Int] = [:]
+    }
+    private let state = Locked(State())
 
     init(rpc: LearnerRPC, config: Config = Config()) {
         self.rpc = rpc
@@ -807,19 +811,19 @@ final class Archive {
 
     var status: Status {
         let stats = (try? ledger())?.stats() ?? ArchiveLedger.Stats()
-        return lock.withLock {
-            Status(lastSummary: lastSummary, lastSweep: lastSweep, ledger: stats, filesByProvider: filesByProvider, problem: job.problem)
-        }
+        let s = state.value
+        return Status(lastSummary: s.lastSummary, lastSweep: s.lastSweep, ledger: stats, filesByProvider: s.filesByProvider,
+                      problem: job.problem)
     }
 
     /// Parked documents (refused by the server).
     var parkedCount: Int { status.ledger.failed }
 
     func ledger() throws -> ArchiveLedger {
-        try lock.withLock {
-            if let l = ledgerHandle { return l }
+        try state.withLock { s in
+            if let l = s.ledger { return l }
             let l = try ArchiveLedger(path: config.ledgerPath)
-            ledgerHandle = l
+            s.ledger = l
             return l
         }
     }
@@ -832,9 +836,9 @@ final class Archive {
             return .failed("cannot open the ledger: \(error.localizedDescription)")
         }
         let (summary, outcome) = sweep(ledger: ledger)
-        lock.withLock {
-            lastSummary = summary.describe
-            lastSweep = Date()
+        state.withLock {
+            $0.lastSummary = summary.describe
+            $0.lastSweep = Date()
         }
         return outcome
     }
@@ -849,7 +853,7 @@ final class Archive {
             let parts = (f as NSString).pathComponents
             if parts.count > rootDepth { counts[parts[rootDepth], default: 0] += 1 }
         }
-        lock.withLock { filesByProvider = counts }
+        state.withLock { $0.filesByProvider = counts }
 
         var s = Summary(discovered: files.count)
         var pending: [Pending] = []

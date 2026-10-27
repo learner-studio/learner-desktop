@@ -6,7 +6,8 @@ import CoreBluetooth
 import CommonCrypto
 
 // MARK: - Local SQLite Habit Trial Logger
-class HabitEventLogger {
+// @unchecked: every mutable field (db, closed, unwritten) is only touched on `queue`.
+final class HabitEventLogger: @unchecked Sendable {
     static let shared = HabitEventLogger()
 
     /// Written into habit_events.metadata.source so live rows are distinguishable.
@@ -113,6 +114,8 @@ class HabitEventLogger {
         wasRewarded: Bool,
         metadata: [String: Any] = [:]
     ) {
+        // Serialised here: the dictionary is not Sendable, its JSON is.
+        let metaJson = HabitEventLogger.metadataJSON(metadata, log: log)
         queue.async {
             guard !self.closed else {
                 self.log.warn("dropped a turn logged after shutdown (database closed)")
@@ -127,7 +130,7 @@ class HabitEventLogger {
                 treatmentArm: treatmentArm, turnDurationSec: turnDurationSec, wordsSpoken: wordsSpoken,
                 warningFiredAt: warningFiredAt, shockFiredAt: shockFiredAt, latencyToYieldSec: latencyToYieldSec,
                 breached30s: breached30s, breached60s: breached60s, wasRewarded: wasRewarded,
-                metaJson: HabitEventLogger.metadataJSON(metadata, log: self.log))
+                metaJson: metaJson)
             self.unwritten.append(turn)
             guard self.openLocked() else { return }
             // Oldest first; stop at the first failure and keep the rest for the next turn.
@@ -351,10 +354,10 @@ class HabitEventLogger {
 ///   no key         blocked: "no device key"
 ///   429/5xx/none   failed: the job backs off 2 s -> 5 min
 ///   other (404...) failed: retried in 30 min (a server or URL problem, not the rows')
-final class OutboxSender {
+final class OutboxSender: Sendable {
     static let maxBatch = 500
 
-    struct Config {
+    struct Config: Sendable {
         var jobName = "Outbox"
         var heartbeatJobName = "Heartbeat"
         var period: TimeInterval = 8
@@ -370,18 +373,21 @@ final class OutboxSender {
     let logger: HabitEventLogger
     let rpc: LearnerRPC
     let config: Config
-    private(set) var job: Job!
-    private(set) var heartbeatJob: Job!
+    // nonisolated(unsafe): assigned once at the end of init (their bodies need `self`); only read after.
+    nonisolated(unsafe) private(set) var job: Job!
+    nonisolated(unsafe) private(set) var heartbeatJob: Job!
     private let log = Log("Outbox")
 
-    /// One sender at a time: the job, or the drain at quit.
+    /// One sender at a time: the job, or the drain at quit (which waits with a deadline).
     private let sendLock = NSLock()
-    private let stateLock = NSLock()
-    private var batchLimit = OutboxSender.maxBatch
-    private var status = "not tried yet"
-    private var sentAt: Date?
-    private var heartbeat: (() -> [String: Any])?
-    private var stopOutcome: Job.Outcome = .idle
+    private struct State {
+        var batchLimit = OutboxSender.maxBatch
+        var status = "not tried yet"
+        var sentAt: Date?
+        var heartbeat: (@Sendable () -> [String: Any])?
+        var stopOutcome: Job.Outcome = .idle
+    }
+    private let state = Locked(State())
 
     init(logger: HabitEventLogger, rpc: LearnerRPC, config: Config = Config()) {
         self.logger = logger
@@ -397,8 +403,8 @@ final class OutboxSender {
     // MARK: Status for the menu
 
     /// The last thing the outbox did, e.g. "sent 3 (3 accepted, 0 duplicates)".
-    var lastStatus: String { stateLock.withLock { status } }
-    var lastSentAt: Date? { stateLock.withLock { sentAt } }
+    var lastStatus: String { state.value.status }
+    var lastSentAt: Date? { state.value.sentAt }
     /// No usable device key: missing from the Keychain, or refused by the server.
     var keyProblem: Bool { job.snapshot.blocked || heartbeatJob.snapshot.blocked }
     /// Rows waiting to be sent.
@@ -406,14 +412,14 @@ final class OutboxSender {
 
     /// The heartbeat's recordAppHeartbeat input (contract RecordAppHeartbeatInput), built
     /// only when a heartbeat is due. The tray provides it.
-    func setHeartbeatInput(_ input: @escaping () -> [String: Any]) { stateLock.withLock { heartbeat = input } }
+    func setHeartbeatInput(_ input: @escaping @Sendable () -> [String: Any]) { state.withLock { $0.heartbeat = input } }
 
     // MARK: Triggers
 
     /// Older callers tick from the status poll; the Scheduler ticks the jobs too, and a
     /// tick that is not due does nothing.
-    func tick(heartbeat input: @escaping () -> [String: Any]) {
-        if stateLock.withLock({ heartbeat == nil }) { setHeartbeatInput(input) }
+    func tick(heartbeat input: @escaping @Sendable () -> [String: Any]) {
+        if state.value.heartbeat == nil { setHeartbeatInput(input) }
         job.tick()
         heartbeatJob.tick()
     }
@@ -449,7 +455,7 @@ final class OutboxSender {
             case let .sent(n): sent += n
             case .parked: parked += 1
             case .halved: continue
-            case .stop: return stateLock.withLock { stopOutcome }
+            case .stop: return state.value.stopOutcome
             }
         }
     }
@@ -483,12 +489,12 @@ final class OutboxSender {
 
     /// One recordHabitEvents call for the oldest unsent rows. Caller holds `sendLock`.
     func sendBatch(timeout: TimeInterval) -> Step {
-        let limit = stateLock.withLock { batchLimit }
+        let limit = state.value.batchLimit
         guard let events = logger.unsentEvents(limit: limit) else {
             return stop(.failed("cannot read the trial database"), "cannot read the trial database")
         }
         guard !events.isEmpty else {
-            stateLock.withLock { batchLimit = OutboxSender.maxBatch }
+            state.withLock { $0.batchLimit = OutboxSender.maxBatch }
             return .empty
         }
         let ids = events.compactMap { $0["eventId"] as? String }
@@ -502,12 +508,12 @@ final class OutboxSender {
             }
             let body = r.body as? [String: Any]
             let note = "sent \(ids.count) (\(body?["accepted"] ?? "?") accepted, \(body?["duplicates"] ?? "?") duplicates)"
-            stateLock.withLock { sentAt = Date(); status = note }
+            state.withLock { $0.sentAt = Date(); $0.status = note }
             log.noisy(note)
             return .sent(ids.count)
         case .rejected, .tooLarge:
             if ids.count > 1 {
-                stateLock.withLock { batchLimit = max(1, ids.count / 2) }
+                state.withLock { $0.batchLimit = max(1, ids.count / 2) }
                 log.info("\(r.describe) for a batch of \(ids.count); halving it to find the refused row")
                 return .halved
             }
@@ -516,7 +522,7 @@ final class OutboxSender {
             }
             let why = r.kind == .tooLarge ? "too large (413)" : "refused (\(r.describe)\(r.message.map { ": \($0)" } ?? ""))"
             let note = "parked event \(ids.first ?? "?"): \(why)"
-            stateLock.withLock { batchLimit = OutboxSender.maxBatch; status = note }
+            state.withLock { $0.batchLimit = OutboxSender.maxBatch; $0.status = note }
             log.warn("\(note); kept locally, not resent")
             return .parked(ids.first ?? "?")
         case .auth:
@@ -534,16 +540,16 @@ final class OutboxSender {
     }
 
     private func stop(_ outcome: Job.Outcome, _ note: String) -> Step {
-        stateLock.withLock {
-            status = note
-            stopOutcome = outcome
+        state.withLock {
+            $0.status = note
+            $0.stopOutcome = outcome
         }
         return .stop(note)
     }
 
     /// The Heartbeat job body.
     func sendHeartbeat() -> Job.Outcome {
-        guard let build = stateLock.withLock({ heartbeat }) else { return .idle }
+        guard let build = state.value.heartbeat else { return .idle }
         let r = rpc.call("recordAppHeartbeat", build(), timeout: config.callTimeout)
         switch r.kind {
         case .ok: return .ok("sent")

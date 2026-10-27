@@ -10,24 +10,23 @@ import TestSupport
     @Test func quitSendsEveryQueuedTrialBeforeClosingTheDatabase() {
         let dir = TempDir("quit")
         let logger = HabitEventLogger(path: dir.file("trials.sqlite"))
-        func turn(_ i: Int) {
+        @Sendable func turn(_ i: Int) {
             logger.logTurn(sessionId: "s-\(i)", callApp: "Solo Mic", treatmentArm: "baseline", turnDurationSec: 12,
                            wordsSpoken: 30, warningFiredAt: nil, shockFiredAt: nil, latencyToYieldSec: nil,
                            breached30s: false, breached60s: false, wasRewarded: false)
         }
         for i in 0..<3 { turn(i) }
-        var order: [String] = []
-        var seenBySend = -1
-        let lock = NSLock()
+        let order = Locked<[String]>([])
+        let seenBySend = Locked(-1)
         let steps = TrayAppManager.shutdownSteps(
-            finishTurn: { lock.withLock { order.append("turn") }; turn(3) },   // the in-flight turn
+            finishTurn: { order.withLock { $0.append("turn") }; turn(3) },   // the in-flight turn
             logger: logger,
-            drain: { _ in lock.withLock { order.append("send"); seenBySend = logger.getUnsyncedCount() }; return 0 },
-            stopJobs: { lock.withLock { order.append("jobs") } },
-            stopTunnel: { lock.withLock { order.append("tunnel") } })
+            drain: { _ in order.withLock { $0.append("send") }; seenBySend.value = logger.getUnsyncedCount(); return 0 },
+            stopJobs: { order.withLock { $0.append("jobs") } },
+            stopTunnel: { order.withLock { $0.append("tunnel") } })
         _ = capturingLog { Shutdown.run(steps, total: 10) }
-        #expect(lock.withLock { order } == ["turn", "send", "jobs", "tunnel"])
-        #expect(seenBySend == 4)   // all four rows, read from an open database
+        #expect(order.value == ["turn", "send", "jobs", "tunnel"])
+        #expect(seenBySend.value == 4)   // all four rows, read from an open database
         #expect(steps.map(\.name).firstIndex(of: "send queued trials")! < steps.map(\.name).firstIndex(of: "close the trial database")!)
     }
 

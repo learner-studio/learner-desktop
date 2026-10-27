@@ -135,12 +135,12 @@ private func eventIds(_ req: HTTPStandIn.Request) -> [String] {
         run(b)
         // The block survives the restart (still shown), and is checked once at launch: a key
         // fixed while the app was down unblocks it with no click.
-        var ran = false
-        let b2 = Job(blockedName.name, period: 1, backoff: Backoff(base: 1, max: 1)) { _ in ran = true; return .ok("x") }
+        let ran = Locked(false)
+        let b2 = Job(blockedName.name, period: 1, backoff: Backoff(base: 1, max: 1)) { _ in ran.value = true; return .ok("x") }
         #expect(b2.snapshot.blocked)
         #expect(b2.problem == "needs the user")
         b2.tick()
         #expect(waitFor(3) { !b2.snapshot.blocked })
-        #expect(ran && b2.problem == nil)
+        #expect(ran.value && b2.problem == nil)
     }
 }

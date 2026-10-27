@@ -60,17 +60,19 @@ private func transcribe(_ wav: Data) async throws -> String {
 }
 
 /// Delivers the spans the test pushes.
+@MainActor
 final class PushedSpeech: SpeechSource {
     var queued: [SpeechSpan] = []
-    func poll(now: Date, deliver: @escaping ([SpeechSpan]) -> Void) {
+    func poll(now: Date, deliver: @escaping @MainActor ([SpeechSpan]) -> Void) {
         let q = queued
         queued = []
         deliver(q)
     }
 }
 
+@MainActor
 final class NoCalls: CallSource {
-    func poll(deliver: @escaping (CallPoll) -> Void) { deliver(.answered(CallState(app: "Audio benchmark", title: nil))) }
+    func poll(deliver: @escaping @MainActor (CallPoll) -> Void) { deliver(.answered(CallState(app: "Audio benchmark", title: nil))) }
 }
 
 @Suite("Coach, heavy: audio to warning latency", .quietLog,

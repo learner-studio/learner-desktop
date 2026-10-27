@@ -5,6 +5,7 @@ import TestSupport
 
 /// The whole coach, end to end on fixtures: speech spans -> streak -> 30 s / 60 s ->
 /// the arm's stimulus -> the trial row in SQLite.
+@MainActor
 @Suite("Coach workflow", .quietLog) struct CoachWorkflowTests {
     @Test func pavlokArmFiresEveryConfiguredModalityAndRecordsEachResult() throws {
         let rig = CoachRig(mode: .pavlokShock)

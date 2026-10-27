@@ -78,19 +78,19 @@ enum AiVaultOutput {
     @Test func aMissingCLIFailsAndSaysSoAndStillKicksTheArchive() {
         let dir = TempDir("export")
         let job = JobName("export")
-        var kicked = 0
+        let kicked = Locked(0)
         var c = VaultExport.Config()
         c.jobName = job.name
         c.cliPath = { nil }
         c.orphanMarkers = []
         c.voice = nil
         c.loginsPath = dir.file("logins.json")
-        c.afterRun = { kicked += 1 }
+        c.afterRun = { kicked.withLock { $0 += 1 } }
         let export = VaultExport(config: c)
         #expect(describe(export.runOnce()) == "failed: ai-vault CLI not found")
         #expect(export.lastSummary.contains("ai-vault CLI not found"))
         #expect(export.lastRun != nil)
-        #expect(kicked == 1)
+        #expect(kicked.value == 1)
     }
 
     @Test func expiredLoginsSurviveARestart() {

@@ -3,6 +3,7 @@ import Testing
 @testable import LearnerDesktop
 import TestSupport
 
+@MainActor
 @Suite("Pavlok", .quietLog) struct PavlokTests {
     @Test func eachStimulusIsOnePulseAtTheChosenLevel() {
         for v in [1, 5, 10, 25, 40, 75, 100] {
