@@ -197,6 +197,13 @@ import TestSupport
             #expect(b.snapshot.failures == 1)
             #expect(b.snapshot.summary == "down")
             #expect(b.snapshot.nextRun.timeIntervalSinceNow > 500)
+            // And the backoff carries on from there: the next failure is attempt 2 (2 × base).
+            let c = Job(name, period: 3600, backoff: Backoff(base: 600, max: 6000, jitter: 0), stateDir: dir.path) { _ in .failed("still down") }
+            let before = c.snapshot.lastRun
+            c.kick("test")
+            #expect(waitForRun(c, after: before))
+            #expect(c.snapshot.failures == 2)
+            #expect(c.snapshot.nextRun.timeIntervalSinceNow > 1100)
         }
     }
 }

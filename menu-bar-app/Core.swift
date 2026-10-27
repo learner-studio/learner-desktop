@@ -341,8 +341,10 @@ enum ChildProcess {
 /// and retries a failure with `backoff`. Its schedule and last outcome are kept in
 /// ~/.ai-aggregator/jobs/<name>.json, so a restart neither skips a backoff nor forgets a
 /// failure. Every run and outcome is logged under its name, and `problem` feeds the tray.
-// @unchecked: every mutable field is read and written under `lock`.
-final class Job: @unchecked Sendable {
+///
+/// The body is synchronous and runs on the job's own serial queue, so it may block on a
+/// child process, SQLite or HTTP. Everything mutable sits in one Mutex.
+final class Job: Sendable {
     enum Outcome: Sendable {
         /// Done; next run after `period` (or `next`, when given).
         case ok(String, next: TimeInterval? = nil)
@@ -383,14 +385,17 @@ final class Job: @unchecked Sendable {
     /// A blocked job is checked again once at launch and then this often, so a block that
     /// was wrong, or that the user fixed elsewhere, clears itself.
     let blockedRecheck: TimeInterval
-    private var backoff: Backoff
     private let body: @Sendable (Job) -> Outcome
     private let queue: DispatchQueue
-    private let lock = NSLock()
-    private var state: State
-    private var running = false
-    private var rerun = false
     private let statePath: String
+    /// The persisted state, plus what only lives while the app runs.
+    private struct Live {
+        var state: State
+        var backoff: Backoff
+        var running = false
+        var rerun = false
+    }
+    private let live: Mutex<Live>
 
     init(_ name: String, period: TimeInterval, firstRun: TimeInterval = 0, backoff: Backoff,
          problemGrace: TimeInterval = 0, quiet: Bool = false, stateDir: String = Job.stateDir,
@@ -398,7 +403,6 @@ final class Job: @unchecked Sendable {
         self.name = name
         self.log = Log(name)
         self.period = period
-        self.backoff = backoff
         self.problemGrace = problemGrace
         self.quiet = quiet
         self.blockedRecheck = blockedRecheck
@@ -407,6 +411,8 @@ final class Job: @unchecked Sendable {
         try? FileManager.default.createDirectory(atPath: stateDir, withIntermediateDirectories: true)
         statePath = "\(stateDir)/\(name).json"
         let fresh = State(nextRun: Date().addingTimeInterval(firstRun))
+        var restored = backoff
+        var state = fresh
         if let data = FileManager.default.contents(atPath: statePath),
            var saved = try? JSONDecoder().decode(State.self, from: data) {
             // A saved schedule is kept (a backoff survives restarts), but never later than
@@ -415,14 +421,13 @@ final class Job: @unchecked Sendable {
             // Blocked at the last launch: check once now that the app has started again.
             if saved.blocked { saved.nextRun = fresh.nextRun }
             state = saved
-            self.backoff.restore(failures: saved.failures)
-        } else {
-            state = fresh
+            restored.restore(failures: saved.failures)
         }
+        live = Mutex(Live(state: state, backoff: restored))
         Job.registry.withLock { $0.append(self) }
     }
 
-    var snapshot: State { lock.withLock { state } }
+    var snapshot: State { live.withLock { $0.state } }
 
     /// What the tray shows: blocked, or failing for longer than `problemGrace`.
     var problem: String? {
@@ -434,21 +439,21 @@ final class Job: @unchecked Sendable {
 
     /// Called by the Scheduler; runs the job when it is due.
     func tick() {
-        let due = lock.withLock { !running && Date() >= state.nextRun }
+        let due = live.withLock { !$0.running && Date() >= $0.state.nextRun }
         if due { start(reason: nil) }
     }
 
     /// Runs now (or right after the current run), clearing a block: after a sign-in, a
     /// menu click, a restored key.
     func kick(_ reason: String) {
-        lock.withLock { state.blocked = false }
+        live.withLock { $0.state.blocked = false }
         start(reason: reason)
     }
 
     private func start(reason: String?) {
-        let go: Bool = lock.withLock {
-            if running { rerun = true; return false }
-            running = true
+        let go: Bool = live.withLock {
+            if $0.running { $0.rerun = true; return false }
+            $0.running = true
             return true
         }
         guard go else { return }
@@ -460,50 +465,50 @@ final class Job: @unchecked Sendable {
         let started = Date()
         let outcome = body(self)
         let took = String(format: "%.1f s", Date().timeIntervalSince(started))
-        var again = false
-        lock.withLock {
-            running = false
-            again = rerun
-            rerun = false
+        let again: Bool = live.withLock { l in
+            defer { l.running = false; l.rerun = false }
+            let again = l.rerun
             let now = Date()
             switch outcome {
             case .idle:
                 if !quiet { log.info("nothing to do (\(took))") }
-                state.nextRun = now.addingTimeInterval(period)
-                return
+                l.state.nextRun = now.addingTimeInterval(period)
+                return again
             case let .ok(summary, next):
-                if state.problemSince != nil { log.info("recovered: \(summary)") }
+                if l.state.problemSince != nil { log.info("recovered: \(summary)") }
                 else if !quiet { log.info("ok in \(took): \(summary)") }
-                backoff.succeeded()
-                state.failures = 0
-                state.problemSince = nil
-                state.blocked = false
-                state.summary = summary
-                state.nextRun = now.addingTimeInterval(next ?? period)
+                l.backoff.succeeded()
+                l.state.failures = 0
+                l.state.problemSince = nil
+                l.state.blocked = false
+                l.state.summary = summary
+                l.state.nextRun = now.addingTimeInterval(next ?? period)
             case let .failed(summary, retryAfter):
                 // A fixed retry (a rate limit's) still counts as an attempt.
-                let backedOff = backoff.failed()
+                let backedOff = l.backoff.failed()
                 let wait = retryAfter ?? backedOff
-                state.failures = backoff.failures
-                state.problemSince = state.problemSince ?? now
-                state.summary = summary
-                state.nextRun = now.addingTimeInterval(wait)
-                log.warn("failed in \(took) (attempt \(state.failures)): \(summary); retrying in \(Job.describe(wait))")
+                l.state.failures = l.backoff.failures
+                l.state.problemSince = l.state.problemSince ?? now
+                l.state.summary = summary
+                l.state.nextRun = now.addingTimeInterval(wait)
+                log.warn("failed in \(took) (attempt \(l.state.failures)): \(summary); retrying in \(Job.describe(wait))")
             case let .blocked(summary):
-                if !state.blocked || state.summary != summary { log.warn("blocked: \(summary); waiting for the user (checking again in \(Job.describe(blockedRecheck)))") }
-                state.blocked = true
-                state.nextRun = now.addingTimeInterval(blockedRecheck)
-                state.problemSince = state.problemSince ?? now
-                state.summary = summary
+                if !l.state.blocked || l.state.summary != summary { log.warn("blocked: \(summary); waiting for the user (checking again in \(Job.describe(blockedRecheck)))") }
+                l.state.blocked = true
+                l.state.nextRun = now.addingTimeInterval(blockedRecheck)
+                l.state.problemSince = l.state.problemSince ?? now
+                l.state.summary = summary
             }
-            let routine = quiet && state.failures == 0 && state.problemSince == nil && !state.blocked
-            state.lastRun = now
-            if !routine { save() }
+            let routine = quiet && l.state.failures == 0 && l.state.problemSince == nil && !l.state.blocked
+            l.state.lastRun = now
+            // Under the lock, so two saves can never land out of order.
+            if !routine { save(l.state) }
+            return again
         }
         if again { start(reason: "queued while running") }
     }
 
-    private func save() {
+    private func save(_ state: State) {
         guard let data = try? JSONEncoder().encode(state) else { return }
         do { try data.write(to: URL(fileURLWithPath: statePath), options: .atomic) }
         catch { log.warn("cannot save job state: \(error.localizedDescription)") }
