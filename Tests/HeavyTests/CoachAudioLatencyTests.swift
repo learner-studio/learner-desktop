@@ -59,6 +59,33 @@ private func transcribe(_ wav: Data) async throws -> String {
     return (try JSONSerialization.jsonObject(with: data) as? [String: Any])?["text"] as? String ?? ""
 }
 
+/// screenpipe's transcription table, around a run: the test's speech goes only to the STT
+/// endpoint, which stores nothing. If that ever changes, the rows it left are tagged
+/// `learner-heavy-test` (so they can be found and removed) and the test fails.
+private enum ScreenpipeRows {
+    static func sql(_ q: String) -> [[String: Any]] {
+        var req = URLRequest(url: screenpipe.appendingPathComponent("raw_sql"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["query": q])
+        return (try? JSONSerialization.jsonObject(with: HTTPProbe.send(req).data ?? Data())) as? [[String: Any]] ?? []
+    }
+    static func maxId() -> Int { (sql("SELECT MAX(id) m FROM audio_transcriptions;").first?["m"] as? NSNumber)?.intValue ?? 0 }
+    /// New rows since `id` that contain the passage's opening words; each is tagged.
+    static func leftBehind(since id: Int) -> [Int] {
+        let ids = sql("SELECT id FROM audio_transcriptions WHERE id > \(id) AND (transcription LIKE '%explain the plan for our next project%' OR transcription LIKE '%successful result looks like%');")
+            .compactMap { ($0["id"] as? NSNumber)?.intValue }
+        for row in ids {
+            var tag = URLRequest(url: screenpipe.appendingPathComponent("tags/audio/\(row)"))
+            tag.httpMethod = "POST"
+            tag.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            tag.httpBody = try? JSONSerialization.data(withJSONObject: ["tags": ["learner-heavy-test"]])
+            _ = HTTPProbe.send(tag)
+        }
+        return ids
+    }
+}
+
 /// Delivers the spans the test pushes.
 final class PushedSpeech: SpeechSource {
     var queued: [SpeechSpan] = []
@@ -75,12 +102,17 @@ final class NoCalls: CallSource {
 
 @Suite("Coach, heavy: audio to warning latency", .quietLog,
        .enabled(if: env["LEARNER_HEAVY"] == "1", "heavy lane: set LEARNER_HEAVY=1"),
-       .enabled(if: env["LEARNER_HEAVY_AUDIO"] == "1", "runs screenpipe's STT for ~80 s: set LEARNER_HEAVY_AUDIO=1"),
-       .serialized)
+       .enabled(if: env["LEARNER_HEAVY_AUDIO"] != "0", "audio benchmark switched off (LEARNER_HEAVY_AUDIO=0)"),
+       .timeLimit(.minutes(2)), .serialized)
 struct CoachAudioLatencyTests {
     @MainActor
     @Test(arguments: [120, 200])
     func theWarningFollowsThirtySecondsOfSpeechWithinSixSeconds(wpm: Int) async throws {
+        let before = ScreenpipeRows.maxId()
+        defer {
+            let left = ScreenpipeRows.leftBehind(since: before)
+            #expect(left.isEmpty, "the test's speech was stored in screenpipe (rows \(left), tagged learner-heavy-test)")
+        }
         let dir = NSTemporaryDirectory() + "coach-audio-\(UUID().uuidString)"
         try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         let samples = try speech(wpm: wpm, dir: dir)

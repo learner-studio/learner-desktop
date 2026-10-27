@@ -134,9 +134,12 @@ scripts/install-hooks.sh  # pre-commit runs light (+ gitleaks); pre-push runs me
 - **Heavy** (`Tests/HeavyTests`, `LEARNER_HEAVY=1`) needs the real world: screenpipe on
   `:3030` (read-only queries), the real export and ledger, one ChatGPT read, learner-server
   health, and with `LEARNER_REMOTE_E2E=1` the deployed GrowthBook design over `ssh ovh`
-  (read-only). Each suite skips, with the reason, when its dependency is missing. The live
-  wristband test needs `LEARNER_HEAVY_PAVLOK=1`; the audio-latency test (which feeds speech
-  to screenpipe) needs `LEARNER_HEAVY_AUDIO=1`.
+  (read-only). It also builds the release binary and checks the signed bundle as it ships,
+  and runs the audio benchmark: synthesized speech through screenpipe's speech-to-text
+  endpoint into the coach, timing the 30 s warning (it checks that screenpipe stored none of
+  it; any row left behind is tagged `learner-heavy-test` and fails the test;
+  `LEARNER_HEAVY_AUDIO=0` skips it). Each suite skips, with the reason, when its dependency
+  is missing. The live wristband test needs `LEARNER_HEAVY_PAVLOK=1`. About 3–4 minutes.
 
 Two heavy suites really do stop and restart the capture stack and the installed app,
 and stay skipped even in the heavy lane unless you opt in a second time:

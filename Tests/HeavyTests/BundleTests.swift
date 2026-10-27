@@ -3,8 +3,8 @@ import Testing
 @testable import LearnerDesktop
 import TestSupport
 
-// build-app.sh packages and signs the app (BUNDLE_ONLY: no install, no launchctl), using
-// the binary the lanes already built. The bundle must run, carry the tunnel script with
+// The RELEASE binary (as it ships), packaged and signed by build-app.sh
+// (BUNDLE_ONLY: no install, no launchctl). The bundle must run, carry the tunnel script with
 // the marker its helper is recognised by, keep the bundle id that TCC and the Pavlok
 // settings are keyed to, and verify.
 @Suite("App bundle (build-app.sh)", .quietLog, .serialized, .timeLimit(.minutes(2)),
@@ -15,7 +15,8 @@ struct BundleTests {
         var env = ProcessInfo.processInfo.environment
         env["BUNDLE_ONLY"] = "1"
         env["OUT_DIR"] = out.path
-        env["LEARNER_BINARY"] = appBinary
+        // The release binary scripts/test.sh built for this lane (else build-app.sh compiles it).
+        if let release = env["LEARNER_RELEASE_BINARY"] { env["LEARNER_BINARY"] = release } else { env.removeValue(forKey: "LEARNER_BINARY") }
         let r = ChildProcess.run("/bin/bash", [toolsRepoRoot() + "/scripts/build-app.sh"], timeout: 110, env: env, stderr: true)
         #expect(r.status == 0, "\(r.output.suffix(600))")
         let app = out.file("Learner Desktop.app")

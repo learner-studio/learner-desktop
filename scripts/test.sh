@@ -11,8 +11,9 @@
 #                               stand-in servers, real timeouts. 60-180 s.
 #                               Runs before every push (.githooks/pre-push).
 #   heavy   Tests/HeavyTests    The live machine: screenpipe on :3030, ai-vault and
-#                               its logins, learner-server, the Pavlok if paired.
-#                               3+ min. Runs before every push. A suite skips (with
+#                               its logins, learner-server, the Pavlok if paired; the
+#                               release build and signed bundle; the audio benchmark
+#                               through screenpipe's speech-to-text. 3+ min. Runs before every push. A suite skips (with
 #                               a reason) when its dependency is missing. Anything
 #                               that would stop the owner's real recording stack also
 #                               needs LEARNER_HEAVY_DESTRUCTIVE=1.
@@ -46,6 +47,12 @@ run_lane() {
   start=$(date +%s)
   if [ "$lane" = heavy ]; then
     export LEARNER_HEAVY=1
+    # The heavy lane also checks the app as it ships: a release build, packaged and signed
+    # by build-app.sh (Tests/HeavyTests/BundleTests). Built here, so a slow compile does
+    # not count against a test's time limit; a failing release build fails the lane.
+    echo "building the release binary..."
+    swift build -c release --product LearnerDesktop >/dev/null || { echo "release build failed"; swift build -c release --product LearnerDesktop 2>&1 | grep -E "error" | head -20; return 1; }
+    export LEARNER_RELEASE_BINARY="$PWD/.build/release/LearnerDesktop"
   else
     # Light and medium never see the real app data or ai-vault export.
     local sandbox
