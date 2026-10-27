@@ -2,9 +2,9 @@
 """Fast lane: every operation in the app recovers on its own and never waits forever.
 
 From the 10-27 audit: helper programs waited on with no deadline (a hung export blocked
-every later one for 50 min), chats exported while the watcher was down never sent, a
-lone oversized habit event retried in a tight loop, a failed screenpipe poll ended the
-current call, and the tunnel script could kill a browser holding GrowthBook open.
+every later one for 50 min), a failed screenpipe poll ended the current call, and the
+tunnel script could kill a browser holding GrowthBook open. (The chat export, archive,
+outbox and update-check checks moved to the Swift lanes: Tests/{Light,Medium,Heavy}Tests.)
 """
 
 import os
@@ -31,10 +31,10 @@ class DurabilityTest(unittest.TestCase):
         cls.src = swift_source()
 
     def test_no_helper_program_is_waited_on_without_a_deadline(self):
-        # Only ChildProcess.run (deadline, stall watchdog, SIGKILL) and the export runner
-        # may block on a child; everything else goes through ChildProcess.run.
+        # Only ChildProcess.run (deadline, stall watchdog, SIGKILL) may block on a child;
+        # everything else goes through it.
         waits = [m.start() for m in re.finditer(r"waitUntilExit\(\)|readDataToEndOfFile\(\)", self.src)]
-        allowed = [body(self.src, "    static func run(_ executable: String"), body(self.src, "private func runLogged(")]
+        allowed = [body(self.src, "    static func run(_ executable: String")]
         for pos in waits:
             line = self.src.count("\n", 0, pos) + 1
             self.assertTrue(any(self.src[pos - 40:pos + 20] in a for a in allowed), f"unbounded wait at main.swift:{line}")
@@ -44,30 +44,9 @@ class DurabilityTest(unittest.TestCase):
         self.assertIn('ChildProcess.run("/usr/bin/security", ["find-generic-password", "-w", "-s", browser.keychainService', self.src)
         self.assertIn('ChildProcess.run(cli, ["setup", provider, "--cookies-file", path], timeout: 90', self.src)
 
-    def test_update_check_escalates_to_sigkill(self):
-        self.assertIn("if p.isRunning { kill(p.processIdentifier, SIGKILL) }", self.src)
-
     def test_a_helper_that_fails_to_start_is_retried(self):
         launch = body(self.src, "    private func launch() {")
         self.assertIn("self?.launch()", launch[launch.index("} catch {"):])
-
-    def test_watcher_catches_up_on_start_and_problems_reach_the_tray(self):
-        self.assertNotIn("--no-initial-sync", self.src)
-        self.assertNotIn("--no-initial-sync", read("src", "cli.ts"))
-        self.assertIn("sweep('startup')", read("src", "cli.ts"))
-        self.assertIn("config.sync.sweepIntervalMs", read("src", "cli.ts"))
-        self.assertIn('"/.ai-aggregator/status.json"', self.src)
-        self.assertIn('baseTitle = "🧠 🔴 SYNC"', self.src)
-
-    def test_a_lone_oversized_event_is_parked_not_retried_forever(self):
-        send = self.src[self.src.index("        case 413:"):]
-        send = send[:send.index("        default:")]
-        self.assertIn("if ids.count > 1", send)
-        self.assertIn("logger.mark(ids, as: 2)", send)
-
-    def test_a_failed_outbox_update_backs_off(self):
-        self.assertEqual(self.src.count("else { return markFailed() }"), 3)
-        self.assertIn("func mark(_ eventIds: [String], as state: Int) -> Bool", self.src)
 
     def test_trials_are_kept_until_saved(self):
         log = body(self.src, "    func logTurn(")

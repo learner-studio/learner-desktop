@@ -13,6 +13,7 @@ class HabitEventLogger {
     static let liveSource = "solo_mic_live_v2"
 
     private let dbPath: String
+    private let log = Log("Trials")
     private var db: OpaquePointer?
     private var closed = false
     /// Turns whose insert failed (disk full, locked, DB would not open): retried on the
@@ -36,12 +37,13 @@ class HabitEventLogger {
         }
     }
 
-    init() {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let dir = home + "/.ai-aggregator"
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        // LEARNER_OUTBOX_DB points tests (--drain-outbox) at a scratch database.
-        self.dbPath = ProcessInfo.processInfo.environment["LEARNER_OUTBOX_DB"] ?? dir + "/behavior_experiments.sqlite"
+    /// LEARNER_OUTBOX_DB points --drain-outbox at a scratch database; tests pass `path`.
+    init(path: String? = nil) {
+        let dir = NSHomeDirectory() + "/.ai-aggregator"
+        self.dbPath = path ?? ProcessInfo.processInfo.environment["LEARNER_OUTBOX_DB"] ?? dir + "/behavior_experiments.sqlite"
+        let parent = (dbPath as NSString).deletingLastPathComponent
+        do { try FileManager.default.createDirectory(atPath: parent, withIntermediateDirectories: true) }
+        catch { log.error("cannot create \(parent): \(error.localizedDescription)") }
         openAndInitDb()
     }
 
@@ -56,7 +58,7 @@ class HabitEventLogger {
         var handle: OpaquePointer?
         if sqlite3_open(dbPath, &handle) != SQLITE_OK {
             sqlite3_close(handle)
-            print("[HabitLogger] ❌ Failed to open SQLite DB at \(dbPath); will retry on the next turn")
+            log.error("cannot open the trial database at \(dbPath); will retry on the next turn")
             return false
         }
         db = handle
@@ -85,7 +87,7 @@ class HabitEventLogger {
             CREATE INDEX IF NOT EXISTS idx_habits_unsynced ON habit_events(synced_to_server);
             """
             if sqlite3_exec(self.db, createSql, nil, nil, nil) != SQLITE_OK {
-                print("[HabitLogger] ❌ Failed to initialize schema; will retry on the next turn")
+                log.error("cannot create the habit_events table: \(String(cString: sqlite3_errmsg(db))); will retry on the next turn")
                 sqlite3_close(db)
                 db = nil
                 return false
@@ -113,7 +115,7 @@ class HabitEventLogger {
     ) {
         queue.async {
             guard !self.closed else {
-                print("[HabitLogger] Dropped a turn logged after shutdown (DB closed).")
+                self.log.warn("dropped a turn logged after shutdown (database closed)")
                 return
             }
             // When the app drains a backlog of transcriptions, many turns finish within the
@@ -125,13 +127,22 @@ class HabitEventLogger {
                 treatmentArm: treatmentArm, turnDurationSec: turnDurationSec, wordsSpoken: wordsSpoken,
                 warningFiredAt: warningFiredAt, shockFiredAt: shockFiredAt, latencyToYieldSec: latencyToYieldSec,
                 breached30s: breached30s, breached60s: breached60s, wasRewarded: wasRewarded,
-                metaJson: (try? JSONSerialization.data(withJSONObject: metadata)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}")
+                metaJson: HabitEventLogger.metadataJSON(metadata, log: self.log))
             self.unwritten.append(turn)
             guard self.openLocked() else { return }
             // Oldest first; stop at the first failure and keep the rest for the next turn.
             while let next = self.unwritten.first, self.insert(next) { self.unwritten.removeFirst() }
-            fflush(stdout)
         }
+    }
+
+    static func metadataJSON(_ metadata: [String: Any], log: Log) -> String {
+        guard JSONSerialization.isValidJSONObject(metadata),
+              let data = try? JSONSerialization.data(withJSONObject: metadata),
+              let text = String(data: data, encoding: .utf8) else {
+            log.warn("turn metadata is not JSON (\(metadata.keys.sorted().joined(separator: ", "))); saved as {}")
+            return "{}"
+        }
+        return text
     }
 
     /// On `queue`, with the DB open.
@@ -146,7 +157,7 @@ class HabitEventLogger {
         """
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
-            print("[HabitLogger] ❌ sqlite3_prepare_v2 failed: \(String(cString: sqlite3_errmsg(db))); will retry")
+            log.error("insert: prepare failed: \(String(cString: sqlite3_errmsg(db))); will retry")
             return false
         }
         defer { sqlite3_finalize(stmt) }
@@ -170,10 +181,10 @@ class HabitEventLogger {
         sqlite3_bind_int(stmt, 15, t.wasRewarded ? 1 : 0)
         text(16, t.metaJson)
         guard sqlite3_step(stmt) == SQLITE_DONE else {
-            print("[HabitLogger] ❌ sqlite3_step failed: \(String(cString: sqlite3_errmsg(db))); will retry")
+            log.error("insert failed: \(String(cString: sqlite3_errmsg(db))); will retry")
             return false
         }
-        print("[HabitLogger] ✅ Logged \(t.habitType): arm=\(t.treatmentArm), dur=\(String(format: "%.1f", t.turnDurationSec))s, yieldLatency=\(t.latencyToYieldSec.map { String(format: "%.1f", $0) + "s" } ?? "none"), 30s=\(t.breached30s)")
+        log.info("logged \(t.habitType): arm=\(t.treatmentArm), dur=\(String(format: "%.1f", t.turnDurationSec))s, yieldLatency=\(t.latencyToYieldSec.map { String(format: "%.1f", $0) + "s" } ?? "none"), 30s=\(t.breached30s)")
         return true
     }
 
@@ -189,39 +200,52 @@ class HabitEventLogger {
             if !self.unwritten.isEmpty, self.openLocked() {
                 while let next = self.unwritten.first, self.insert(next) { self.unwritten.removeFirst() }
             }
-            if !self.unwritten.isEmpty { print("[HabitLogger] ❌ \(self.unwritten.count) trial(s) could not be saved before quit") }
+            if !self.unwritten.isEmpty { self.log.error("\(self.unwritten.count) trial(s) could not be saved before quit") }
             self.closed = true
             if let db = self.db {
                 sqlite3_close(db)
                 self.db = nil
-                print("[HabitLogger] SQLite closed cleanly.")
-                fflush(stdout)
+                self.log.info("trial database closed")
             }
         }
     }
 
-    func getUnsyncedCount() -> Int {
-        var count = 0
-        queue.sync {
-            guard let db = self.db else { return }
-            var stmt: OpaquePointer?
-            if sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM habit_events WHERE synced_to_server = 0;", -1, &stmt, nil) == SQLITE_OK {
-                if sqlite3_step(stmt) == SQLITE_ROW {
-                    count = Int(sqlite3_column_int(stmt, 0))
-                }
-                sqlite3_finalize(stmt)
-            }
+    /// Unsent rows; 0 (logged) when the database cannot be read. `unsyncedCount()` tells the two apart.
+    func getUnsyncedCount() -> Int { unsyncedCount() ?? 0 }
+
+    func unsyncedCount() -> Int? {
+        queue.sync { count("SELECT COUNT(*) FROM habit_events WHERE synced_to_server = 0;") }
+    }
+
+    /// Rows the server refused (synced_to_server = 2).
+    func parkedCount() -> Int {
+        queue.sync { count("SELECT COUNT(*) FROM habit_events WHERE synced_to_server = 2;") } ?? 0
+    }
+
+    /// On `queue`.
+    private func count(_ sql: String) -> Int? {
+        guard openLocked(), let db = db else { return nil }
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, sqlite3_step(stmt) == SQLITE_ROW else {
+            log.noisy("cannot count rows: \(String(cString: sqlite3_errmsg(db)))")
+            return nil
         }
-        return count
+        return Int(sqlite3_column_int64(stmt, 0))
     }
 
     /// Up to `limit` unsent rows as `recordHabitEvents` events (contract/desktop.ts,
     /// DesktopHabitEvent), oldest first. synced_to_server: 0 unsent, 1 sent, 2 parked
     /// (the server rejected the row itself with 422; kept for inspection, never resent).
-    func unsentEvents(limit: Int) -> [[String: Any]] {
-        var events: [[String: Any]] = []
+    /// nil when the database cannot be read (logged): not the same as an empty outbox.
+    func unsentEvents(limit: Int) -> [[String: Any]]? {
+        var events: [[String: Any]]? = []
         queue.sync {
-            guard let db = self.db else { return }
+            guard self.openLocked(), let db = self.db else {
+                self.log.noisy("cannot read the outbox: the trial database is not open")
+                events = nil
+                return
+            }
             let sql = """
             SELECT event_id, session_id, call_app, call_category, timestamp, habit_type, treatment_arm,
                    turn_duration_sec, words_spoken, warning_fired_at, shock_fired_at, latency_to_yield_sec,
@@ -229,7 +253,11 @@ class HabitEventLogger {
             FROM habit_events WHERE synced_to_server = 0 ORDER BY timestamp ASC LIMIT ?;
             """
             var stmt: OpaquePointer?
-            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+                self.log.noisy("cannot read the outbox: \(String(cString: sqlite3_errmsg(db)))")
+                events = nil
+                return
+            }
             sqlite3_bind_int(stmt, 1, Int32(limit))
             func text(_ i: Int32) -> String? {
                 sqlite3_column_type(stmt, i) == SQLITE_NULL ? nil : String(cString: sqlite3_column_text(stmt, i))
@@ -241,8 +269,12 @@ class HabitEventLogger {
                 return v.isFinite && v >= 0 ? v : NSNull()
             }
             while sqlite3_step(stmt) == SQLITE_ROW {
-                let meta = text(15).flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] } ?? [:]
-                events.append([
+                var meta: [String: Any] = [:]
+                if let raw = text(15) {
+                    if let parsed = (try? JSONSerialization.jsonObject(with: Data(raw.utf8))) as? [String: Any] { meta = parsed }
+                    else { self.log.noisy("event \(text(0) ?? "?"): metadata is not a JSON object; sent as {}") }
+                }
+                events?.append([
                     "eventId": text(0) ?? "",
                     "sessionId": text(1) ?? "",
                     "callApp": text(2) as Any? ?? NSNull(),
@@ -281,202 +313,247 @@ class HabitEventLogger {
     func mark(_ eventIds: [String], as state: Int) -> Bool {
         guard !eventIds.isEmpty else { return true }
         return queue.sync {
-            guard let db = self.db else { return false }
+            guard self.openLocked(), let db = self.db else {
+                self.log.error("cannot mark \(eventIds.count) row(s): the trial database is not open")
+                return false
+            }
             let placeholders = Array(repeating: "?", count: eventIds.count).joined(separator: ",")
             var stmt: OpaquePointer?
-            guard sqlite3_prepare_v2(db, "UPDATE habit_events SET synced_to_server = \(state) WHERE event_id IN (\(placeholders));", -1, &stmt, nil) == SQLITE_OK else { return false }
+            guard sqlite3_prepare_v2(db, "UPDATE habit_events SET synced_to_server = \(state) WHERE event_id IN (\(placeholders));", -1, &stmt, nil) == SQLITE_OK else {
+                self.log.error("cannot mark \(eventIds.count) row(s): \(String(cString: sqlite3_errmsg(db)))")
+                return false
+            }
             let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
             for (i, id) in eventIds.enumerated() {
                 sqlite3_bind_text(stmt, Int32(i + 1), (id as NSString).utf8String, -1, SQLITE_TRANSIENT)
             }
             let done = sqlite3_step(stmt) == SQLITE_DONE
+            if !done { self.log.error("cannot mark \(eventIds.count) row(s): \(String(cString: sqlite3_errmsg(db)))") }
             sqlite3_finalize(stmt)
             return done
         }
     }
 
     func getTotalTrialCount() -> Int {
-        var count = 0
-        queue.sync {
-            guard let db = self.db else { return }
-            var stmt: OpaquePointer?
-            if sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM habit_events WHERE habit_type = 'monologue_streak';", -1, &stmt, nil) == SQLITE_OK {
-                if sqlite3_step(stmt) == SQLITE_ROW {
-                    count = Int(sqlite3_column_int(stmt, 0))
-                }
-                sqlite3_finalize(stmt)
-            }
-        }
-        return count
+        queue.sync { count("SELECT COUNT(*) FROM habit_events WHERE habit_type = 'monologue_streak';") } ?? 0
     }
 }
 
-// MARK: - learner-server API
+// MARK: - Trial outbox
 
-/// HTTPS RPC to learner-server (spec: learner-server docs/learner-desktop-api.md; wire
-/// shapes pinned in contract/). The app no longer writes into Postgres or Hindsight
-/// over the SSH tunnel: rows wait in the local SQLite outbox and go out from here.
-enum LearnerAPI {
-    static let baseURL = ProcessInfo.processInfo.environment["LEARNER_API_URL"] ?? "https://dev.biztoolz.app/learner-api"
-    static let clientId = "ben-mbp"
-
-    /// The device key: LEARNER_API_KEY (tests), else the Keychain item the operator
-    /// stored with `security add-generic-password -s learner-server -a ben-mbp`. Read
-    /// through /usr/bin/security, which that item trusts, so a rebuilt app is not prompted.
-    static func deviceKey() -> String? {
-        if let k = ProcessInfo.processInfo.environment["LEARNER_API_KEY"], !k.isEmpty { return k }
-        // Bounded: a locked keychain's prompt would otherwise stall the outbox queue.
-        let r = ChildProcess.run("/usr/bin/security", ["find-generic-password", "-s", "learner-server", "-a", clientId, "-w"], timeout: 10)
-        let key = r.output.trimmingCharacters(in: .whitespacesAndNewlines)
-        return r.status == 0 && !key.isEmpty ? key : nil
-    }
-
-    /// POST {"data": input} to /rpc/<name>. Status 0 means no response at all.
-    static func call(_ name: String, _ input: [String: Any], key: String, timeout: TimeInterval = 20) -> (status: Int, body: Any?) {
-        guard let url = URL(string: "\(baseURL)/rpc/\(name)"),
-              let body = try? JSONSerialization.data(withJSONObject: ["data": input]) else { return (0, nil) }
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.timeoutInterval = timeout
-        req.setValue("application/json", forHTTPHeaderField: "content-type")
-        req.setValue(key, forHTTPHeaderField: "x-api-key")
-        req.httpBody = body
-        var result: (Int, Any?) = (0, nil)
-        let done = DispatchSemaphore(value: 0)
-        URLSession.shared.dataTask(with: req) { data, response, _ in
-            result = ((response as? HTTPURLResponse)?.statusCode ?? 0, data.flatMap { try? JSONSerialization.jsonObject(with: $0) })
-            done.signal()
-        }.resume()
-        _ = done.wait(timeout: .now() + timeout + 5)
-        return result
-    }
-}
-
-/// Drains the habit_events outbox with `recordHabitEvents` and sends a heartbeat every
-/// 5 minutes. The coaching loop never waits on it. Error handling per the spec: 422
-/// rejects a batch, so it is halved until the bad row is alone and parked; 401/403 is a
-/// key problem (🔑) and pauses sending; 413 halves the batch; 429/5xx/no answer backs
-/// off from 2 s to 5 min with jitter. Any non-2xx is a failure.
+/// Drains habit_events with `recordHabitEvents` (the "Outbox" job, every 8 s) and sends a
+/// heartbeat (the "Heartbeat" job, every 5 min). The coaching loop never waits on either.
+/// Per reply (same classes as the archive):
+///   2xx            rows marked sent (1)
+///   400 / 422      batch halved until the refused row is alone, then parked (2)
+///   413            batch halved; a lone row that is still too large is parked
+///   401 / 403      blocked: "device key refused" until Send Queued Trials Now
+///   no key         blocked: "no device key"
+///   429/5xx/none   failed: the job backs off 2 s -> 5 min
+///   other (404...) failed: retried in 30 min (a server or URL problem, not the rows')
 final class OutboxSender {
-    static let shared = OutboxSender()
     static let maxBatch = 500
 
-    private let work = DispatchQueue(label: "com.benpollack.learner-outbox", qos: .utility)
-    private var cachedKey: String?
-    private var batchLimit = maxBatch
-    private var backoff: TimeInterval = 2
-    private var nextAttempt = Date.distantPast
-    private var lastHeartbeat = Date.distantPast
-    private var running = false
+    struct Config {
+        var jobName = "Outbox"
+        var heartbeatJobName = "Heartbeat"
+        var period: TimeInterval = 8
+        var heartbeatPeriod: TimeInterval = 300
+        var heartbeatFirstRun: TimeInterval = 30
+        var callTimeout: TimeInterval = 20
+        var unexpectedRetry: TimeInterval = 30 * 60
+        var problemGrace: TimeInterval = 10 * 60
+    }
 
+    static let shared = OutboxSender(logger: .shared, rpc: .shared)
+
+    let logger: HabitEventLogger
+    let rpc: LearnerRPC
+    let config: Config
+    private(set) var job: Job!
+    private(set) var heartbeatJob: Job!
+    private let log = Log("Outbox")
+
+    /// One sender at a time: the job, or the drain at quit.
+    private let sendLock = NSLock()
+    private let stateLock = NSLock()
+    private var batchLimit = OutboxSender.maxBatch
+    private var status = "not tried yet"
+    private var sentAt: Date?
+    private var heartbeat: (() -> [String: Any])?
+    private var stopOutcome: Job.Outcome = .idle
+
+    init(logger: HabitEventLogger, rpc: LearnerRPC, config: Config = Config()) {
+        self.logger = logger
+        self.rpc = rpc
+        self.config = config
+        job = Job(config.jobName, period: config.period, backoff: Backoff(base: 2, max: 300),
+                  problemGrace: config.problemGrace, quiet: true) { [weak self] _ in self?.runOnce() ?? .idle }
+        heartbeatJob = Job(config.heartbeatJobName, period: config.heartbeatPeriod, firstRun: config.heartbeatFirstRun,
+                           backoff: Backoff(base: 60, max: 1800), problemGrace: config.problemGrace,
+                           quiet: true) { [weak self] _ in self?.sendHeartbeat() ?? .idle }
+    }
+
+    // MARK: Status for the menu
+
+    /// The last thing the outbox did, e.g. "sent 3 (3 accepted, 0 duplicates)".
+    var lastStatus: String { stateLock.withLock { status } }
+    var lastSentAt: Date? { stateLock.withLock { sentAt } }
     /// No usable device key: missing from the Keychain, or refused by the server.
-    private(set) var keyProblem = false
-    private(set) var lastSentAt: Date?
-    private(set) var lastStatus = "not tried yet"
+    var keyProblem: Bool { job.snapshot.blocked || heartbeatJob.snapshot.blocked }
+    /// Rows waiting to be sent.
+    var depth: Int { logger.getUnsyncedCount() }
 
-    /// Called on the 8 s status poll; drains in the background.
-    func tick(heartbeat: @escaping () -> [String: Any]) {
-        work.async {
-            guard !self.running else { return }
-            self.running = true
-            defer { self.running = false }
-            while self.sendOneBatch() == .more {}
-            self.sendHeartbeatIfDue(heartbeat())
+    /// The heartbeat's recordAppHeartbeat input (contract RecordAppHeartbeatInput), built
+    /// only when a heartbeat is due. The tray provides it.
+    func setHeartbeatInput(_ input: @escaping () -> [String: Any]) { stateLock.withLock { heartbeat = input } }
+
+    // MARK: Triggers
+
+    /// Older callers tick from the status poll; the Scheduler ticks the jobs too, and a
+    /// tick that is not due does nothing.
+    func tick(heartbeat input: @escaping () -> [String: Any]) {
+        if stateLock.withLock({ heartbeat == nil }) { setHeartbeatInput(input) }
+        job.tick()
+        heartbeatJob.tick()
+    }
+
+    /// "Send Queued Trials Now": re-reads the key and clears a block.
+    func sendNow() {
+        rpc.forgetKey()
+        job.kick("send now")
+        if heartbeatJob.snapshot.blocked { heartbeatJob.kick("send now") }
+    }
+
+    // MARK: Sending
+
+    enum Step: Equatable {
+        case empty
+        case sent(Int)
+        case parked(String)
+        case halved
+        case stop(String)
+    }
+
+    /// The job body: send until the outbox is empty or a send fails.
+    func runOnce() -> Job.Outcome {
+        sendLock.lock()
+        defer { sendLock.unlock() }
+        var sent = 0
+        var parked = 0
+        while true {
+            switch sendBatch(timeout: config.callTimeout) {
+            case .empty:
+                guard sent + parked > 0 else { return idleOrRecovered(job, "outbox empty") }
+                return .ok("sent \(sent)" + (parked > 0 ? ", parked \(parked)" : ""))
+            case let .sent(n): sent += n
+            case .parked: parked += 1
+            case .halved: continue
+            case .stop: return stateLock.withLock { stopOutcome }
+            }
         }
     }
 
     /// Send everything now, blocking, until the outbox is empty, sending fails or
-    /// `deadline` passes. Used at quit and by --drain-outbox.
+    /// `deadline` passes; no single call runs past the deadline. Used at quit and by
+    /// --drain-outbox. Returns the rows still unsent.
     @discardableResult
     func drain(until deadline: Date) -> Int {
-        work.sync {
-            nextAttempt = .distantPast
-            while Date() < deadline, sendOneBatch() == .more {}
+        guard sendLock.lock(before: deadline) else {
+            log.warn("drain: a send was still running at the deadline")
+            return logger.getUnsyncedCount()
         }
-        return HabitEventLogger.shared.getUnsyncedCount()
+        defer { sendLock.unlock() }
+        loop: while true {
+            let left = deadline.timeIntervalSinceNow
+            guard left > 0.05 else {
+                log.warn("drain: out of time")
+                break
+            }
+            switch sendBatch(timeout: min(config.callTimeout, left)) {
+            case .empty: break loop
+            case .sent, .parked, .halved: continue
+            case let .stop(why):
+                log.warn("drain stopped: \(why)")
+                break loop
+            }
+        }
+        return logger.getUnsyncedCount()
     }
 
-    func sendNow() {
-        work.async { self.nextAttempt = .distantPast; self.keyProblem = false; self.cachedKey = nil }
-    }
-
-    private enum Step { case more, idle, failed }
-
-    private func key() -> String? {
-        if cachedKey == nil { cachedKey = LearnerAPI.deviceKey() }
-        keyProblem = cachedKey == nil
-        return cachedKey
-    }
-
-    private func sendOneBatch() -> Step {
-        guard Date() >= nextAttempt else { return .idle }
-        let logger = HabitEventLogger.shared
-        let events = logger.unsentEvents(limit: batchLimit)
-        guard !events.isEmpty else { batchLimit = OutboxSender.maxBatch; return .idle }
-        guard let key = key() else { lastStatus = "no device key"; nextAttempt = Date().addingTimeInterval(300); return .failed }
+    /// One recordHabitEvents call for the oldest unsent rows. Caller holds `sendLock`.
+    func sendBatch(timeout: TimeInterval) -> Step {
+        let limit = stateLock.withLock { batchLimit }
+        guard let events = logger.unsentEvents(limit: limit) else {
+            return stop(.failed("cannot read the trial database"), "cannot read the trial database")
+        }
+        guard !events.isEmpty else {
+            stateLock.withLock { batchLimit = OutboxSender.maxBatch }
+            return .empty
+        }
         let ids = events.compactMap { $0["eventId"] as? String }
-        let (status, body) = LearnerAPI.call("recordHabitEvents", ["clientId": LearnerAPI.clientId, "events": events], key: key)
-        switch status {
-        case 200..<300:
+        let r = rpc.call("recordHabitEvents", ["clientId": rpc.clientId, "events": events], timeout: timeout)
+        switch r.kind {
+        case .ok:
             // The server dedupes by eventId, so a resend after a failed mark is harmless,
             // but it must back off rather than resend in a tight loop.
-            guard logger.mark(ids, as: 1) else { return markFailed() }
-            lastSentAt = Date()
-            backoff = 2
-            lastStatus = "sent \(ids.count) (\((body as? [String: Any])?["accepted"] ?? "?") accepted, \((body as? [String: Any])?["duplicates"] ?? "?") duplicates)"
-            log(lastStatus)
-            return .more
-        case 422:
-            if ids.count > 1 {
-                batchLimit = max(1, ids.count / 2)
-                return .more
+            guard logger.mark(ids, as: 1) else {
+                return stop(.failed("could not update the local outbox database"), "could not update the local outbox database")
             }
-            guard logger.mark(ids, as: 2) else { return markFailed() }
-            lastStatus = "parked event \(ids[0]): \((body as? [String: Any])?["message"] ?? "rejected")"
-            log(lastStatus)
-            return .more
-        case 401, 403:
-            keyProblem = true
-            cachedKey = nil
-            nextAttempt = Date().addingTimeInterval(300)
-            lastStatus = "device key refused (\(status))"
-        case 413:
+            let body = r.body as? [String: Any]
+            let note = "sent \(ids.count) (\(body?["accepted"] ?? "?") accepted, \(body?["duplicates"] ?? "?") duplicates)"
+            stateLock.withLock { sentAt = Date(); status = note }
+            log.noisy(note)
+            return .sent(ids.count)
+        case .rejected, .tooLarge:
             if ids.count > 1 {
-                batchLimit = max(1, ids.count / 2)
-                return .more
+                stateLock.withLock { batchLimit = max(1, ids.count / 2) }
+                log.info("\(r.describe) for a batch of \(ids.count); halving it to find the refused row")
+                return .halved
             }
-            // One event too large on its own will never fit: park it like a 422.
-            guard logger.mark(ids, as: 2) else { return markFailed() }
-            lastStatus = "parked event \(ids[0]): too large (413)"
-            log(lastStatus)
-            return .more
-        default:
-            nextAttempt = Date().addingTimeInterval(backoff * Double.random(in: 0.5...1.0))
-            backoff = min(backoff * 2, 300)
-            lastStatus = status == 0 ? "server unreachable" : "server error \(status)"
+            guard logger.mark(ids, as: 2) else {
+                return stop(.failed("could not update the local outbox database"), "could not update the local outbox database")
+            }
+            let why = r.kind == .tooLarge ? "too large (413)" : "refused (\(r.describe)\(r.message.map { ": \($0)" } ?? ""))"
+            let note = "parked event \(ids.first ?? "?"): \(why)"
+            stateLock.withLock { batchLimit = OutboxSender.maxBatch; status = note }
+            log.warn("\(note); kept locally, not resent")
+            return .parked(ids.first ?? "?")
+        case .auth:
+            return stop(.blocked("device key refused (\(r.describe)): fix Keychain item learner-server / ben-mbp, then Send Queued Trials Now"),
+                        "device key refused (\(r.describe))")
+        case .noKey:
+            return stop(.blocked("no device key: add Keychain item learner-server / ben-mbp, then Send Queued Trials Now"), "no device key")
+        case .transient:
+            let note = r.status == 0 ? "server unreachable: \(r.error ?? "no answer")" : "server error \(r.status)"
+            return stop(.failed(note), note)
+        case .unexpected:
+            let note = "unexpected \(r.describe) from \(rpc.baseURL)"
+            return stop(.failed(note, retryAfter: config.unexpectedRetry), note)
         }
-        log(lastStatus)
-        return .failed
     }
 
-    private func markFailed() -> Step {
-        nextAttempt = Date().addingTimeInterval(backoff)
-        backoff = min(backoff * 2, 300)
-        lastStatus = "could not update the local outbox database"
-        log(lastStatus)
-        return .failed
+    private func stop(_ outcome: Job.Outcome, _ note: String) -> Step {
+        stateLock.withLock {
+            status = note
+            stopOutcome = outcome
+        }
+        return .stop(note)
     }
 
-    private func sendHeartbeatIfDue(_ input: [String: Any]) {
-        guard Date().timeIntervalSince(lastHeartbeat) >= 300, let key = key() else { return }
-        lastHeartbeat = Date()
-        let (status, _) = LearnerAPI.call("recordAppHeartbeat", input, key: key)
-        if status == 401 || status == 403 { keyProblem = true; cachedKey = nil }
-        if !(200..<300).contains(status) { log("heartbeat failed (\(status))") }
-    }
-
-    private func log(_ message: String) {
-        print("[Outbox] \(message)")
-        fflush(stdout)
+    /// The Heartbeat job body.
+    func sendHeartbeat() -> Job.Outcome {
+        guard let build = stateLock.withLock({ heartbeat }) else { return .idle }
+        let r = rpc.call("recordAppHeartbeat", build(), timeout: config.callTimeout)
+        switch r.kind {
+        case .ok: return .ok("sent")
+        case .auth: return .blocked("device key refused (\(r.describe))")
+        case .noKey: return .blocked("no device key")
+        case .transient: return .failed(r.status == 0 ? "server unreachable: \(r.error ?? "no answer")" : "server error \(r.status)")
+        case .rejected, .tooLarge, .unexpected:
+            // A refused heartbeat is the app's bug or the server's; resending it soon won't help.
+            return .failed("heartbeat refused (\(r.describe)\(r.message.map { ": \($0)" } ?? ""))", retryAfter: config.unexpectedRetry)
+        }
     }
 }
+
