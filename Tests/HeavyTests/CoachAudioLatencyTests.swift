@@ -88,7 +88,7 @@ struct CoachAudioLatencyTests {
 
         let pushed = PushedSpeech()
         let toast = TimedToast()
-        let settings = CoachSettings(defaults: UserDefaults(suiteName: "coach-audio-\(UUID().uuidString)")!)
+        let settings = CoachSettings(defaults: ScratchDefaults("coach-audio"))
         settings.assignmentMode = .baseline
         let (logger, _) = heavyLogger()
         let coach = SpeakingCoach(settings: settings, speech: pushed, calls: NoCalls(), wearable: SilentWearable(),

@@ -75,15 +75,23 @@ struct ChatGPTLiveTests {
         let cookie = try #require(voice.savedCookieHeader())
         let session = voice.openSession(cookie: cookie)
         guard let token = session.token else {
-            // An expired login is the user's to renew (menu: Sign In Again), not a test failure.
-            Swift.print("skipped: ChatGPT session not available (\(session.stop?.rawValue ?? "?"): \(session.detail ?? ""))")
+            // An expired login is the user's to renew (menu: Sign In Again), and a rate limit
+            // passes: both are reported as known issues (not a pass, not a failure).
             #expect(session.stop == .loginExpired || session.stop == .rateLimited, "unexpected: \(session.detail ?? "")")
+            withKnownIssue("ChatGPT session not available; the conversation read was not checked") {
+                Issue.record("\(session.stop?.rawValue ?? "?"): \(session.detail ?? "")")
+            }
             return
         }
         let id = try #require(ConversationParser.findConversationFiles(vaultRoot, provider: "chatgpt").last
             .map { (($0 as NSString).deletingLastPathComponent as NSString).lastPathComponent })
         let r = voice.fetchConversation(id, cookie: cookie, token: token)
-        if r.status == 429 { Swift.print("skipped: ChatGPT rate limit"); return }
+        if r.status == 429 {
+            withKnownIssue("ChatGPT rate limit; the conversation read was not checked") {
+                Issue.record("HTTP 429 from chatgpt.com")
+            }
+            return
+        }
         #expect(r.status == 200 || r.status == 404, "HTTP \(r.status) \(r.error ?? "")")
         if r.status == 200 { #expect(r.body?["mapping"] is [String: Any]) }
     }
@@ -97,9 +105,9 @@ struct LearnerServerLiveTests {
     }
 
     @Test(.enabled(if: VaultExport.installedCLI() != nil, "ai-vault is not installed under nvm"))
-    func theAiVaultCLIIsInstalledAndRuns() {
+    func theAiVaultCLIIsInstalledAndRuns() throws {
         // --help only prints: the export's `backup` command must be there.
-        let r = ChildProcess.run(VaultExport.installedCLI()!, ["--help"], timeout: 30, env: ChildProcess.toolEnvironment, stderr: true)
+        let r = ChildProcess.run(try #require(VaultExport.installedCLI()), ["--help"], timeout: 30, env: ChildProcess.toolEnvironment, stderr: true)
         #expect(r.status == 0, "ai-vault --help: \(r.stopped ?? r.output)")
         #expect(r.output.contains("backup"))
     }

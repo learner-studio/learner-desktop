@@ -9,9 +9,9 @@ import TestSupport
 @Suite("screenpipe sign-in flag (live)", .enabled(if: ProcessInfo.processInfo.environment["LEARNER_HEAVY"] == "1"))
 struct ScreenpipeFlagTests {
     @Test func theRunningScreenpipeCanRecordWithoutASignIn() throws {
-        let running = NSRunningApplication.runningApplications(withBundleIdentifier: "screenpi.pe").first
-        try #require(running != nil, "screenpipe is not running")
-        let env = ChildProcess.commandLine(running!.processIdentifier, includeEnvironment: true) ?? ""
+        let running = try #require(NSRunningApplication.runningApplications(withBundleIdentifier: "screenpi.pe").first,
+                                    "screenpipe is not running")
+        let env = ChildProcess.commandLine(running.processIdentifier, includeEnvironment: true) ?? ""
         let answers = HTTPProbe.get(StatusProbe.screenpipeURL + "/health").status == 200
         #expect(env.contains("SCREENPIPE_SKIP_ONBOARDING=1") || answers)
     }

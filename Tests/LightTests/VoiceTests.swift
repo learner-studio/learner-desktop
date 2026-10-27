@@ -48,7 +48,7 @@ enum VoiceFixture {
     }
 }
 
-@Suite("Voice transcripts", .timeLimit(.minutes(1))) struct VoiceTests {
+@Suite("Voice transcripts", .quietLog, .timeLimit(.minutes(1))) struct VoiceTests {
     @Test func aVoiceChatWithoutTextIsFoundATypedOneIsNot() {
         #expect(VoiceTranscripts.hasVoiceGaps(VoiceFixture.md))
         #expect(!VoiceTranscripts.hasVoiceGaps(VoiceFixture.md.replacingOccurrences(of: #"\[audio: [^\]]+\]"#, with: "[image: x]", options: .regularExpression)))
@@ -135,10 +135,11 @@ enum VoiceFixture {
         _ = dir
     }
 
-    @Test func requestsCarryAiVaultsCookiesTheBearerTokenAndASafariAgent() {
+    @Test func requestsCarryAiVaultsCookiesTheBearerTokenAndASafariAgent() throws {
         let (dir, c, _) = setUp(["c1"])
         let stub = chatgpt([:])
         _ = VoiceTranscripts(config: c, transport: stub).run()
+        try #require(stub.seen.count >= 2)
         let session = stub.seen[0], convo = stub.seen[1]
         #expect(session.path == "/api/auth/session")
         #expect(session.headers["Cookie"] == "__Secure-next-auth.session-token.0=fake-a; oai-did=fake-b")

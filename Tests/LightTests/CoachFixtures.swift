@@ -48,13 +48,8 @@ final class FakeToast: CoachToast {
     func hide() { visible = false }
 }
 
-/// A throwaway UserDefaults suite.
-func scratchDefaults() -> UserDefaults {
-    let name = "learner-coach-test-" + UUID().uuidString
-    let d = UserDefaults(suiteName: name)!
-    d.removePersistentDomain(forName: name)
-    return d
-}
+/// A throwaway UserDefaults suite, removed (with its plist) once the test lets go of it.
+func scratchDefaults() -> UserDefaults { ScratchDefaults("learner-coach-test") }
 
 private let envLock = NSLock()
 

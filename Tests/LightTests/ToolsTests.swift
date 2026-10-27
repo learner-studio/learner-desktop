@@ -10,7 +10,7 @@ func toolIO(_ p: Printed, env: [String: String] = [:], cwd: String = NSTemporary
     ToolIO(out: p.out, err: p.err, env: env, cwd: cwd)
 }
 
-@Suite("Tools: shared helpers") struct ToolsHelperTests {
+@Suite("Tools: shared helpers", .quietLog) struct ToolsHelperTests {
     @Test func shellQuoteMatchesShlex() {
         #expect(Tools.shellQuote("plain-word") == "plain-word")
         #expect(Tools.shellQuote(#"it's "x""#) == #"'it'"'"'s "x"'"#)
@@ -23,14 +23,18 @@ func toolIO(_ p: Printed, env: [String: String] = [:], cwd: String = NSTemporary
         #expect(Tools.main([], io: toolIO(p)) == 2)
     }
 
-    @Test func repoRootIsFoundFromASubdirectory() {
-        let root = toolsRepoRoot()
-        #expect(Tools.repoRoot(from: root + "/menu-bar-app") == root)
+    @Test func repoRootIsFoundFromASubdirectory() throws {
+        let root = (toolsRepoRoot() as NSString).resolvingSymlinksInPath
+        #expect(Tools.repoRoot(from: toolsRepoRoot() + "/menu-bar-app") == root)
         #expect(Tools.repoRoot(from: "/") == nil)
+        // Reached through a symlink (as /tmp -> /private/tmp is), the root is still the real path.
+        let dir = TempDir("repo-link")
+        try FileManager.default.createSymbolicLink(atPath: dir.file("link"), withDestinationPath: root)
+        #expect(Tools.repoRoot(from: dir.file("link") + "/menu-bar-app") == root)
     }
 }
 
-@Suite("Tools: GrowthBook design") struct GrowthBookDesignTests {
+@Suite("Tools: GrowthBook design", .quietLog) struct GrowthBookDesignTests {
     @Test func factSQLSelectsEveryDimensionFromTheTreatmentSettings() {
         for d in GrowthBookDesign.dimensions { #expect(GrowthBookDesign.sql.contains(" cfg->>'\(d)' AS \(d)")) }
         #expect(GrowthBookDesign.sql.hasPrefix("WITH tagged AS (\n SELECT *, metadata->'treatment_settings' AS cfg FROM habit_events\n"))
@@ -80,7 +84,7 @@ func toolIO(_ p: Printed, env: [String: String] = [:], cwd: String = NSTemporary
     }
 }
 
-@Suite("Tools: start-capture-phase") struct CapturePhaseTests {
+@Suite("Tools: start-capture-phase", .quietLog) struct CapturePhaseTests {
     static let config = """
         {
           "_comment": "fixture",
@@ -142,7 +146,7 @@ func toolIO(_ p: Printed, env: [String: String] = [:], cwd: String = NSTemporary
 
 // MARK: - Vault report
 
-@Suite("Tools: vault-report") struct VaultReportTests {
+@Suite("Tools: vault-report", .quietLog) struct VaultReportTests {
     static let secret = "SECRET-CONVERSATION-TEXT"
 
     static func conversation(messages: Int, created: Bool = true) -> String {
@@ -187,7 +191,7 @@ func toolIO(_ p: Printed, env: [String: String] = [:], cwd: String = NSTemporary
 
 // MARK: - Policy
 
-@Suite("Tools: retired routes") struct ToolsPolicyTests {
+@Suite("Tools: retired routes", .quietLog) struct ToolsPolicyTests {
     /// The app used to write habit rows straight into Postgres over an SSH tunnel
     /// (:15432, a habits_writer role) and conversations into Hindsight (:18925). Since
     /// 2026-10-22 everything goes through learner-server's HTTPS RPC API.
@@ -205,7 +209,7 @@ func toolIO(_ p: Printed, env: [String: String] = [:], cwd: String = NSTemporary
     }
 }
 
-@Suite("Preflight comparison") struct PreflightCompareTests {
+@Suite("Preflight comparison", .quietLog) struct PreflightCompareTests {
     @Test func aRedactedArrayEntryMatchesAnyOneLiveEntry() {
         let want: [Any] = [Preflight.redacted, "MacBook Pro Microphone (input)", "System Audio (output)"]
         #expect(Preflight.equal(["Someone’s AirPods (input)", "MacBook Pro Microphone (input)", "System Audio (output)"], want))

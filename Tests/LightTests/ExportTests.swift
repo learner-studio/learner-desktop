@@ -19,7 +19,7 @@ enum AiVaultOutput {
     static let rateLimited = "Errors: 1\n  • Archive process failed: page.evaluate: Error: API request failed: 429 Too Many Requests"
 }
 
-@Suite("Chat export", .timeLimit(.minutes(1))) struct ExportTests {
+@Suite("Chat export", .quietLog, .timeLimit(.minutes(1))) struct ExportTests {
     @Test func expiredLoginsAreRecognised() {
         for sample in AiVaultOutput.expired {
             #expect(VaultExport.classify(status: 0, stopped: nil, output: sample) == .loginExpired, "\(sample)")

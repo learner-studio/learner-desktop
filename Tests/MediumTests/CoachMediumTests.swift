@@ -4,7 +4,7 @@ import Testing
 import TestSupport
 
 
-@Suite("Coach, medium: the real binary and a local screenpipe") struct CoachMediumTests {
+@Suite("Coach, medium: the real binary and a local screenpipe", .quietLog) struct CoachMediumTests {
     /// Every malformed invocation dies on the argument check: exit 2 with the usage, and
     /// nothing reaches CoreBluetooth (which would also get an unsigned binary killed by TCC).
     @Test func testFireRejectsBadArgumentsBeforeTouchingBluetooth() throws {
@@ -31,7 +31,7 @@ import TestSupport
         defer { server.stop() }
         let api = ScreenpipeAPI(base: server.url, timeout: 0.5)
         let (logger, db) = scratchLogger()
-        let settings = CoachSettings(defaults: UserDefaults(suiteName: "coach-medium-\(UUID().uuidString)")!)
+        let settings = CoachSettings(defaults: ScratchDefaults("coach-medium"))
         let coach = SpeakingCoach(settings: settings, speech: ScreenpipeSpeechSource(api: api), calls: ScreenpipeCallSource(api: api),
                                   wearable: QuietWearable(), toast: QuietToast(), logger: logger)
         coach.callOutageGrace = 2.5
@@ -94,7 +94,7 @@ import TestSupport
         try await Task.sleep(nanoseconds: 100_000_000)
         let api = ScreenpipeAPI(base: url, timeout: 0.5)
         let (logger, _) = scratchLogger()
-        let coach = SpeakingCoach(settings: CoachSettings(defaults: UserDefaults(suiteName: "coach-medium-\(UUID().uuidString)")!),
+        let coach = SpeakingCoach(settings: CoachSettings(defaults: ScratchDefaults("coach-medium")),
                                   speech: ScreenpipeSpeechSource(api: api), calls: ScreenpipeCallSource(api: api),
                                   wearable: QuietWearable(), toast: QuietToast(), logger: logger)
         #expect(await tick(coach, until: { (api.failures["live transcripts"] ?? 0) >= 3 && (api.failures["meetings"] ?? 0) >= 3 }, within: 3))
