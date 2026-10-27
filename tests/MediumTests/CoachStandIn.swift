@@ -2,78 +2,7 @@ import Foundation
 import Network
 import SQLite3
 @testable import LearnerDesktop
-
-/// A local HTTP server standing in for screenpipe (loopback only). It can answer, drop
-/// every connection (screenpipe restarting) or hold requests forever (screenpipe stuck).
-final class StandInServer {
-    enum Mode { case answer, refuse, hang }
-
-    private let listener: NWListener
-    private let queue = DispatchQueue(label: "coach-stand-in")
-    private let lock = NSLock()
-    private var _mode = Mode.answer
-    private var _hits: [String] = []
-    private var held: [NWConnection] = []
-    private let handler: (_ path: String, _ body: Data) -> Any
-    private(set) var port: UInt16 = 0
-
-    var mode: Mode {
-        get { lock.withLock { _mode } }
-        set { lock.withLock { _mode = newValue } }
-    }
-    var hits: [String] { lock.withLock { _hits } }
-
-    init(handler: @escaping (_ path: String, _ body: Data) -> Any) throws {
-        self.handler = handler
-        let params = NWParameters.tcp
-        params.requiredInterfaceType = .loopback
-        listener = try NWListener(using: params, on: .any)
-        listener.newConnectionHandler = { [weak self] c in self?.accept(c) }
-        let ready = DispatchSemaphore(value: 0)
-        listener.stateUpdateHandler = { if case .ready = $0 { ready.signal() } }
-        listener.start(queue: queue)
-        _ = ready.wait(timeout: .now() + 5)
-        port = listener.port?.rawValue ?? 0
-    }
-
-    var url: URL { URL(string: "http://127.0.0.1:\(port)")! }
-
-    func stop() {
-        listener.cancel()
-        lock.withLock { held.forEach { $0.cancel() } }
-    }
-
-    private func accept(_ c: NWConnection) {
-        c.start(queue: queue)
-        switch mode {
-        case .refuse: c.cancel()
-        case .hang: lock.withLock { held.append(c) }
-        case .answer: read(c, Data())
-        }
-    }
-
-    private func read(_ c: NWConnection, _ buffer: Data) {
-        c.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, done, error in
-            guard let self = self else { return }
-            var buf = buffer
-            if let data = data { buf.append(data) }
-            guard let split = buf.range(of: Data("\r\n\r\n".utf8)) else {
-                if done || error != nil { c.cancel() } else { self.read(c, buf) }
-                return
-            }
-            let head = String(decoding: buf[..<split.lowerBound], as: UTF8.self)
-            let length = head.split(separator: "\r\n").first { $0.lowercased().hasPrefix("content-length:") }
-                .flatMap { Int($0.split(separator: ":")[1].trimmingCharacters(in: .whitespaces)) } ?? 0
-            let body = buf[split.upperBound...]
-            guard body.count >= length else { return self.read(c, buf) }
-            let path = String(head.split(separator: " ").dropFirst().first ?? "/")
-            self.lock.withLock { self._hits.append(path) }
-            let json = (try? JSONSerialization.data(withJSONObject: self.handler(path, Data(body)))) ?? Data("[]".utf8)
-            let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(json.count)\r\nConnection: close\r\n\r\n"
-            c.send(content: Data(response.utf8) + json, completion: .contentProcessed { _ in c.cancel() })
-        }
-    }
-}
+import TestSupport
 
 /// The parts of screenpipe the coach reads, with rows the test adds as it goes.
 final class FakeScreenpipeData {

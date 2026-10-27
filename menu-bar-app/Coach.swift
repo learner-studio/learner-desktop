@@ -151,8 +151,6 @@ struct TreatmentSettings: Equatable {
 
 // MARK: - Coach
 
-/// Tray.swift still names the coach TalkTimeMonitor.
-typealias TalkTimeMonitor = SpeakingCoach
 
 final class SpeakingCoach {
     static let shared: SpeakingCoach = {

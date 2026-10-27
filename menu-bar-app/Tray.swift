@@ -14,7 +14,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var signalSources: [DispatchSourceSignal] = []
 
     let homeDir = NSHomeDirectory()
-    let talkMonitor = TalkTimeMonitor.shared
+    let talkMonitor = SpeakingCoach.shared
 
     /// Collected off the main thread by the Status job; the tray and menu only read it.
     var status = AppStatus()
@@ -108,7 +108,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         _ = statusJob
-        Scheduler.every(1, "coach") { [weak self] in self?.talkMonitor.tick() }
+        talkMonitor.start()
         Scheduler.every(8, "export+outbox") { [weak self] in
             VaultExport.shared.tick()
             OutboxSender.shared.tick(heartbeat: { self?.heartbeatInput() ?? [:] })

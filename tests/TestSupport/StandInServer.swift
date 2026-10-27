@@ -1,10 +1,12 @@
 import Foundation
 import Network
 
-/// A local HTTP server for medium tests: answers each request with `handler` and records
-/// what it was asked. Real TCP, real URLSession on the app side. A handler status of 0
-/// drops the connection without answering.
+/// A loopback HTTP server for medium tests: answers each request with `handler` and records
+/// what it was asked. Real TCP, real URLSession on the app side. `mode` can also make it
+/// drop every connection (a server restarting) or hold requests forever (a stuck one);
+/// a handler status of 0 drops just that request.
 public final class StandInServer: @unchecked Sendable {
+    public enum Mode { case answer, refuse, hang }
     public struct Request {
         public let method: String
         public let path: String
@@ -17,15 +19,24 @@ public final class StandInServer: @unchecked Sendable {
     private let queue = DispatchQueue(label: "standin")
     private let lock = NSLock()
     private var _requests: [Request] = []
+    private var _mode = Mode.answer
+    private var held: [NWConnection] = []
     public var handler: Handler
+    public var mode: Mode {
+        get { lock.withLock { _mode } }
+        set { lock.withLock { _mode = newValue } }
+    }
     public private(set) var port: UInt16 = 0
 
     public var url: String { "http://127.0.0.1:\(port)" }
+    public var baseURL: URL { URL(string: url)! }
     public var requests: [Request] { lock.withLock { _requests } }
 
     public init(_ handler: @escaping Handler) throws {
         self.handler = handler
-        listener = try NWListener(using: .tcp, on: .any)
+        let params = NWParameters.tcp
+        params.requiredInterfaceType = .loopback
+        listener = try NWListener(using: params, on: .any)
         let ready = DispatchSemaphore(value: 0)
         listener.stateUpdateHandler = { if case .ready = $0 { ready.signal() } }
         listener.newConnectionHandler = { [weak self] c in self?.serve(c) }
@@ -35,7 +46,10 @@ public final class StandInServer: @unchecked Sendable {
     }
 
     deinit { listener.cancel() }
-    public func stop() { listener.cancel() }
+    public func stop() {
+        listener.cancel()
+        lock.withLock { held.forEach { $0.cancel() } }
+    }
 
     public static func json(_ status: Int, _ object: Any) -> (status: Int, body: Data) {
         (status, (try? JSONSerialization.data(withJSONObject: object)) ?? Data())
@@ -43,6 +57,11 @@ public final class StandInServer: @unchecked Sendable {
 
     private func serve(_ c: NWConnection) {
         c.start(queue: queue)
+        switch mode {
+        case .refuse: c.cancel(); return
+        case .hang: lock.withLock { held.append(c) }; return
+        case .answer: break
+        }
         var buffer = Data()
         func read() {
             c.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { [weak self] data, _, done, _ in
