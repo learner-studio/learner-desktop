@@ -8,7 +8,7 @@ import CommonCrypto
 // MARK: - AI Vault export
 
 /// Pulls new ChatGPT and Claude conversations into ~/ai-vault-data with the `ai-vault`
-/// CLI (the "Export" job: 2 min after launch, then every 6 h), fills in the ChatGPT voice
+/// CLI (the "Export" job: 2 min after launch, then hourly), fills in the ChatGPT voice
 /// transcripts ai-vault leaves out (VoiceTranscripts), then kicks the Archive job, which
 /// sends what changed to learner-server.
 ///
@@ -16,7 +16,7 @@ import CommonCrypto
 ///   expired login            that provider is skipped until Sign In Again (VaultSignIn)
 ///                            or ai-vault's config changes; all expired -> blocked
 ///   "API request failed: 429" failed, retried in 30 min
-///   stuck, crashed browser,  failed, retried after 15 min doubling to 6 h
+///   stuck, crashed browser,  failed, retried after 15 min doubling to 2 h
 ///   "✗ Failed:", "Errors: N" (--only-new resumes where a run stopped, so nothing is lost)
 ///   ai-vault not installed   failed, said so
 final class VaultExport {
@@ -29,7 +29,7 @@ final class VaultExport {
         var logPath = NSHomeDirectory() + "/.ai-aggregator/logs/vault-export.log"
         var loginsPath = NSHomeDirectory() + "/.ai-aggregator/vault-logins.json"
         var aiVaultConfig = NSHomeDirectory() + "/.ai-vault/config.json"
-        var period: TimeInterval = 6 * 3600
+        var period: TimeInterval = 3600
         var firstRun: TimeInterval = 120
         /// A run that is still printing is left alone; one silent this long is stuck (ai-vault
         /// prints a line per conversation and waits at most ~30 s between them).
@@ -37,7 +37,7 @@ final class VaultExport {
         var maxRunTime: TimeInterval = 4 * 3600
         var killGrace: TimeInterval = 15
         var rateLimitRetry: TimeInterval = 30 * 60
-        var failureBackoff = Backoff(base: 15 * 60, max: 6 * 3600)
+        var failureBackoff = Backoff(base: 15 * 60, max: 2 * 3600)
         /// A failing export reaches the tray once it has failed this long (a rate limit or
         /// one stuck run that the next retry gets past does not).
         var problemGrace: TimeInterval = 3600

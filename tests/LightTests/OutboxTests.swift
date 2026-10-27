@@ -49,7 +49,7 @@ func accepted(_ s: StubTransport.Seen) -> HTTPReply {
     StubTransport.json(200, ["data": ["accepted": s.eventIds.count, "duplicates": 0]])
 }
 
-@Suite("Trial outbox") struct OutboxTests {
+@Suite("Trial outbox", .timeLimit(.minutes(1))) struct OutboxTests {
     @Test func sendsEverythingAndMarksItSent() {
         let f = OutboxFixture(turns: 3, handler: accepted)
         #expect(describe(f.sender.runOnce()) == "ok: sent 3")

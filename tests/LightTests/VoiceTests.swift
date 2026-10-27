@@ -47,7 +47,7 @@ enum VoiceFixture {
     }
 }
 
-@Suite("Voice transcripts") struct VoiceTests {
+@Suite("Voice transcripts", .timeLimit(.minutes(1))) struct VoiceTests {
     @Test func aVoiceChatWithoutTextIsFoundATypedOneIsNot() {
         #expect(VoiceTranscripts.hasVoiceGaps(VoiceFixture.md))
         #expect(!VoiceTranscripts.hasVoiceGaps(VoiceFixture.md.replacingOccurrences(of: #"\[audio: [^\]]+\]"#, with: "[image: x]", options: .regularExpression)))

@@ -15,7 +15,7 @@ private let aiVaultConfig = home + "/.ai-vault/config.json"
 
 private func exists(_ p: String) -> Bool { FileManager.default.fileExists(atPath: p) }
 
-@Suite("Live ai-vault export (read-only)",
+@Suite("Live ai-vault export (read-only)", .timeLimit(.minutes(2)),
        .enabled(if: heavy, "heavy lane only (LEARNER_HEAVY=1)"),
        .enabled(if: exists(vaultRoot), "no ~/ai-vault-data on this machine"))
 struct VaultExportLiveTests {
@@ -65,7 +65,7 @@ struct VaultExportLiveTests {
     }
 }
 
-@Suite("Live ChatGPT session (one read)",
+@Suite("Live ChatGPT session (one read)", .timeLimit(.minutes(2)),
        .enabled(if: heavy, "heavy lane only (LEARNER_HEAVY=1)"),
        .enabled(if: VoiceTranscripts().savedCookieHeader() != nil, "ai-vault has no ChatGPT login"))
 struct ChatGPTLiveTests {
@@ -88,7 +88,7 @@ struct ChatGPTLiveTests {
     }
 }
 
-@Suite("Live learner-server (health only)", .enabled(if: heavy, "heavy lane only (LEARNER_HEAVY=1)"))
+@Suite("Live learner-server (health only)", .timeLimit(.minutes(2)), .enabled(if: heavy, "heavy lane only (LEARNER_HEAVY=1)"))
 struct LearnerServerLiveTests {
     @Test func theServerAnswersItsHealthCheck() {
         let r = LearnerRPC.shared.health(timeout: 15)

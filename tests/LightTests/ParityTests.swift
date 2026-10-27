@@ -8,7 +8,7 @@ import Testing
 /// on the parser from commit b591b40). learner-server dedupes on documentId and compares
 /// message text, so ids, order, roles and text must match exactly: strings here are
 /// compared scalar by scalar, never with Swift's canonical-equivalence `==`.
-@Suite("Parser parity with the TypeScript watcher") struct ParityTests {
+@Suite("Parser parity with the TypeScript watcher", .timeLimit(.minutes(1))) struct ParityTests {
     static let dir = Vault.repo + "/tests/Fixtures/parity"
     static let names: [String] = ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [])
         .filter { $0.hasSuffix(".expected.json") }.map { String($0.dropLast(".expected.json".count)) }.sorted()

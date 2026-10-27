@@ -20,7 +20,7 @@ final class VoiceTranscripts {
         var memoPath = NSHomeDirectory() + "/.ai-aggregator/voice-transcripts.json"
         var delay: TimeInterval = 3
         var requestTimeout: TimeInterval = 30
-        /// Bounds one run (the export job runs every 6 h; the rest waits for the next).
+        /// Bounds one run (the export job runs hourly; the rest waits for the next run).
         var maxPerRun = 200
         var userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
     }

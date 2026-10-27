@@ -18,7 +18,7 @@ enum AiVaultOutput {
     static let rateLimited = "Errors: 1\n  • Archive process failed: page.evaluate: Error: API request failed: 429 Too Many Requests"
 }
 
-@Suite("Chat export") struct ExportTests {
+@Suite("Chat export", .timeLimit(.minutes(1))) struct ExportTests {
     @Test func expiredLoginsAreRecognised() {
         for sample in AiVaultOutput.expired {
             #expect(VaultExport.classify(status: 0, stopped: nil, output: sample) == .loginExpired, "\(sample)")
@@ -51,6 +51,19 @@ enum AiVaultOutput {
     @Test func aCleanRunIsOkWithItsCount() {
         #expect(VaultExport.classify(status: 0, stopped: nil, output: AiVaultOutput.ok) == .ok(archived: 3))
         #expect(VaultExport.classify(status: 0, stopped: nil, output: AiVaultOutput.nothingNew) == .ok(archived: 0))
+    }
+
+    @Test func theExportRunsHourlyAndAFailureBacksOffFromFifteenMinutesToTwoHours() {
+        let c = VaultExport.Config()
+        #expect(c.period == 3600)
+        #expect(c.firstRun == 120)
+        #expect(c.rateLimitRetry == 30 * 60)
+        var b = c.failureBackoff
+        b.jitter = 0
+        var waits: [TimeInterval] = []
+        for _ in 0..<5 { waits.append(b.failed()) }
+        let expected: [TimeInterval] = [900, 1800, 3600, 7200, 7200]
+        #expect(waits == expected)
     }
 
     @Test func aMissingCLIFailsAndSaysSoAndStillKicksTheArchive() {

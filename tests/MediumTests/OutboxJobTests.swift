@@ -37,7 +37,7 @@ private func eventIds(_ req: HTTPStandIn.Request) -> [String] {
     (req.data?["events"] as? [[String: Any]] ?? []).compactMap { $0["eventId"] as? String }
 }
 
-@Suite("Outbox job (real TCP stand-in)", .serialized) struct OutboxJobTests {
+@Suite("Outbox job (real TCP stand-in)", .serialized, .timeLimit(.minutes(1))) struct OutboxJobTests {
     @Test func theJobSendsTheQueueOverHTTP() throws {
         let f = try OutboxFixture(turns: 3, handler: accepted)
         f.sender.job.kick("test")
@@ -116,7 +116,7 @@ private func eventIds(_ req: HTTPStandIn.Request) -> [String] {
     }
 }
 
-@Suite("Job state survives a restart") struct JobPersistenceTests {
+@Suite("Job state survives a restart", .timeLimit(.minutes(1))) struct JobPersistenceTests {
     @Test func aFailureKeepsItsBackoffAndABlockStaysBlocked() {
         let name = JobName("persist")
         let first = Job(name.name, period: 3600, backoff: Backoff(base: 600, max: 3600)) { _ in .failed("boom") }

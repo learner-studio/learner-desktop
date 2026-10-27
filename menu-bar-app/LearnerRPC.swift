@@ -201,7 +201,7 @@ enum LearnerAPI {
 /// The chat, outbox and update-check workflows, as jobs. `install` creates them (which
 /// registers them with the Scheduler, whose ticks run them) before `Scheduler.start()`.
 enum ChatAndOutboxJobs {
-    /// Export (6 h), Archive (launch, after each export, hourly), Outbox (8 s), Heartbeat
+    /// Export (hourly), Archive (launch, after each export, hourly), Outbox (8 s), Heartbeat
     /// (5 min, `heartbeat` builds its input only when one is due), UpdateCheck (1 min).
     static func install(heartbeat: @escaping () -> [String: Any]) {
         _ = VaultExport.shared

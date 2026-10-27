@@ -57,7 +57,7 @@ private final class ExportFixture {
     var calls: [String] { dir.read("calls.log").split(separator: "\n").map(String.init) }
 }
 
-@Suite("Export job (fake ai-vault, real processes)", .serialized) struct ExportJobTests {
+@Suite("Export job (fake ai-vault, real processes)", .serialized, .timeLimit(.minutes(1))) struct ExportJobTests {
     @Test func anExpiredProviderIsSkippedUntilItsLoginChanges() throws {
         let f = ExportFixture()
         f.output("claude", Fixture.aiVaultOk)
@@ -102,6 +102,25 @@ private final class ExportFixture {
         #expect(after.summary == "claude: ok (3 new), chatgpt: login expired")
     }
 
+    /// The schedule itself, with an injected 1 s period instead of the real hour: the
+    /// Scheduler's ticks run the export when due and not before.
+    @Test func ticksRunTheExportOnItsPeriod() {
+        let f = ExportFixture(configure: {
+            $0.period = 1
+            $0.firstRun = 0
+        })
+        f.output("claude", Fixture.aiVaultOk)
+        f.output("chatgpt", Fixture.aiVaultOk)
+        let started = Date()
+        while Date().timeIntervalSince(started) < 2.6 {
+            f.export.job.tick()
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        // Runs at ~0 s, ~1 s and ~2 s (each run takes a few ms): two or three, never one per tick.
+        let runs = f.calls.filter { $0 == "claude" }.count
+        #expect((2...3).contains(runs), "\(runs) runs")
+    }
+
     @Test func aRateLimitRetriesInThirtyMinutes() {
         let f = ExportFixture()
         f.output("claude", Fixture.aiVaultRateLimited)
@@ -125,7 +144,7 @@ private final class ExportFixture {
         let shPid = pid(in: f.dir.file("sh.pid")), sleepPid = pid(in: f.dir.file("sleep.pid"))
         #expect(shPid != nil && sleepPid != nil)
         #expect(waitFor(2) { !isAlive(shPid!) && !isAlive(sleepPid!) })
-        // 15 min doubling: the first retry is 12-15 min away (jitter), not 6 h.
+        // 15 min doubling: the first retry is 12-15 min away (jitter), not an hour.
         let wait = s.nextRun.timeIntervalSince(s.lastRun!)
         #expect(wait >= 15 * 60 * 0.8 - 2 && wait <= 15 * 60 + 2)
         #expect(f.dir.read("vault-export.log").contains("=== stopped: no output for"))
@@ -139,7 +158,7 @@ private final class ExportFixture {
     }
 
     @Test func quitStopsARunningExportAtOnce() {
-        let f = ExportFixture { $0.stallTimeout = 60 }
+        let f = ExportFixture(configure: { $0.stallTimeout = 60 })
         f.dir.write("claude.hang", "")
         f.output("chatgpt", Fixture.aiVaultOk)
         f.export.job.kick("test")

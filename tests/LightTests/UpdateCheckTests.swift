@@ -17,7 +17,7 @@ private func check(_ dir: TempDir, _ job: JobName) -> ScreenpipeUpdateCheck {
 
 private func read(_ relative: String) -> String { (try? String(contentsOfFile: Vault.repo + "/" + relative, encoding: .utf8)) ?? "" }
 
-@Suite("screenpipe update check") struct UpdateCheckTests {
+@Suite("screenpipe update check", .timeLimit(.minutes(1))) struct UpdateCheckTests {
     @Test func theFirstSightingIsABaselineNotARun() {
         let dir = TempDir("uc"), job = JobName("uc")
         let uc = check(dir, job)

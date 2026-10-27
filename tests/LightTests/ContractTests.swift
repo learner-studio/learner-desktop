@@ -69,7 +69,7 @@ enum Schema {
     static var desktopTs: String { try! String(contentsOfFile: Vault.repo + "/contract/desktop.ts", encoding: .utf8) }
 }
 
-@Suite("Wire payloads match the pinned contract") struct ContractTests {
+@Suite("Wire payloads match the pinned contract", .timeLimit(.minutes(1))) struct ContractTests {
     @Test func archivedDocumentsMatchArchiveConversationDocumentsInput() {
         let dir = TempDir("contract")
         let job = JobName("contract")

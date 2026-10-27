@@ -22,7 +22,7 @@ private func vault(title: String = "A title", provider: String, created: String?
 
 private func path(_ provider: String, _ id: String) -> String { "/x/ai-vault-data/\(provider)/conversations/\(id)/conversation.md" }
 
-@Suite("Conversation parser") struct ParserTests {
+@Suite("Conversation parser", .timeLimit(.minutes(1))) struct ParserTests {
     @Test func chatgptTwoMessagesWithTimestampsValidAgainstTheContract() {
         let content = vault(provider: "chatgpt", sections: [
             Sec(role: "User", at: "2024-06-22T12:45:56.033Z", body: "Question?"),
