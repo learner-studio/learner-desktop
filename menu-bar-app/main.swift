@@ -3,6 +3,7 @@ import Foundation
 import ServiceManagement
 import SQLite3
 import CoreBluetooth
+import WebKit
 
 // MARK: - Logging
 
@@ -2082,8 +2083,8 @@ func processCommandLine(_ pid: pid_t, includeEnvironment: Bool = false) -> Strin
 /// CLI, where the transcript watcher picks them up and archives them on learner-server.
 /// Nothing scheduled this before, so nothing new was exported after 2026-09-07. ai-vault
 /// logs in with browser cookies that expire. An expired login turns the tray red and the
-/// menu offers "Sign In Again", which opens `ai-vault setup <provider>` in Terminal; when
-/// that finishes it leaves `loginDoneMarker`, and the next poll runs an export straight away.
+/// menu offers "Sign In Again", which opens VaultSignIn: a normal sign-in page inside the
+/// app whose session cookies are handed to `ai-vault setup --cookies-file`.
 final class VaultExport {
     static let shared = VaultExport()
     static let interval: TimeInterval = 6 * 3600
@@ -2097,46 +2098,16 @@ final class VaultExport {
 
     static let loginExpiredPattern = "Authentication failed|cookies appear to be expired|Organization ID not available|API request failed: 40[13]"
     static let failedPattern = "Errors: [1-9]|Completed with [1-9][0-9]* errors"
-    static let loginDoneMarker = NSHomeDirectory() + "/.ai-aggregator/vault-login-done"
     private(set) var expiredLogins: Set<String> = []
     private(set) var lastRun: Date?
     private(set) var lastSummary = "not run yet"
+    /// Main thread, after each run, so the tray refreshes without waiting for the poll.
+    var onFinished: (() -> Void)?
 
     /// Called on the 8 s status poll.
     func tick() {
-        guard !running else { return }
-        if FileManager.default.fileExists(atPath: VaultExport.loginDoneMarker) {
-            try? FileManager.default.removeItem(atPath: VaultExport.loginDoneMarker)
-            print("[VaultExport] sign-in finished; exporting now")
-            runNow()
-        } else if Date() >= nextRun {
-            runNow()
-        }
-    }
-
-    /// Opens Terminal on the interactive `ai-vault setup <provider>` wizard. A .command file
-    /// opens in Terminal without the Automation permission that scripting Terminal needs.
-    func openSignIn(_ provider: String) {
-        guard VaultExport.providers.contains(provider), let cli = VaultExport.cliPath() else { return }
-        let path = NSHomeDirectory() + "/.ai-aggregator/ai-vault-sign-in-\(provider).command"
-        let script = """
-        #!/bin/zsh
-        export PATH="\((cli as NSString).deletingLastPathComponent):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-        echo "Signing ai-vault in to \(provider). Follow the prompts."
-        echo
-        "\(cli)" setup \(provider)
-        touch "\(VaultExport.loginDoneMarker)"
-        echo
-        echo "Done. Learner Desktop will run an export within a few seconds; you can close this window."
-        """
-        do {
-            try script.write(toFile: path, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
-            NSWorkspace.shared.open(URL(fileURLWithPath: path))
-            print("[VaultExport] opened sign-in for \(provider)")
-        } catch {
-            print("[VaultExport] could not open sign-in for \(provider): \(error.localizedDescription)")
-        }
+        guard !running, Date() >= nextRun else { return }
+        runNow()
     }
 
     func runNow() {
@@ -2166,6 +2137,7 @@ final class VaultExport {
                 self.lastSummary = notes.joined(separator: ", ")
                 self.running = false
                 print("[VaultExport] \(self.lastSummary)")
+                self.onFinished?()
             }
         }
     }
@@ -2217,6 +2189,147 @@ final class VaultExport {
         let root = NSHomeDirectory() + "/.nvm/versions/node"
         let versions = ((try? FileManager.default.contentsOfDirectory(atPath: root)) ?? []).sorted().reversed()
         return versions.map { "\(root)/\($0)/bin/ai-vault" }.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+}
+
+// MARK: - AI Vault sign-in
+
+/// Signs ai-vault back in without Terminal or developer tools. `ai-vault setup` only
+/// asks for cookie values to be pasted by hand; instead this window shows the provider's
+/// own sign-in page, and once its session cookie appears the cookies go to
+/// `ai-vault setup <provider> --cookies-file` (a 0600 file, deleted straight after).
+/// On success the window closes and an export runs. The web view keeps its own
+/// persistent store, so a later re-sign-in is often a single click.
+final class VaultSignIn: NSObject, NSWindowDelegate, WKNavigationDelegate {
+    struct Site { let url: String; let domain: String; let session: [String] }
+
+    static let sites: [String: Site] = [
+        "chatgpt": Site(url: "https://chatgpt.com/auth/login", domain: "chatgpt.com",
+                        session: ["__Secure-next-auth.session-token", "__Secure-next-auth.session-token.0"]),
+        "claude": Site(url: "https://claude.ai/login", domain: "claude.ai", session: ["sessionKey"]),
+    ]
+    private static var open: [String: VaultSignIn] = [:]
+
+    static func show(_ provider: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        if let existing = open[provider] { existing.window.makeKeyAndOrderFront(nil); return }
+        guard let site = sites[provider] else { return }
+        let s = VaultSignIn(provider: provider, site: site)
+        open[provider] = s
+        s.window.makeKeyAndOrderFront(nil)
+    }
+
+    private let provider: String
+    private let site: Site
+    private let window: NSWindow
+    private let webView: WKWebView
+    private let status = NSTextField(labelWithString: "")
+    private var timer: Timer?
+    private var triedSession: String?
+    private var saving = false
+
+    private init(provider: String, site: Site) {
+        self.provider = provider
+        self.site = site
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .default()
+        webView = WKWebView(frame: .zero, configuration: config)
+        // Some sign-in providers refuse embedded browsers by user agent.
+        webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15"
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 760),
+                          styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
+        super.init()
+        window.title = "Sign in to \(provider == "chatgpt" ? "ChatGPT" : "Claude") for AI Vault"
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        window.center()
+
+        status.stringValue = "Sign in below. This window closes by itself once AI Vault is connected."
+        status.lineBreakMode = .byTruncatingTail
+        let stack = NSStackView(views: [status, webView])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 0, right: 0)
+        webView.translatesAutoresizingMaskIntoConstraints = false
+        webView.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        window.contentView = stack
+
+        webView.navigationDelegate = self
+        if let url = URL(string: site.url) { webView.load(URLRequest(url: url)) }
+        timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in self?.checkCookies() }
+        print("[VaultSignIn] opened \(provider)")
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { checkCookies() }
+
+    private func checkCookies() {
+        guard !saving else { return }
+        webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { [weak self] cookies in
+            guard let self = self, !self.saving else { return }
+            let mine = cookies.filter { $0.domain.hasSuffix(self.site.domain) }
+            // Try each new session value once; a refused one is not retried until it changes.
+            guard let session = mine.first(where: { self.site.session.contains($0.name) })?.value,
+                  session != self.triedSession else { return }
+            self.triedSession = session
+            self.save(mine)
+        }
+    }
+
+    private func save(_ cookies: [HTTPCookie]) {
+        saving = true
+        status.stringValue = "Signed in. Connecting AI Vault…"
+        let provider = self.provider
+        let values = Dictionary(cookies.map { ($0.name, $0.value) }, uniquingKeysWith: { a, _ in a })
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = VaultSignIn.runSetup(provider, cookies: values)
+            DispatchQueue.main.async {
+                self.saving = false
+                if result.ok {
+                    print("[VaultSignIn] \(provider): ai-vault accepted the session; exporting")
+                    self.status.stringValue = "Connected. Exporting your chats…"
+                    VaultExport.shared.runNow()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self.window.close() }
+                } else {
+                    print("[VaultSignIn] \(provider): ai-vault setup failed: \(result.detail)")
+                    self.status.stringValue = "AI Vault could not use this sign-in (\(result.detail)). Sign out and in again below."
+                }
+            }
+        }
+    }
+
+    /// `ai-vault setup <provider> --cookies-file <0600 file>`; the file is removed afterwards.
+    static func runSetup(_ provider: String, cookies: [String: String]) -> (ok: Bool, detail: String) {
+        guard sites[provider] != nil, let cli = VaultExport.cliPath() else { return (false, "ai-vault CLI not found") }
+        let path = NSHomeDirectory() + "/.ai-aggregator/ai-vault-cookies-\(provider).json"
+        guard let data = try? JSONSerialization.data(withJSONObject: cookies),
+              FileManager.default.createFile(atPath: path, contents: data, attributes: [.posixPermissions: 0o600]) else {
+            return (false, "could not write the cookies file")
+        }
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: cli)
+        p.arguments = ["setup", provider, "--cookies-file", path]
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = (cli as NSString).deletingLastPathComponent + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+        p.environment = env
+        p.standardInput = FileHandle.nullDevice
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = out
+        guard (try? p.run()) != nil else { return (false, "could not start ai-vault") }
+        let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        p.waitUntilExit()
+        let ok = p.terminationStatus == 0 && text.contains("Configuration saved")
+        let last = text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.last { !$0.isEmpty }
+        return (ok, ok ? "ok" : String((last ?? "exit \(p.terminationStatus)").prefix(160)))
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        timer?.invalidate()
+        timer = nil
+        webView.navigationDelegate = nil
+        VaultSignIn.open[provider] = nil
     }
 }
 
@@ -3629,6 +3742,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         tunnel.start()
         watcher.start()
 
+        VaultExport.shared.onFinished = { [weak self] in self?.updateTrayButton() }
         rebuildMenu()
         updateAllStatuses()
 
@@ -3656,9 +3770,15 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func menuWillOpen(_ menu: NSMenu) {
-        updateVaultCount()
-        PavlokController.shared.updateConnectionStatus()
-        rebuildMenu()
+        var mark = Date()
+        func timed(_ step: String) {
+            let ms = Int(Date().timeIntervalSince(mark) * 1000)
+            if ms > 150 { print("[Menu] slow open: \(step) took \(ms) ms") }
+            mark = Date()
+        }
+        updateVaultCount(); timed("updateVaultCount")
+        PavlokController.shared.updateConnectionStatus(); timed("Pavlok status")
+        rebuildMenu(); timed("rebuildMenu")
     }
 
     // MARK: - Menu Bar Tray Dropdown Menu
@@ -4293,7 +4413,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func signInToVault(_ sender: NSMenuItem) {
         guard let provider = sender.representedObject as? String else { return }
-        VaultExport.shared.openSignIn(provider)
+        VaultSignIn.show(provider)
     }
 
     @objc func pullVaultChats() {

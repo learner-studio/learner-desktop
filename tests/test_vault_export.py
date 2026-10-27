@@ -56,20 +56,26 @@ class SignInTest(unittest.TestCase):
     def test_each_expired_login_has_a_sign_in_item(self):
         self.assertIn('login expired — Sign In Again...", #selector(signInToVault(_:))).representedObject = provider', self.src)
 
-    def test_the_wizard_takes_the_provider_as_an_argument_not_a_flag(self):
-        # `ai-vault setup --provider x` is not a valid invocation.
-        self.assertIn('"\\(cli)" setup \\(provider)', self.src)
-        self.assertNotIn("setup --provider", self.src)
+    def test_sign_in_happens_in_the_app_not_in_terminal(self):
+        self.assertIn("VaultSignIn.show(provider)", self.src)
+        self.assertNotIn(".command", self.src)
 
-    def test_only_known_providers_reach_the_shell_script(self):
-        body = self.src[self.src.index("func openSignIn("):]
-        self.assertLess(body.index("VaultExport.providers.contains(provider)"), body.index("let script"))
+    def test_cookies_go_to_ai_vault_through_a_private_file_that_is_removed(self):
+        body = self.src[self.src.index("static func runSetup("):]
+        body = body[:body.index("\n    }\n")]
+        self.assertIn('["setup", provider, "--cookies-file", path]', body)
+        self.assertIn(".posixPermissions: 0o600", body)
+        self.assertIn("defer { try? FileManager.default.removeItem(atPath: path) }", body)
+        self.assertLess(body.index("sites[provider] != nil"), body.index("p.arguments"))
 
-    def test_finishing_sign_in_triggers_an_export(self):
-        tick = self.src[self.src.index("    func tick() {\n        guard !running else { return }"):]
-        tick = tick[:tick.index("\n    }\n")]
-        self.assertIn("loginDoneMarker", tick)
-        self.assertIn("runNow()", tick)
+    def test_a_refused_session_is_not_retried_in_a_loop(self):
+        self.assertIn("session != self.triedSession", self.src)
+
+    def test_success_exports_and_closes_the_window(self):
+        body = self.src[self.src.index("private func save(_ cookies: [HTTPCookie])"):]
+        body = body[:body.index("\n    }\n")]
+        self.assertIn("VaultExport.shared.runNow()", body)
+        self.assertIn("self.window.close()", body)
 
 
 if __name__ == "__main__":
