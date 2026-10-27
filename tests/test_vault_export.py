@@ -74,8 +74,22 @@ class SignInTest(unittest.TestCase):
     def test_success_exports_and_closes_the_window(self):
         body = self.src[self.src.index("private func save(_ cookies: [HTTPCookie])"):]
         body = body[:body.index("\n    }\n")]
-        self.assertIn("VaultExport.shared.runNow()", body)
+        self.assertIn("VaultExport.shared.signedIn(provider)", body)
         self.assertIn("self.window.close()", body)
+
+    def test_a_sign_in_during_an_export_is_not_dropped(self):
+        self.assertIn("guard !running else { rerun = true; return }", self.src)
+        self.assertIn("if self.rerun { self.rerun = false; self.runNow() }", self.src)
+
+    def test_signing_in_clears_the_tray_error_at_once(self):
+        body = self.src[self.src.index("func signedIn(_ provider: String) {"):]
+        body = body[:body.index("\n    }\n")]
+        self.assertIn("expiredLogins.remove(provider)", body)
+        self.assertIn("onFinished?()", body)
+
+    def test_sign_in_popups_open(self):
+        self.assertIn("createWebViewWith configuration: WKWebViewConfiguration", self.src)
+        self.assertIn("webView.uiDelegate = self", self.src)
 
 
 if __name__ == "__main__":

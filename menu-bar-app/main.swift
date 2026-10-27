@@ -2095,6 +2095,7 @@ final class VaultExport {
     private let logPath = NSHomeDirectory() + "/.ai-aggregator/logs/vault-export.log"
     private var nextRun = Date().addingTimeInterval(120)
     private var running = false
+    private var rerun = false
 
     static let loginExpiredPattern = "Authentication failed|cookies appear to be expired|Organization ID not available|API request failed: 40[13]"
     static let failedPattern = "Errors: [1-9]|Completed with [1-9][0-9]* errors"
@@ -2110,8 +2111,16 @@ final class VaultExport {
         runNow()
     }
 
+    /// A fresh sign-in clears its error at once, rather than when the next export ends.
+    func signedIn(_ provider: String) {
+        expiredLogins.remove(provider)
+        onFinished?()
+        runNow()
+    }
+
     func runNow() {
-        guard !running else { return }
+        // A sign-in during a run must not be lost: run again once this one ends.
+        guard !running else { rerun = true; return }
         running = true
         nextRun = Date().addingTimeInterval(VaultExport.interval)
         work.async {
@@ -2138,6 +2147,7 @@ final class VaultExport {
                 self.running = false
                 print("[VaultExport] \(self.lastSummary)")
                 self.onFinished?()
+                if self.rerun { self.rerun = false; self.runNow() }
             }
         }
     }
@@ -2200,7 +2210,7 @@ final class VaultExport {
 /// `ai-vault setup <provider> --cookies-file` (a 0600 file, deleted straight after).
 /// On success the window closes and an export runs. The web view keeps its own
 /// persistent store, so a later re-sign-in is often a single click.
-final class VaultSignIn: NSObject, NSWindowDelegate, WKNavigationDelegate {
+final class VaultSignIn: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate {
     struct Site { let url: String; let domain: String; let session: [String] }
 
     static let sites: [String: Site] = [
@@ -2227,6 +2237,8 @@ final class VaultSignIn: NSObject, NSWindowDelegate, WKNavigationDelegate {
     private var timer: Timer?
     private var triedSession: String?
     private var saving = false
+    private var connected = false
+    private var popups: [NSWindow] = []
 
     private init(provider: String, site: Site) {
         self.provider = provider
@@ -2256,6 +2268,7 @@ final class VaultSignIn: NSObject, NSWindowDelegate, WKNavigationDelegate {
         window.contentView = stack
 
         webView.navigationDelegate = self
+        webView.uiDelegate = self
         if let url = URL(string: site.url) { webView.load(URLRequest(url: url)) }
         timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in self?.checkCookies() }
         print("[VaultSignIn] opened \(provider)")
@@ -2263,10 +2276,33 @@ final class VaultSignIn: NSObject, NSWindowDelegate, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { checkCookies() }
 
+    /// "Continue with Google" and similar open a popup that reports back to the page; a
+    /// web view without this silently drops the click.
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        let popup = WKWebView(frame: .zero, configuration: configuration)
+        popup.customUserAgent = webView.customUserAgent
+        popup.uiDelegate = self
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 680),
+                         styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        w.isReleasedWhenClosed = false
+        w.title = window.title
+        w.contentView = popup
+        w.center()
+        w.makeKeyAndOrderFront(nil)
+        popups.append(w)
+        return popup
+    }
+
+    func webViewDidClose(_ webView: WKWebView) {
+        popups.filter { $0.contentView === webView }.forEach { $0.close() }
+        popups.removeAll { $0.contentView === webView }
+    }
+
     private func checkCookies() {
-        guard !saving else { return }
+        guard !saving, !connected else { return }
         webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { [weak self] cookies in
-            guard let self = self, !self.saving else { return }
+            guard let self = self, !self.saving, !self.connected else { return }
             let mine = cookies.filter { $0.domain.hasSuffix(self.site.domain) }
             // Try each new session value once; a refused one is not retried until it changes.
             guard let session = mine.first(where: { self.site.session.contains($0.name) })?.value,
@@ -2286,9 +2322,11 @@ final class VaultSignIn: NSObject, NSWindowDelegate, WKNavigationDelegate {
             DispatchQueue.main.async {
                 self.saving = false
                 if result.ok {
+                    self.connected = true
+                    self.timer?.invalidate()
                     print("[VaultSignIn] \(provider): ai-vault accepted the session; exporting")
                     self.status.stringValue = "Connected. Exporting your chats…"
-                    VaultExport.shared.runNow()
+                    VaultExport.shared.signedIn(provider)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self.window.close() }
                 } else {
                     print("[VaultSignIn] \(provider): ai-vault setup failed: \(result.detail)")
@@ -2329,6 +2367,9 @@ final class VaultSignIn: NSObject, NSWindowDelegate, WKNavigationDelegate {
         timer?.invalidate()
         timer = nil
         webView.navigationDelegate = nil
+        webView.uiDelegate = nil
+        popups.forEach { $0.close() }
+        popups.removeAll()
         VaultSignIn.open[provider] = nil
     }
 }
