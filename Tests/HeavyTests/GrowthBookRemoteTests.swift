@@ -9,7 +9,7 @@ import TestSupport
 // (json_populate_recordset), so no table is read or written.
 // Needs LEARNER_HEAVY=1 and LEARNER_REMOTE_E2E=1.
 
-@Suite("GrowthBook design on the server (read-only)", .quietLog, .serialized,
+@Suite("GrowthBook design on the server (read-only)", .tags(.heavy, .tools), .timeLimit(.minutes(2)), .quietLog, .serialized,
        .enabled(if: Live.remote, "remote opt-in: set LEARNER_HEAVY=1 LEARNER_REMOTE_E2E=1"))
 struct GrowthBookRemoteTests {
     let remote = OVHRemote(timeout: 60)
@@ -49,7 +49,8 @@ struct GrowthBookRemoteTests {
                 "metadata": m]
     }
 
-    static let cases: [String: ([String: Any], Int)] = [
+    // nonisolated(unsafe): a constant table, never mutated.
+    nonisolated(unsafe) static let cases: [String: ([String: Any], Int)] = [
         "reward with toast only": (row(), 1),
         "reward off": (row(settings: ["reward_enabled": false]), 1),
         "manual override": (row(settings: ["assignment_mode": "baseline"]), 0),
@@ -60,7 +61,7 @@ struct GrowthBookRemoteTests {
 
     @Test(arguments: ["reward with toast only", "reward off", "manual override", "synthetic", "legacy design", "settings changed mid-turn"])
     func exposureEligibility(_ name: String) throws {
-        let (row, want) = Self.cases[name]!
+        let (row, want) = try #require(Self.cases[name])
         let s = try deployed()
         let query = try #require((s["exposure"] as? [String: Any])?["query"] as? String)
         let literal = Tools.json([row], pretty: false).replacingOccurrences(of: "'", with: "''")

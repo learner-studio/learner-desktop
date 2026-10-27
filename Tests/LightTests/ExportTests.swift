@@ -19,7 +19,7 @@ enum AiVaultOutput {
     static let rateLimited = "Errors: 1\n  • Archive process failed: page.evaluate: Error: API request failed: 429 Too Many Requests"
 }
 
-@Suite("Chat export", .quietLog, .timeLimit(.minutes(1))) struct ExportTests {
+@Suite("Chat export", .tags(.light, .chats), .quietLog, .timeLimit(.minutes(1))) struct ExportTests {
     @Test func offlineIsARetryNotAnExpiredLogin() {
         // ai-vault's output with the Mac offline, 2026-10-27 17:49 (it also says "Authentication failed").
         let offline = "AI Vault Archive\nAuthenticating...\nAuthentication failed\n\npage.goto: net::ERR_INTERNET_DISCONNECTED at https://claude.ai/\n"
@@ -111,8 +111,7 @@ enum AiVaultOutput {
         #expect(export.expiredLogins.isEmpty)
         #expect(dir.read("logins.json") == "{}")
         // Let the kicked run end before the fixture goes.
-        let deadline = Date().addingTimeInterval(5)
-        while export.job.snapshot.lastRun == nil && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
+        waitFor(5) { export.job.snapshot.lastRun != nil }
         #expect(export.job.snapshot.summary == "ai-vault CLI not found")
     }
 }

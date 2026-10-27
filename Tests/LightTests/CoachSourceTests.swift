@@ -44,7 +44,7 @@ func settle(_ condition: () -> Bool = { false }, within seconds: Double = 1) asy
 }
 
 @MainActor
-@Suite("Coach sources", .quietLog) struct CoachSourceTests {
+@Suite("Coach sources", .tags(.light, .coach), .timeLimit(.minutes(1)), .quietLog) struct CoachSourceTests {
     func iso(_ d: Date) -> String { ISO8601DateFormatter().string(from: d) }
 
     @Test func historyIsNeverReplayedAndBackfillIsNotCountedTwice() async {

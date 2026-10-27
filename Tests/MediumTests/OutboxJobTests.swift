@@ -38,7 +38,7 @@ private func eventIds(_ req: HTTPStandIn.Request) -> [String] {
     (req.data?["events"] as? [[String: Any]] ?? []).compactMap { $0["eventId"] as? String }
 }
 
-@Suite("Outbox job (real TCP stand-in)", .quietLog, .serialized, .timeLimit(.minutes(1))) struct OutboxJobTests {
+@Suite("Outbox job (real TCP stand-in)", .tags(.medium, .outbox), .quietLog, .serialized, .timeLimit(.minutes(1))) struct OutboxJobTests {
     @Test func theJobSendsTheQueueOverHTTP() throws {
         let f = try OutboxFixture(turns: 3, handler: accepted)
         // Wait for the job's recorded outcome: rows are marked sent a moment before the
@@ -119,7 +119,7 @@ private func eventIds(_ req: HTTPStandIn.Request) -> [String] {
     }
 }
 
-@Suite("Job state survives a restart", .quietLog, .timeLimit(.minutes(1))) struct JobPersistenceTests {
+@Suite("Job state survives a restart", .tags(.medium, .core, .outbox), .quietLog, .timeLimit(.minutes(1))) struct JobPersistenceTests {
     @Test func aFailureKeepsItsBackoffAndABlockIsReCheckedAtTheNextLaunch() {
         let name = JobName("persist")
         let first = Job(name.name, period: 3600, backoff: Backoff(base: 600, max: 3600)) { _ in .failed("boom") }

@@ -11,16 +11,15 @@ final class OutboxFixture {
     let logger: HabitEventLogger
     let stub: StubTransport
     let sender: OutboxSender
-    private final class KeySource {
-        let lock = NSLock()
-        var reads = 0
+    private final class KeySource: Sendable {
+        let reads = Locked(0)
         let key: String?
         init(_ key: String?) { self.key = key }
-        func read() -> String? { lock.withLock { reads += 1; return key } }
+        func read() -> String? { reads.withLock { $0 += 1 }; return key }
     }
     private let keys: KeySource
 
-    var keyReadCount: Int { keys.lock.withLock { keys.reads } }
+    var keyReadCount: Int { keys.reads.value }
 
     init(turns: Int, key: String? = "test-key", handler: @escaping (StubTransport.Seen) -> HTTPReply) {
         let keys = KeySource(key)
@@ -50,7 +49,7 @@ func accepted(_ s: StubTransport.Seen) -> HTTPReply {
     StubTransport.json(200, ["data": ["accepted": s.eventIds.count, "duplicates": 0]])
 }
 
-@Suite("Trial outbox", .quietLog, .timeLimit(.minutes(1))) struct OutboxTests {
+@Suite("Trial outbox", .tags(.light, .outbox), .quietLog, .timeLimit(.minutes(1))) struct OutboxTests {
     @Test func sendsEverythingAndMarksItSent() throws {
         let f = OutboxFixture(turns: 3, handler: accepted)
         #expect(describe(f.sender.runOnce()) == "ok: sent 3")
@@ -196,9 +195,9 @@ func accepted(_ s: StubTransport.Seen) -> HTTPReply {
         reopened.waitUntilIdle()
     }
 
-    @Test func anUnreadableDatabaseIsAFailureNotAnEmptyOutbox() {
+    @Test func anUnreadableDatabaseIsAFailureNotAnEmptyOutbox() throws {
         let dir = TempDir("baddb")
-        try! FileManager.default.createDirectory(atPath: dir.file("trials.sqlite"), withIntermediateDirectories: true) // a directory: will not open
+        try FileManager.default.createDirectory(atPath: dir.file("trials.sqlite"), withIntermediateDirectories: true) // a directory: will not open
         let logger = HabitEventLogger(path: dir.file("trials.sqlite"))
         let job = JobName("baddb"), hb = JobName("baddb-hb")
         var c = OutboxSender.Config()

@@ -4,7 +4,7 @@ import Testing
 import TestSupport
 
 
-@Suite("Coach, medium: the real binary and a local screenpipe", .quietLog) struct CoachMediumTests {
+@Suite("Coach, medium: the real binary and a local screenpipe", .tags(.medium, .coach), .timeLimit(.minutes(1)), .quietLog) struct CoachMediumTests {
     /// Every malformed invocation dies on the argument check: exit 2 with the usage, and
     /// nothing reaches CoreBluetooth (which would also get an unsigned binary killed by TCC).
     @Test func testFireRejectsBadArgumentsBeforeTouchingBluetooth() throws {

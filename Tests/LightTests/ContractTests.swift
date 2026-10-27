@@ -57,7 +57,8 @@ enum Schema {
         }
     }
 
-    static let rpc: [String: Any] = {
+    // nonisolated(unsafe): read once from the pinned contract, never mutated.
+    nonisolated(unsafe) static let rpc: [String: Any] = {
         let data = FileManager.default.contents(atPath: Vault.repo + "/contract/contract.json")!
         return (try! JSONSerialization.jsonObject(with: data) as! [String: Any])["rpc"] as! [String: Any]
     }()
@@ -70,7 +71,7 @@ enum Schema {
     static var desktopTs: String { try! String(contentsOfFile: Vault.repo + "/contract/desktop.ts", encoding: .utf8) }
 }
 
-@Suite("Wire payloads match the pinned contract", .quietLog, .timeLimit(.minutes(1))) struct ContractTests {
+@Suite("Wire payloads match the pinned contract", .tags(.light, .outbox, .chats), .quietLog, .timeLimit(.minutes(1))) struct ContractTests {
     @Test func archivedDocumentsMatchArchiveConversationDocumentsInput() throws {
         let dir = TempDir("contract")
         let job = JobName("contract")

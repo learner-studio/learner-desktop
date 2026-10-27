@@ -4,7 +4,7 @@ import Testing
 import TestSupport
 
 // Live, read-only: the uploader running on this Mac is healthy by learner-server's rules.
-@Suite("CLI sessions uploader (live)", .quietLog,
+@Suite("CLI sessions uploader (live)", .tags(.heavy, .sessions), .timeLimit(.minutes(2)), .quietLog,
        .enabled(if: ProcessInfo.processInfo.environment["LEARNER_HEAVY"] == "1", "heavy lane: set LEARNER_HEAVY=1"),
        .enabled(if: FileManager.default.fileExists(atPath: CLISessions.statusPath), "the uploader has not run on this Mac"))
 struct SessionsLiveTests {

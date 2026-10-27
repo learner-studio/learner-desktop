@@ -59,7 +59,7 @@ private final class ExportFixture {
     var calls: [String] { dir.read("calls.log").split(separator: "\n").map(String.init) }
 }
 
-@Suite("Export job (fake ai-vault, real processes)", .quietLog, .serialized, .timeLimit(.minutes(1))) struct ExportJobTests {
+@Suite("Export job (fake ai-vault, real processes)", .tags(.medium, .chats), .quietLog, .serialized, .timeLimit(.minutes(1))) struct ExportJobTests {
     @Test func anExpiredProviderIsSkippedUntilItsLoginChanges() throws {
         let f = ExportFixture()
         f.output("claude", Fixture.aiVaultOk)
@@ -92,7 +92,7 @@ private final class ExportFixture {
         f.output("claude", Fixture.aiVaultOk)
         f.output("chatgpt", Fixture.aiVaultOk)
         let before = try #require(f.export.job.snapshot.lastRun)
-        Thread.sleep(forTimeInterval: 1.1)
+        #expect(waitFor(3) { f.export.job.snapshot.nextRun <= Date() })
         f.export.job.tick()   // the re-check is due: it runs, and tries the "expired" logins again
         #expect(waitFor(15) { f.export.job.snapshot.lastRun != before })
         #expect(!f.export.job.snapshot.blocked)

@@ -5,7 +5,7 @@ import TestSupport
 
 // The shared workflow primitives every workflow runs through (Core.swift).
 // Serialized within the suite; log capture is locked and each test has its own job folder.
-@Suite("Core primitives", .quietLog, .serialized) struct CoreTests {
+@Suite("Core primitives", .tags(.light, .core), .timeLimit(.minutes(1)), .quietLog, .serialized) struct CoreTests {
 
     @Test func backoffDoublesFromTheBaseUpToTheCapAndResets() {
         var b = Backoff(base: 10, max: 60, jitter: 0)
@@ -153,7 +153,7 @@ import TestSupport
             #expect(job.snapshot.blocked)
             let first = job.snapshot.lastRun
             blocked.value = false
-            usleep(400_000)
+            #expect(waitFor(2) { job.snapshot.nextRun <= Date() })   // the 0.3 s recheck is due
             job.tick()
             #expect(waitForRun(job, after: first))
             #expect(!job.snapshot.blocked && job.problem == nil)
@@ -209,11 +209,10 @@ import TestSupport
 }
 
 // Shutdown: ordered, each step logged, bounded overall, a hung step skipped not waited on.
-@Suite("Shutdown", .quietLog) struct ShutdownTests {
+@Suite("Shutdown", .tags(.light, .shutdown, .core), .timeLimit(.minutes(1)), .quietLog) struct ShutdownTests {
     @Test func stepsRunInOrderAndAHungStepIsLeftBehind() {
-        var order: [String] = []
-        let lock = NSLock()
-        let mark = { (n: String) in lock.withLock { order.append(n) } }
+        let order = Locked<[String]>([])
+        let mark: @Sendable (String) -> Void = { n in order.withLock { $0.append(n) } }
         let started = Date()
         var finished: [String] = []
         let lines = capturingLog {
@@ -224,7 +223,7 @@ import TestSupport
                 .init(name: "close", budget: 1) { _ in mark("close"); return nil },
             ], total: 3)
         }
-        #expect(lock.withLock { order } == ["turn", "flush", "close"])
+        #expect(order.value == ["turn", "flush", "close"])
         #expect(finished == ["turn", "flush", "close"])
         #expect(Date().timeIntervalSince(started) < 2.5)
         #expect(lines.contains { $0.contains("flush: done in") && $0.contains("(3 rows)") })

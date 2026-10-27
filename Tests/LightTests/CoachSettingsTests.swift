@@ -4,7 +4,7 @@ import Testing
 import TestSupport
 
 @MainActor
-@Suite("Coach settings and arms", .quietLog) struct CoachSettingsTests {
+@Suite("Coach settings and arms", .tags(.light, .coach), .timeLimit(.minutes(1)), .quietLog) struct CoachSettingsTests {
     @Test func armAssignmentIsAStableHashOfTheSession() {
         // Pinned: the same session must land in the same arm in every process and release.
         #expect(TreatmentArm.assigned(to: "call_zoom_1a2b3c4d") == .cawAudio)

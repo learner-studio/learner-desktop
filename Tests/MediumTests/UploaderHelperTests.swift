@@ -6,7 +6,7 @@ import TestSupport
 // The uploader under the app's supervisor, with a stand-in uploader script: the key
 // reaches it through the environment and never its log; exit 3 (another copy holds the
 // lock) is waited out quietly; exit 2 (config error) is a problem; restarts wait.
-@Suite("Uploader helper", .serialized, .quietLog, .timeLimit(.minutes(1))) struct UploaderHelperTests {
+@Suite("Uploader helper", .tags(.medium, .sessions, .helpers), .serialized, .quietLog, .timeLimit(.minutes(1))) struct UploaderHelperTests {
     func helper(_ dir: TempDir, exit code: Int, wait: TimeInterval = 0.5) -> ManagedHelper {
         let script = dir.write("uploader.sh", """
             #!/bin/bash

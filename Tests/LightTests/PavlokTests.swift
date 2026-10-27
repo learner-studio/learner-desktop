@@ -4,7 +4,7 @@ import Testing
 import TestSupport
 
 @MainActor
-@Suite("Pavlok", .quietLog) struct PavlokTests {
+@Suite("Pavlok", .tags(.light, .coach), .timeLimit(.minutes(1)), .quietLog) struct PavlokTests {
     @Test func eachStimulusIsOnePulseAtTheChosenLevel() {
         for v in [1, 5, 10, 25, 40, 75, 100] {
             let pulse = Data([0x81, 0x0C, UInt8(v), 0x18, 0x18])

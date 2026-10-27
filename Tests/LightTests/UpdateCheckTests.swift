@@ -18,7 +18,7 @@ private func check(_ dir: TempDir, _ job: JobName) -> ScreenpipeUpdateCheck {
 
 private func read(_ relative: String) -> String { (try? String(contentsOfFile: Vault.repo + "/" + relative, encoding: .utf8)) ?? "" }
 
-@Suite("screenpipe update check", .quietLog, .timeLimit(.minutes(1))) struct UpdateCheckTests {
+@Suite("screenpipe update check", .tags(.light, .status), .quietLog, .timeLimit(.minutes(1))) struct UpdateCheckTests {
     @Test func theFirstSightingIsABaselineNotARun() {
         let dir = TempDir("uc"), job = JobName("uc")
         let uc = check(dir, job)
@@ -87,20 +87,22 @@ private func read(_ relative: String) -> String { (try? String(contentsOfFile: V
 
     // MARK: The agent's fence
 
-    private var permissions: [String: Any] {
-        let data = FileManager.default.contents(atPath: Vault.repo + "/config/screenpipe-update-agent.json")!
-        return (try! JSONSerialization.jsonObject(with: data) as! [String: Any])["permissions"] as! [String: Any]
+    private func permissions() throws -> [String: Any] {
+        let data = try #require(FileManager.default.contents(atPath: Vault.repo + "/config/screenpipe-update-agent.json"))
+        let config = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        return try #require(config["permissions"] as? [String: Any])
     }
 
-    @Test func noBlanketShellOrEditAccess() {
-        let allow = permissions["allow"] as! [String], deny = permissions["deny"] as! [String]
+    @Test func noBlanketShellOrEditAccess() throws {
+        let permissions = try permissions()
+        let allow = try #require(permissions["allow"] as? [String]), deny = try #require(permissions["deny"] as? [String])
         for rule in ["Bash", "Bash(*)", "Bash(:*)", "Edit", "Write"] { #expect(!allow.contains(rule), "\(rule)") }
         for rule in ["Bash(kill:*)", "Bash(pkill:*)", "Bash(rm:*)", "Bash(git push:*)", "Edit", "Write"] { #expect(deny.contains(rule), "\(rule)") }
     }
 
-    @Test func everyFixInTheRunbookIsPermitted() {
+    @Test func everyFixInTheRunbookIsPermitted() throws {
         let runbook = read("docs/screenpipe-update-runbook.md")
-        let allow = permissions["allow"] as! [String]
+        let allow = try #require(try permissions()["allow"] as? [String])
         for command in ["launchctl setenv SCREENPIPE_SKIP_ONBOARDING 1", "open -g -a /Applications/screenpipe.app",
                         "\"/Users/benpollack/Applications/Learner Desktop.app/Contents/MacOS/learner-desktop\" tool preflight",
                         "git add config/screenpipe-settings.json"] {
@@ -111,8 +113,8 @@ private func read(_ relative: String) -> String { (try? String(contentsOfFile: V
         #expect(allow.contains { $0.hasPrefix("Bash(") && $0.contains("learner-desktop\" tool start-capture-phase:*)") })
     }
 
-    @Test func canReadTheLogsItIsToldToCheck() {
-        let dirs = permissions["additionalDirectories"] as! [String]
+    @Test func canReadTheLogsItIsToldToCheck() throws {
+        let dirs = try #require(try permissions()["additionalDirectories"] as? [String])
         #expect(dirs.contains { $0.hasSuffix("/.screenpipe") })
         #expect(dirs.contains { $0.hasSuffix("/.ai-aggregator") })
     }

@@ -2,7 +2,7 @@ import Foundation
 
 /// A fresh temp directory, removed when the value goes away (or by `cleanup()`). Its path
 /// is resolved (/private/var/...), so it compares equal to a child process's `pwd`.
-public final class TempDir: @unchecked Sendable {
+public final class TempDir: Sendable {
     public let path: String
 
     public init(_ label: String = "learner") {
@@ -68,6 +68,7 @@ public func capturingLog(_ body: () throws -> Void) rethrows -> [String] {
     return lines.all
 }
 
+// @unchecked: `lines` is only touched under `lock`.
 public final class LockedLines: @unchecked Sendable {
     private let lock = NSLock()
     private var lines: [String] = []

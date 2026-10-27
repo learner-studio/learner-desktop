@@ -5,9 +5,9 @@ import TestSupport
 
 // The tray's own workflows: the quit sequence, the heartbeat it sends, and which problem
 // the tray shows when several are true at once.
-@Suite("Tray workflows", .quietLog, .timeLimit(.minutes(1))) struct TrayWorkflowTests {
+@Suite("Tray workflows", .tags(.light, .shutdown, .status), .quietLog, .timeLimit(.minutes(1))) struct TrayWorkflowTests {
 
-    @Test func quitSendsEveryQueuedTrialBeforeClosingTheDatabase() {
+    @Test func quitSendsEveryQueuedTrialBeforeClosingTheDatabase() throws {
         let dir = TempDir("quit")
         let logger = HabitEventLogger(path: dir.file("trials.sqlite"))
         @Sendable func turn(_ i: Int) {
@@ -27,10 +27,12 @@ import TestSupport
         _ = capturingLog { Shutdown.run(steps, total: 10) }
         #expect(order.value == ["turn", "send", "jobs", "tunnel"])
         #expect(seenBySend.value == 4)   // all four rows, read from an open database
-        #expect(steps.map(\.name).firstIndex(of: "send queued trials")! < steps.map(\.name).firstIndex(of: "close the trial database")!)
+        let send = try #require(steps.map(\.name).firstIndex(of: "send queued trials"))
+        let close = try #require(steps.map(\.name).firstIndex(of: "close the trial database"))
+        #expect(send < close)
     }
 
-    @Test func theHeartbeatMatchesTheContractInEveryCaptureState() {
+    @Test func theHeartbeatMatchesTheContractInEveryCaptureState() throws {
         let schema = Schema.input("recordAppHeartbeat")
         for capture: AppStatus.Capture in [.unknown, .recording, .degraded("audio stalled"), .stopped("port 3030 closed")] {
             var s = AppStatus(capture: capture, outboxDepth: 3)
@@ -38,7 +40,7 @@ import TestSupport
             for (sent, version) in [(Date?.none, String?.none), (Date(), "0.3.0")] {
                 let body = TrayAppManager.heartbeat(s, appVersion: "1.0.0", screenpipeVersion: version, capturePhase: nil,
                                                     lastSentAt: sent, lastExport: sent, outboxStatus: "sent 3")
-                let json = try! JSONSerialization.jsonObject(with: JSONSerialization.data(withJSONObject: body))
+                let json = try JSONSerialization.jsonObject(with: JSONSerialization.data(withJSONObject: body))
                 #expect(Schema.validate(json, schema).isEmpty, "\(capture): \(Schema.validate(json, schema))")
             }
         }

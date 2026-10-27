@@ -48,7 +48,7 @@ enum VoiceFixture {
     }
 }
 
-@Suite("Voice transcripts", .quietLog, .timeLimit(.minutes(1))) struct VoiceTests {
+@Suite("Voice transcripts", .tags(.light, .chats), .quietLog, .timeLimit(.minutes(1))) struct VoiceTests {
     @Test func aVoiceChatWithoutTextIsFoundATypedOneIsNot() {
         #expect(VoiceTranscripts.hasVoiceGaps(VoiceFixture.md))
         #expect(!VoiceTranscripts.hasVoiceGaps(VoiceFixture.md.replacingOccurrences(of: #"\[audio: [^\]]+\]"#, with: "[image: x]", options: .regularExpression)))
@@ -83,8 +83,9 @@ enum VoiceFixture {
         #expect(twice.filled == 0)
     }
 
-    @Test func aMessageWithNoTranscriptStaysBlankAndIsCounted() {
-        let partial: [String: Any] = ["mapping": ["a": (VoiceFixture.api["mapping"] as! [String: Any])["a"]!]]
+    @Test func aMessageWithNoTranscriptStaysBlankAndIsCounted() throws {
+        let a = try #require((VoiceFixture.api["mapping"] as? [String: Any])?["a"])
+        let partial: [String: Any] = ["mapping": ["a": a]]
         let r = VoiceTranscripts.fillTranscripts(VoiceFixture.md, VoiceTranscripts.transcriptsByTime(partial))
         #expect(r.filled == 1 && r.missing == 1)
     }

@@ -28,7 +28,7 @@ private final class UpdateCheckFixture {
     }
 }
 
-@Suite("Update check job (fake claude, real processes)", .quietLog, .serialized, .timeLimit(.minutes(1))) struct UpdateCheckJobTests {
+@Suite("Update check job (fake claude, real processes)", .tags(.medium, .status), .quietLog, .serialized, .timeLimit(.minutes(1))) struct UpdateCheckJobTests {
     @Test func aRunIsLoggedWithItsStatusSessionAndCost() throws {
         let f = UpdateCheckFixture(claude: """
             #!/bin/sh
