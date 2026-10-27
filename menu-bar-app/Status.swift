@@ -267,7 +267,7 @@ enum StatusProbe {
             if b.loginItemBlocked { log.warn("switched off in Login Items: will not start at login") }
             else { log.info("allowed in Login Items again") }
         }
-        for p in b.problems where !a.problems.contains(p) { log.warn("problem: \(p.source): \(p.text)") }
+        for p in b.problems where !a.problems.contains(p) { log.warn("\(p.waiting ? "waiting" : "problem"): \(p.source): \(p.text)") }
         for p in a.problems where !b.problems.contains(where: { $0.source == p.source }) { log.info("cleared: \(p.source)") }
     }
 
