@@ -158,7 +158,7 @@ struct TreatmentSettings: Equatable {
 final class SpeakingCoach {
     static let shared: SpeakingCoach = {
         let api = ScreenpipeAPI.shared
-        return SpeakingCoach(settings: .shared, speech: ScreenpipeSpeechSource(api: api),
+        return SpeakingCoach(settings: .shared, speech: MicSpeechSource(screenpipe: ScreenpipeSpeechSource(api: api)),
                              calls: ScreenpipeCallSource(api: api), wearable: PavlokController.shared,
                              toast: MonologueToastController.shared, logger: .shared)
     }()
@@ -243,6 +243,7 @@ final class SpeakingCoach {
     func start() {
         guard !started else { return }
         started = true
+        (speech as? MicSpeechSource)?.start()
         Scheduler.every(1, "coach") { [weak self] in self?.tick() }
         log.info("started: session \(activeSessionId)\(call.map { " (call: \($0.app))" } ?? ""), arm \(arm), assignment \(experiment.currentMode.rawValue), alert only during calls: \(settings.alertOnlyDuringCalls)")
     }
@@ -284,6 +285,10 @@ final class SpeakingCoach {
             // the wait before the reply is not part of it.
             if turn != nil { endTurn(at: span.start, why: "someone else spoke", natural: true) }
             lastTurnBoundaryAt = max(lastTurnBoundaryAt ?? span.start, span.start)
+            return
+        }
+        if span.wordsOnly {
+            if let t = turn, span.end >= t.start { t.words += span.words }
             return
         }
         // Breathing pauses stay inside a turn; a long gap starts a new one.

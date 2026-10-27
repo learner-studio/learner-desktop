@@ -13,7 +13,7 @@ let package = Package(
         .executableTarget(
             name: "LearnerDesktop",
             path: "menu-bar-app",
-            exclude: ["com.benpollack.learner-desktop.plist", "learner-desktop", "Learner Desktop.app"],
+            exclude: ["com.benpollack.learner-desktop.plist", "learner-desktop", "Learner Desktop.app", "Models"],
             swiftSettings: [.swiftLanguageMode(.v6)],
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),

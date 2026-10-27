@@ -6,9 +6,11 @@ A macOS menu-bar app (Swift) that runs on the owner's Mac and feeds
 [learner-server](https://github.com/learner-studio/learner-server), which parses, dedupes and
 stores everything and hosts the Learner web app. The desktop app:
 
-- **Coaches talk time on calls.** It follows [screenpipe](https://github.com/mediar-ai/screenpipe)'s
-  live transcription of the microphone, tracks how long the owner has talked without
-  yielding, and at 30 s and 60 s gives a cue for the session's randomised treatment arm
+- **Coaches talk time on calls.** An on-device speech detector (Silero VAD on Core ML,
+  `menu-bar-app/Speech.swift`, ~1 % of a core) hears the owner start talking on the
+  microphone within about a third of a second; [screenpipe](https://github.com/mediar-ai/screenpipe)'s
+  transcripts still supply other speakers and word counts. It tracks how long the owner has
+  talked without yielding, and at 30 s and 60 s gives a cue for the session's randomised treatment arm
   (a screen toast in every arm, plus sound, a Pavlok vibration or shock). Every turn is a
   trial row sent to the server.
 - **Archives ChatGPT and Claude web chats.** The [ai-vault](https://www.npmjs.com/package/ai-vault)

@@ -32,6 +32,8 @@ chmod +x "${BUNDLE_DIR}/Contents/MacOS/learner-desktop"
 # off there it silently stopped starting at login.
 echo "Bundling the tunnel script..."
 cp "${PROJECT_DIR}/scripts/tunnel.sh" "${BUNDLE_DIR}/Contents/Resources/tunnel.sh"
+# The on-device speech detector's model (Silero VAD, Core ML).
+cp -R "${PROJECT_DIR}/menu-bar-app/Models/silero-vad.mlmodelc" "${BUNDLE_DIR}/Contents/Resources/silero-vad.mlmodelc"
 chmod +x "${BUNDLE_DIR}/Contents/Resources/tunnel.sh"
 
 # CFBundleIdentifier deliberately keeps its pre-rename value: TCC grants (Bluetooth) and
@@ -59,6 +61,8 @@ cat << 'EOF' > "${BUNDLE_DIR}/Contents/Info.plist"
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Learner Desktop listens for your own speech on the microphone, on this Mac only (no audio is stored or sent), to time how long you have been talking.</string>
     <key>NSBluetoothAlwaysUsageDescription</key>
     <string>Learner Desktop connects directly to your Pavlok wearable wristband over Bluetooth Low Energy for instant, sub-15ms physical speech coaching feedback.</string>
     <key>NSBluetoothPeripheralUsageDescription</key>

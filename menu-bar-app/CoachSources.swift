@@ -24,6 +24,9 @@ struct SpeechSpan: Sendable {
     let path: String
     /// For the log: which row or event this was.
     let label: String
+    /// Adds its words to the turn in progress but no timing (screenpipe's late spans for
+    /// the owner, once the microphone times the turn).
+    var wordsOnly = false
 }
 
 /// Something that hears speech. The coach asks once a second (main thread); a detector

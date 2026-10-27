@@ -19,11 +19,12 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var trayKind = ""
     private lazy var statusJob = Job("Status", period: 8, backoff: Backoff(base: 8, max: 60), quiet: true) { [weak self] _ in
         guard let self = self else { return .idle }
-        let (previous, helpers, uploaderActive) = DispatchQueue.main.sync {
-            (self.status, [self.tunnel] + (self.uploader.map { [$0] } ?? []), self.uploader != nil)
+        let (previous, helpers, uploaderActive, speechProblem) = DispatchQueue.main.sync {
+            (self.status, [self.tunnel] + (self.uploader.map { [$0] } ?? []), self.uploader != nil,
+             (self.talkMonitor.speech as? MicSpeechSource)?.problem)
         }
         let next = StatusProbe.collect(previous: previous, helpers: helpers, appAgentPlist: self.appAgentPlist,
-                                       uploaderActive: uploaderActive)
+                                       uploaderActive: uploaderActive, extraProblems: speechProblem.map { [Problem(source: "Speech", text: $0)] } ?? [])
         if let appVersion = ScreenpipeUpdateCheck.installedAppVersion() {
             CaptureEnvironment.screenpipeAppVersion = appVersion
         }

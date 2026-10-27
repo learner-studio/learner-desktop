@@ -29,6 +29,9 @@ struct BundleTests {
         #expect(info["CFBundleExecutable"] as? String == "learner-desktop")
         #expect(info["LSUIElement"] as? Bool == true)
         #expect((info["NSBluetoothAlwaysUsageDescription"] as? String)?.isEmpty == false)
+        // The speech detector: its model ships in the bundle, and macOS can ask for the mic.
+        #expect((info["NSMicrophoneUsageDescription"] as? String)?.isEmpty == false)
+        #expect(FileManager.default.fileExists(atPath: app + "/Contents/Resources/silero-vad.mlmodelc/model.mil"))
         #expect(ChildProcess.run("/usr/bin/codesign", ["--verify", "--strict", app], timeout: 30).status == 0)
         let help = ChildProcess.run(exe, ["tool", "--help"], timeout: 30, stderr: true)
         #expect(help.status == 0 && help.output.contains("usage: learner-desktop tool"))

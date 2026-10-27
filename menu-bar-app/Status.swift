@@ -161,7 +161,7 @@ enum StatusProbe {
 
     /// Blocking; run by the Status job.
     static func collect(previous: AppStatus, helpers: [ManagedHelper], appAgentPlist: String,
-                        uploaderActive: Bool = false) -> AppStatus {
+                        uploaderActive: Bool = false, extraProblems: [Problem] = []) -> AppStatus {
         var s = AppStatus()
         s.capture = screenpipe()
         let server = HTTPProbe.get(serverHealthURL)
@@ -175,6 +175,7 @@ enum StatusProbe {
         s.problems = Job.all.compactMap { j in j.problem.map { Problem(source: j.name, text: $0) } }
             + helpers.compactMap { h in h.problem.map { Problem(source: "Helper:\(h.name)", text: $0) } }
             + (HabitEventLogger.shared.problem.map { [Problem(source: "Trials", text: $0)] } ?? [])
+        s.problems += extraProblems
         if uploaderActive {
             let cli = CLISessions.readStatus()
             s.cliSessions = CLISessions.summary(cli)
