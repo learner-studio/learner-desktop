@@ -2089,6 +2089,7 @@ final class VaultExport {
     static let shared = VaultExport()
     static let interval: TimeInterval = 6 * 3600
     static let perProviderTimeout: TimeInterval = 30 * 60
+    static let rateLimitRetry: TimeInterval = 30 * 60
     static let providers = ["claude", "chatgpt"]
 
     private let work = DispatchQueue(label: "com.benpollack.vault-export", qos: .utility)
@@ -2126,6 +2127,7 @@ final class VaultExport {
         work.async {
             var expired: Set<String> = []
             var notes: [String] = []
+            var rateLimited = false
             for provider in VaultExport.providers {
                 let (status, output) = self.backup(provider)
                 // ai-vault exits 0 even when its summary lists errors, so read the output.
@@ -2134,6 +2136,9 @@ final class VaultExport {
                     notes.append("\(provider): login expired")
                 } else if status == nil {
                     notes.append("\(provider): timed out")
+                } else if output.contains("API request failed: 429") {
+                    rateLimited = true
+                    notes.append("\(provider): rate limited, retrying in 30 min")
                 } else if output.range(of: VaultExport.failedPattern, options: .regularExpression) != nil {
                     notes.append("\(provider): failed (see vault-export.log)")
                 } else {
@@ -2145,6 +2150,7 @@ final class VaultExport {
                 self.lastRun = Date()
                 self.lastSummary = notes.joined(separator: ", ")
                 self.running = false
+                if rateLimited { self.nextRun = min(self.nextRun, Date().addingTimeInterval(VaultExport.rateLimitRetry)) }
                 print("[VaultExport] \(self.lastSummary)")
                 self.onFinished?()
                 if self.rerun { self.rerun = false; self.runNow() }

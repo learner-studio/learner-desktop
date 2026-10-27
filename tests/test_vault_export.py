@@ -37,6 +37,14 @@ class VaultExportOutcomeTest(unittest.TestCase):
         self.assertNotRegex(FAILED, pattern("loginExpiredPattern"))
         self.assertRegex(FAILED, pattern("failedPattern"))
 
+    def test_a_rate_limit_retries_soon_rather_than_in_six_hours(self):
+        with open(SWIFT, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertIn('output.contains("API request failed: 429")', src)
+        self.assertIn("Date().addingTimeInterval(VaultExport.rateLimitRetry)", src)
+        # 429 is not an expired login.
+        self.assertNotRegex("API request failed: 429", pattern("loginExpiredPattern"))
+
     def test_a_clean_run_is_ok(self):
         self.assertNotRegex(OK, pattern("loginExpiredPattern"))
         self.assertNotRegex(OK, pattern("failedPattern"))
