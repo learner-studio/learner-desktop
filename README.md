@@ -1,10 +1,39 @@
-# Learner Desktop — Monologue Habit Experiment
+**WARNING THIS IS A VIBE-CODED PROTOTYPE**
 
-A self-experiment in interrupting monologues on calls. Learner Desktop, a macOS menu-bar app, watches
-[screenpipe](https://github.com/mediar-ai/screenpipe)'s live transcription, tracks how long
-the owner has been talking without yielding, and delivers a stimulus at 30 s and 60 s under a
-randomised treatment arm. The pre-treatment baseline (historical meeting transcripts) already
-lives on learner-server.
+# Learner Desktop
+
+A macOS menu-bar app (Swift) that runs on the owner's Mac and feeds
+[learner-server](https://github.com/learner-studio/learner-server), which parses, dedupes and
+stores everything and hosts the Learner web app. The desktop app:
+
+- **Coaches talk time on calls.** It follows [screenpipe](https://github.com/mediar-ai/screenpipe)'s
+  live transcription of the microphone, tracks how long the owner has talked without
+  yielding, and at 30 s and 60 s gives a cue for the session's randomised treatment arm
+  (a screen toast in every arm, plus sound, a Pavlok vibration or shock). Every turn is a
+  trial row sent to the server.
+- **Archives ChatGPT and Claude web chats.** The [ai-vault](https://www.npmjs.com/package/ai-vault)
+  CLI exports them hourly; the app fills in ChatGPT voice-chat transcripts that ai-vault
+  leaves out and sends every changed conversation to the server.
+- **Reports its health.** A heartbeat every 5 minutes, and a tray icon that turns red, with
+  the reason, when anything is stuck: screenpipe, the server, the device key, an expired
+  ai-vault login, the trial database, the tunnel.
+
+Codex CLI and Claude Code sessions are captured by learner-server's `clients/uploader`
+(learner-upload), not by this app (yet): it tails `~/.codex/sessions` and
+`~/.claude/projects` and uploads the raw session files with the same device key and client id.
+
+## Pairing with learner-server
+
+Everything goes to learner-server over HTTPS as `POST ${LEARNER_API_URL}/rpc/<name>` with body
+`{"data": <input>}` and the device key in `x-api-key`. The wire shapes are pinned in
+`contract/desktop.ts` and `contract/contract.json` (see `contract/PINNED_COMMIT`).
+
+- **Server:** `LEARNER_API_URL`, default `https://dev.biztoolz.app/learner-api`.
+- **Client id:** `ben-mbp`. It must not change: the server keys every thread on it.
+- **Device key:** issued by learner-server for that client id. The app reads it from the
+  Keychain (service `learner-server`, account `ben-mbp`) or `LEARNER_API_KEY`.
+- **What it sends:** `recordHabitEvents` (trial rows), `archiveConversationDocuments` (chats,
+  always the full conversation; the server dedupes), `recordAppHeartbeat`.
 
 ## Architecture
 
@@ -23,19 +52,14 @@ ai-vault CLI ──Export job (hourly)──▶ ~/ai-vault-data ──Voice─�
 Status job (8 s) ──▶ one AppStatus ──▶ tray + menu          Heartbeat job (5 min) ──▶ recordAppHeartbeat
 ```
 
-Two paths write `habit_events` and they measure different things, recorded in
-`metadata.measurement`:
+Live trial rows are `metadata.measurement = "voiced"`: a turn is a run of voiced segments and
+its duration the summed voiced audio (median ~7.5 s). They also carry `gap_duration_sec`, the
+wall-clock span of the turn. Historical baseline rows on learner-server were measured
+differently; see the server repo.
 
-| | live (`voiced`) | import (`transcript_gap`) |
-|---|---|---|
-| A turn is | a run of voiced segments | consecutive same-speaker transcript lines |
-| Duration | summed voiced audio | gap to the next line, capped at `words / 2.0` s |
-| Median | ~7.5 s | ~13 s |
+## Build and run
 
-Live rows also carry `gap_duration_sec` (wall-clock span of the turn) so the two are
-comparable on the same basis.
-
-## Setup
+Requires macOS 14+, Xcode (Swift 6), screenpipe, and for chats the `ai-vault` CLI (`npm i -g ai-vault`).
 
 ```bash
 security add-generic-password -s learner-server -a ben-mbp -w   # store the device key (prompts)
@@ -229,8 +253,8 @@ toast is recorded in `metadata.interventions[]` with `modality: "toast"`.
 
 - Warning at 30 s, hard stop at 60 s.
 - `breached_30s` / `breached_60s` are strict (`> 30`, `> 60`).
-- `was_rewarded` is `5 <= duration < 30` — a turn short enough to be a clean yield but long
-  enough not to be a grunt.
+- A turn of 5–30 s (a clean yield) earns a reward vibration only in the wristband arms;
+  `was_rewarded` records whether one was actually delivered.
 - `warning_fired_at` / `shock_fired_at` hold the streak length when the stimulus actually
   fired, not the threshold constant.
 - `latency_to_yield_sec` is the time from the warning firing to the speaker yielding. This is
@@ -244,11 +268,10 @@ Synthetic data never reaches production metrics: simulated turns are written wit
 
 ## Data notes
 
-- `Past Call Transcripts/` and `data/` are gitignored: they hold real customer meeting
-  transcripts and everything derived from them. The baseline already lives on learner-server,
-  so `data/` is normally absent.
-- Baseline rows are tagged `metadata.source = 'readai_docx_import_v2'`.
-- An earlier server-side rebuild tagged `transcript_rebuild_20260908` has been replaced.
+- `Past Call Transcripts/` and `data/` are gitignored: they would hold real meeting
+  transcripts. Nothing in them is used by the app.
+- App data lives in `~/.ai-aggregator` (logs, job state, the trial database, the archive
+  ledger); ai-vault's export in `~/ai-vault-data`.
 
 ### Manual Pavlok Bluetooth test
 
