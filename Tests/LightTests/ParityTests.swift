@@ -5,8 +5,8 @@ import Testing
 import TestSupport
 
 /// The Swift parser against the TypeScript parser it replaced: tests/Fixtures/parity holds
-/// tricky fictional exports and, for each, the TS parser's output (generate.ts, run with bun
-/// on the parser from commit b591b40). learner-server dedupes on documentId and compares
+/// tricky fictional exports and, for each, the TS parser's output (generated with bun from the parser at commit
+/// b591b40; the generator was retired after a full diff over the real export matched). learner-server dedupes on documentId and compares
 /// message text, so ids, order, roles and text must match exactly: strings here are
 /// compared scalar by scalar, never with Swift's canonical-equivalence `==`.
 @Suite("Parser parity with the TypeScript watcher", .timeLimit(.minutes(1))) struct ParityTests {
@@ -47,7 +47,7 @@ import TestSupport
         }
     }
 
-    // MARK: The same reduction generate.ts applies
+    // MARK: The same reduction the fixture generator applied
 
     static func digest(_ doc: [String: Any]) -> [String: Any] {
         var d = doc
