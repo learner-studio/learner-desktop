@@ -8,6 +8,7 @@ import Foundation
 //   learner-desktop tool start-capture-phase [--dry-run] [--config PATH]
 //   learner-desktop tool growthbook-design [--apply]
 //   learner-desktop tool vault-report [ROOT]
+//   learner-desktop tool preflight [--quiet]
 //
 // Run them from the repository (paths default relative to it), e.g.
 //   swift run LearnerDesktop tool growthbook-design
@@ -32,6 +33,7 @@ enum Tools {
           start-capture-phase [--dry-run] [--config PATH]   new experiment phase after a screenpipe version change
           growthbook-design [--apply]                        print (or apply over ssh ovh) the Speaking Coach GrowthBook design
           vault-report [ROOT]                                ai-vault conversation counts (never text)
+          preflight [--quiet]                                the capture stack still matches config/screenpipe-settings.json
         """
 
     /// Dispatches `args` (what follows `tool`) and returns the exit status.
@@ -43,6 +45,7 @@ enum Tools {
             case "start-capture-phase": return try CapturePhase.main(rest, io: io)
             case "growthbook-design": return try GrowthBookDesign.main(rest, io: io)
             case "vault-report": return VaultReport.main(rest, io: io, parse: VaultReport.defaultParser)
+            case "preflight": return try Preflight.main(rest, io: io)
             case "-h", "--help", "help": io.out(usage); return 0
             default: io.err("unknown tool: \(name)\n\(usage)"); return 2
             }

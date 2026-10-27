@@ -1,5 +1,5 @@
 {
-  "_comment": "Screenpipe runtime settings this experiment depends on, checked by scripts/preflight-capture.sh. Captured from ~/.screenpipe/store.bin. Secrets redacted - set those in the Screenpipe UI, not here.",
+  "_comment": "Screenpipe runtime settings this experiment depends on, checked by `learner-desktop tool preflight`. Captured from ~/.screenpipe/store.bin. Secrets redacted - set those in the Screenpipe UI, not here.",
   "_screenpipe_app_version": "2.7.125",
   "_screenpipe_engine_version": "0.4.52",
   "_captured": "2026-10-26",

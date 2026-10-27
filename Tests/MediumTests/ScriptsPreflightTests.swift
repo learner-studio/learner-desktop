@@ -3,14 +3,13 @@ import Testing
 @testable import LearnerDesktop
 import TestSupport
 
-// scripts/preflight-capture.sh against a stand-in screenpipe.
+// `learner-desktop tool preflight` against a stand-in screenpipe.
 //
 // SAFETY: never touches the real capture stack. HOME is a temp directory holding a
 // synthetic store.bin, PREFLIGHT_EXPECTED points at a temp expectations file,
 // SCREENPIPE_API at a local HTTPStandIn and SCREENPIPE_APP at a bundle that does not
 // exist. The live run is HeavyTests/CaptureLiveTests.
 
-private let preflight = toolsRepoRoot() + "/scripts/preflight-capture.sh"
 private let baseline: [String: Any] = ["transcriptionMode": "realtime", "audioChunkDuration": 5,
                                        "audioTranscriptionEngine": "whisper-large-v3-turbo-quantized", "autoUpdate": false]
 private let rowOK = #"[{"id":1,"audio_chunk_id":2,"timestamp":"2026-09-09T00:00:00-04:00","start_time":0.5,"end_time":1.5,"file_path":"/x.mp4"}]"#
@@ -40,7 +39,7 @@ private let rowOK = #"[{"id":1,"audio_chunk_id":2,"timestamp":"2026-09-09T00:00:
         env["PREFLIGHT_EXPECTED"] = expFile
         env["SCREENPIPE_API"] = api
         env["SCREENPIPE_APP"] = dir.file("no-such.app")
-        let r = ChildProcess.run(preflight, [], timeout: 60, env: env, stderr: true)
+        let r = ChildProcess.run(appBinary, ["tool", "preflight"], timeout: 60, env: env, stderr: true)
         return (r.status, r.output, server)
     }
 

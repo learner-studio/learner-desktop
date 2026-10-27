@@ -4,7 +4,7 @@ import Testing
 import TestSupport
 
 // The live capture stack on :3030, READ-ONLY: GET /health, SELECTs through /raw_sql,
-// ~/.screenpipe/store.bin, and scripts/preflight-capture.sh (which only reads). Nothing
+// ~/.screenpipe/store.bin, and `tool preflight` (which only reads). Nothing
 // is started, stopped or written. Needs LEARNER_HEAVY=1 (scripts/test.sh heavy sets it)
 // and a running screenpipe; each suite skips with the reason otherwise.
 
@@ -83,7 +83,7 @@ struct CaptureLiveTests {
     }
 
     @Test func preflightPassesAgainstTheLiveStack() {
-        let r = ChildProcess.run(toolsRepoRoot() + "/scripts/preflight-capture.sh", [], timeout: 120, stderr: true)
+        let r = ChildProcess.run(appBinary, ["tool", "preflight"], timeout: 120, stderr: true)
         #expect(r.status == 0, "preflight reported drift:\n\(r.output)")
     }
 }

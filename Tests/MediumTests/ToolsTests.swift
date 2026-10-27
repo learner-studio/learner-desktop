@@ -121,24 +121,23 @@ private let fixtureConfig = """
 
     // MARK: The app binary
 
-    static let binary = toolsRepoRoot() + "/.build/debug/LearnerDesktop"
 
-    @Test(.enabled(if: FileManager.default.isExecutableFile(atPath: binary), "build the app first (swift build)"))
+    @Test(.enabled(if: FileManager.default.isExecutableFile(atPath: appBinary), "build the app first (swift build)"))
     func theAppBinaryDispatchesToolsAndExits() throws {
         let dir = TempDir()
         defer { dir.cleanup() }
-        let design = ChildProcess.run(Self.binary, ["tool", "growthbook-design"], timeout: 30)
+        let design = ChildProcess.run(appBinary, ["tool", "growthbook-design"], timeout: 30)
         #expect(design.status == 0)
         let shown = try #require(try JSONSerialization.jsonObject(with: Data(design.output.utf8)) as? [String: String])
         #expect(shown["fact_sql"] == GrowthBookDesign.sql)
 
         dir.write("vault/chatgpt/conversations/c1/conversation.md",
                   "# Chat\n**Created:** 2026-02-01T10:00:00Z\n\n---\n\n## User\n\nprivate words\n\n---\n\n## Assistant\n\nmore private words\n")
-        let report = ChildProcess.run(Self.binary, ["tool", "vault-report", dir.file("vault")], timeout: 30)
+        let report = ChildProcess.run(appBinary, ["tool", "vault-report", dir.file("vault")], timeout: 30)
         #expect(report.status == 0 && report.output.contains("messages: total=2 user=1 assistant=1"))
         #expect(!report.output.contains("private words"))
 
-        let unknown = ChildProcess.run(Self.binary, ["tool", "nope"], timeout: 30, stderr: true)
+        let unknown = ChildProcess.run(appBinary, ["tool", "nope"], timeout: 30, stderr: true)
         #expect(unknown.status == 2 && unknown.output.contains("unknown tool"))
     }
 }

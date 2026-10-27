@@ -104,7 +104,8 @@ private func read(_ relative: String) -> String { (try? String(contentsOfFile: V
         let runbook = read("docs/screenpipe-update-runbook.md")
         let allow = permissions["allow"] as! [String]
         for command in ["launchctl setenv SCREENPIPE_SKIP_ONBOARDING 1", "open -g -a /Applications/screenpipe.app",
-                        "./scripts/preflight-capture.sh", "git add config/screenpipe-settings.json"] {
+                        "\"/Users/benpollack/Applications/Learner Desktop.app/Contents/MacOS/learner-desktop\" tool preflight",
+                        "git add config/screenpipe-settings.json"] {
             #expect(runbook.contains(command), "\(command)")
             #expect(allow.contains("Bash(\(command))"), "\(command)")
         }

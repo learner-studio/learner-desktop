@@ -51,15 +51,12 @@ warn() { printf '    \033[33m! %s\033[0m\n' "$*"; }
 # "on" if screenpipe's API reports any active capture, "off" if it reports none,
 # "unknown" if the API does not answer.
 capture_state() {
-  curl -s --max-time 3 http://127.0.0.1:3030/health 2>/dev/null | python3 -c '
-import json, sys
-try:
-    d = json.load(sys.stdin)
-except ValueError:
-    print("unknown")
-    sys.exit()
-audio = (d.get("capture_status") or {}).get("active_audio_devices") or 0
-print("on" if audio > 0 or d.get("frame_status") == "ok" else "off")'
+  local health audio frames
+  health="$(curl -s --max-time 3 http://127.0.0.1:3030/health 2>/dev/null)"
+  if ! printf '%s' "$health" | plutil -convert json -o /dev/null - 2>/dev/null; then echo unknown; return; fi
+  audio="$(printf '%s' "$health" | plutil -extract capture_status.active_audio_devices raw -o - - 2>/dev/null)"
+  frames="$(printf '%s' "$health" | plutil -extract frame_status raw -o - - 2>/dev/null)"
+  if [ "${audio:-0}" -gt 0 ] 2>/dev/null || [ "$frames" = ok ]; then echo on; else echo off; fi
 }
 
 unsynced_count() {

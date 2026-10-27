@@ -112,7 +112,7 @@ launchd, no Swift compile. The capture scripts are covered by the Swift medium l
 state-changing command (`launchctl`, `pkill`, `curl`, `osascript`, `open`, `nc`,
 `sqlite3`, `bun`) is a recording stub on `PATH` and `HOME` points at a throwaway
 directory — they assert the ordering and flag handling without touching the real
-capture stack; `ScriptsPreflightTests.swift` runs `preflight-capture.sh` against a
+capture stack; `ScriptsPreflightTests.swift` runs `tool preflight` against a
 stand-in screenpipe. `tests/ts/` covers the ai-vault message parser (and, read-only, every
 file in `~/ai-vault-data` when it exists), the RPC client against a local mock server
 (2xx, 422, 401, 413, 429). Run this on every change.
@@ -207,7 +207,7 @@ in turn counts or durations impossible to attribute to the intervention, so:
 Run the preflight before a session that matters:
 
 ```bash
-./scripts/preflight-capture.sh
+swift run LearnerDesktop tool preflight
 ```
 
 It compares the live `~/.screenpipe/store.bin` against `config/screenpipe-settings.json` and
@@ -220,7 +220,7 @@ corrupted the 2026-09-08 data — and nothing errors when it happens. Exit codes
 When a settings change is deliberate, re-capture the expectations so it lands in git:
 
 ```bash
-./scripts/preflight-capture.sh          # shows exactly what drifted
+swift run LearnerDesktop tool preflight   # shows exactly what drifted
 # ...then update config/screenpipe-settings.json and commit it
 ```
 

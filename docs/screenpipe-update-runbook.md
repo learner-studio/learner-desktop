@@ -35,7 +35,7 @@ Record each as ✓ or ✗ with the evidence.
    In `~/.ai-aggregator/logs/menubar.log`, the last
    `Connected to Screenpipe raw_sql (lastCheckedTranscriptionId: N)` must have N close to
    that max id. A small N means the coach is replaying history as live speech: report it.
-6. **Preflight.** `./scripts/preflight-capture.sh`
+6. **Preflight.** `"/Users/benpollack/Applications/Learner Desktop.app/Contents/MacOS/learner-desktop" tool preflight`
 7. **Tests.** `./scripts/test.sh`
 
 ## 2. Fix only these, then check again

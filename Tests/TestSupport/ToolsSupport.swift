@@ -16,3 +16,6 @@ public final class Printed: @unchecked Sendable {
 public func toolsRepoRoot(_ file: String = #filePath) -> String {
     URL(fileURLWithPath: file).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().path
 }
+
+/// The app binary `swift build` made (the lanes build before they run).
+public let appBinary = toolsRepoRoot() + "/.build/debug/LearnerDesktop"

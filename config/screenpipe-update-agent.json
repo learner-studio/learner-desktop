@@ -21,7 +21,7 @@
       "Bash(curl -s -m 10 -X POST http://localhost:3030/raw_sql:*)",
       "Bash(nc -z 127.0.0.1 3200)",
       "Bash(open -g -a /Applications/screenpipe.app)",
-      "Bash(./scripts/preflight-capture.sh)",
+      "Bash(\"/Users/benpollack/Applications/Learner Desktop.app/Contents/MacOS/learner-desktop\" tool preflight)",
       "Bash(./scripts/test.sh)",
       "Bash(\"/Users/benpollack/Applications/Learner Desktop.app/Contents/MacOS/learner-desktop\" tool start-capture-phase:*)",
       "Bash(git status:*)",

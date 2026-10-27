@@ -3,27 +3,12 @@ import Testing
 @testable import LearnerDesktop
 import TestSupport
 
-/// The built app binary, from `swift build --show-bin-path` in this package.
-private func builtApp() throws -> String {
-    let p = Process()
-    p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-    p.arguments = ["swift", "build", "--show-bin-path"]
-    p.currentDirectoryURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-    let out = Pipe()
-    p.standardOutput = out
-    p.standardError = FileHandle.nullDevice
-    try p.run()
-    p.waitUntilExit()
-    let bin = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-    return bin + "/LearnerDesktop"
-}
 
 @Suite("Coach, medium: the real binary and a local screenpipe") struct CoachMediumTests {
     /// Every malformed invocation dies on the argument check: exit 2 with the usage, and
     /// nothing reaches CoreBluetooth (which would also get an unsigned binary killed by TCC).
     @Test func testFireRejectsBadArgumentsBeforeTouchingBluetooth() throws {
-        let app = try builtApp()
+        let app = appBinary
         #expect(FileManager.default.isExecutableFile(atPath: app), "not built: \(app)")
         let bad: [[String]] = [[], ["punch"], ["ZAPP"], ["shock"], [""], ["vibe", "0"], ["vibe", "-5"], ["vibe", "101"],
                                ["vibe", "banana"], ["vibe", "20", "--wait", "0"], ["vibe", "20", "--wait", "999999"],
