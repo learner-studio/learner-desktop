@@ -7,7 +7,7 @@ import TestSupport
 // (BUNDLE_ONLY: no install, no launchctl). The bundle must run, carry the tunnel script with
 // the marker its helper is recognised by, keep the bundle id that TCC and the Pavlok
 // settings are keyed to, and verify.
-@Suite("App bundle (build-app.sh)", .quietLog, .serialized, .timeLimit(.minutes(2)),
+@Suite("App bundle (build-app.sh)", .tags(.heavy, .helpers), .quietLog, .serialized, .timeLimit(.minutes(2)),
        .enabled(if: ProcessInfo.processInfo.environment["LEARNER_HEAVY"] == "1", "heavy lane: set LEARNER_HEAVY=1"))
 struct BundleTests {
     @Test func theScriptBuildsASignedRunnableBundle() throws {
