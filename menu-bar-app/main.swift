@@ -2094,6 +2094,8 @@ final class VaultExport {
     private var nextRun = Date().addingTimeInterval(120)
     private var running = false
 
+    static let loginExpiredPattern = "Authentication failed|cookies appear to be expired|Organization ID not available|API request failed: 40[13]"
+    static let failedPattern = "Errors: [1-9]|Completed with [1-9][0-9]* errors"
     private(set) var expiredLogins: Set<String> = []
     private(set) var lastRun: Date?
     private(set) var lastSummary = "not run yet"
@@ -2113,11 +2115,14 @@ final class VaultExport {
             var notes: [String] = []
             for provider in VaultExport.providers {
                 let (status, output) = self.backup(provider)
-                if output.range(of: "Authentication failed|cookies appear to be expired", options: .regularExpression) != nil {
+                // ai-vault exits 0 even when its summary lists errors, so read the output.
+                if output.range(of: VaultExport.loginExpiredPattern, options: .regularExpression) != nil {
                     expired.insert(provider)
                     notes.append("\(provider): login expired")
                 } else if status == nil {
                     notes.append("\(provider): timed out")
+                } else if output.range(of: VaultExport.failedPattern, options: .regularExpression) != nil {
+                    notes.append("\(provider): failed (see vault-export.log)")
                 } else {
                     notes.append("\(provider): \(status == 0 ? "ok" : "exit \(status!)")")
                 }
