@@ -64,9 +64,31 @@ class SignInTest(unittest.TestCase):
     def test_each_expired_login_has_a_sign_in_item(self):
         self.assertIn('login expired — Sign In Again...", #selector(signInToVault(_:))).representedObject = provider', self.src)
 
-    def test_sign_in_happens_in_the_app_not_in_terminal(self):
-        self.assertIn("VaultSignIn.show(provider)", self.src)
+    def test_sign_in_uses_your_browser_where_1password_and_passkeys_work(self):
+        self.assertIn("VaultSignIn.start(provider)", self.src)
+        self.assertNotIn("WKWebView", self.src)
         self.assertNotIn(".command", self.src)
+        self.assertIn("browser.open(site.url)", self.src)
+
+    def test_brave_is_the_default_and_chrome_can_be_chosen_in_settings(self):
+        body = self.src[self.src.index("struct ChromiumBrowser {"):]
+        self.assertLess(body.index('id: "brave"'), body.index('id: "chrome"'))
+        self.assertIn("?? all[0]", body)
+        self.assertIn('"Brave Safe Storage"', body)
+        self.assertIn('add("Sign AI Vault In From", to: settings).submenu = browserMenu', self.src)
+
+    def test_an_existing_chrome_session_is_tried_before_opening_anything(self):
+        body = self.src[self.src.index("private func checked(session:"):]
+        body = body[:body.index("\n    }\n")]
+        self.assertLess(body.index("VaultExport.shared.signedIn(provider)"), body.index("browser.open"))
+
+    def test_browser_cookies_are_decrypted_with_the_safe_storage_key(self):
+        body = self.src[self.src.index("enum BrowserCookies {"):]
+        self.assertIn("browser.keychainService", body)
+        self.assertIn('"saltysalt"', body)
+        self.assertIn("1003", body)
+        self.assertIn("version >= 24", body)
+        self.assertIn("immutable=1", body)
 
     def test_cookies_go_to_ai_vault_through_a_private_file_that_is_removed(self):
         body = self.src[self.src.index("static func runSetup("):]
@@ -77,13 +99,13 @@ class SignInTest(unittest.TestCase):
         self.assertLess(body.index("sites[provider] != nil"), body.index("p.arguments"))
 
     def test_a_refused_session_is_not_retried_in_a_loop(self):
-        self.assertIn("session != self.triedSession", self.src)
+        self.assertIn("$0 == tried ? nil", self.src)
 
-    def test_success_exports_and_closes_the_window(self):
-        body = self.src[self.src.index("private func save(_ cookies: [HTTPCookie])"):]
-        body = body[:body.index("\n    }\n")]
-        self.assertIn("VaultExport.shared.signedIn(provider)", body)
-        self.assertIn("self.window.close()", body)
+    def test_the_expired_session_ai_vault_already_has_is_not_resaved(self):
+        self.assertIn("triedSession = VaultSignIn.savedSession(provider, site: site)", self.src)
+
+    def test_watching_chrome_stops_after_a_limit(self):
+        self.assertIn("static let waitLimit: TimeInterval = 10 * 60", self.src)
 
     def test_a_sign_in_during_an_export_is_not_dropped(self):
         self.assertIn("guard !running else { rerun = true; return }", self.src)
@@ -94,10 +116,6 @@ class SignInTest(unittest.TestCase):
         body = body[:body.index("\n    }\n")]
         self.assertIn("expiredLogins.remove(provider)", body)
         self.assertIn("onFinished?()", body)
-
-    def test_sign_in_popups_open(self):
-        self.assertIn("createWebViewWith configuration: WKWebViewConfiguration", self.src)
-        self.assertIn("webView.uiDelegate = self", self.src)
 
 
 if __name__ == "__main__":

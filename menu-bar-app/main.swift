@@ -3,7 +3,7 @@ import Foundation
 import ServiceManagement
 import SQLite3
 import CoreBluetooth
-import WebKit
+import CommonCrypto
 
 // MARK: - Logging
 
@@ -2083,8 +2083,8 @@ func processCommandLine(_ pid: pid_t, includeEnvironment: Bool = false) -> Strin
 /// CLI, where the transcript watcher picks them up and archives them on learner-server.
 /// Nothing scheduled this before, so nothing new was exported after 2026-09-07. ai-vault
 /// logs in with browser cookies that expire. An expired login turns the tray red and the
-/// menu offers "Sign In Again", which opens VaultSignIn: a normal sign-in page inside the
-/// app whose session cookies are handed to `ai-vault setup --cookies-file`.
+/// menu offers "Sign In Again", which runs VaultSignIn: the session is taken from Chrome
+/// (signing in there first if needed) and handed to `ai-vault setup --cookies-file`.
 final class VaultExport {
     static let shared = VaultExport()
     static let interval: TimeInterval = 6 * 3600
@@ -2210,13 +2210,13 @@ final class VaultExport {
 
 // MARK: - AI Vault sign-in
 
-/// Signs ai-vault back in without Terminal or developer tools. `ai-vault setup` only
-/// asks for cookie values to be pasted by hand; instead this window shows the provider's
-/// own sign-in page, and once its session cookie appears the cookies go to
+/// Signs ai-vault back in from your own browser (Settings → Sign AI Vault In From; Brave by
+/// default), where 1Password and passkeys work; an embedded web view gets neither. The
+/// provider's cookies are read from that browser's cookie store and handed to
 /// `ai-vault setup <provider> --cookies-file` (a 0600 file, deleted straight after).
-/// On success the window closes and an export runs. The web view keeps its own
-/// persistent store, so a later re-sign-in is often a single click.
-final class VaultSignIn: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate {
+/// If the browser already holds a new session, nothing opens. Otherwise the sign-in page
+/// opens there and the cookie store is watched until a new session appears.
+final class VaultSignIn {
     struct Site { let url: String; let domain: String; let session: [String] }
 
     static let sites: [String: Site] = [
@@ -2224,122 +2224,85 @@ final class VaultSignIn: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUID
                         session: ["__Secure-next-auth.session-token", "__Secure-next-auth.session-token.0"]),
         "claude": Site(url: "https://claude.ai/login", domain: "claude.ai", session: ["sessionKey"]),
     ]
-    private static var open: [String: VaultSignIn] = [:]
+    static let pollInterval: TimeInterval = 3
+    static let waitLimit: TimeInterval = 10 * 60
+    private static var active: [String: VaultSignIn] = [:]
 
-    static func show(_ provider: String) {
-        NSApp.activate(ignoringOtherApps: true)
-        if let existing = open[provider] { existing.window.makeKeyAndOrderFront(nil); return }
-        guard let site = sites[provider] else { return }
+    static func isWaiting(_ provider: String) -> Bool { active[provider]?.openedBrowser == true }
+
+    static func start(_ provider: String) {
+        guard active[provider] == nil, let site = sites[provider] else { return }
         let s = VaultSignIn(provider: provider, site: site)
-        open[provider] = s
-        s.window.makeKeyAndOrderFront(nil)
+        active[provider] = s
+        print("[VaultSignIn] \(provider): checking \(s.browser.name)'s session")
+        s.check()
     }
 
     private let provider: String
     private let site: Site
-    private let window: NSWindow
-    private let webView: WKWebView
-    private let status = NSTextField(labelWithString: "")
-    private var timer: Timer?
+    private let browser = ChromiumBrowser.selected
+    private let deadline = Date().addingTimeInterval(VaultSignIn.waitLimit)
     private var triedSession: String?
-    private var saving = false
-    private var connected = false
-    private var popups: [NSWindow] = []
+    private var openedBrowser = false
+    private var busy = false
+    private var timer: Timer?
 
     private init(provider: String, site: Site) {
         self.provider = provider
         self.site = site
-        let config = WKWebViewConfiguration()
-        config.websiteDataStore = .default()
-        webView = WKWebView(frame: .zero, configuration: config)
-        // Some sign-in providers refuse embedded browsers by user agent.
-        webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15"
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 760),
-                          styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
-        super.init()
-        window.title = "Sign in to \(provider == "chatgpt" ? "ChatGPT" : "Claude") for AI Vault"
-        window.isReleasedWhenClosed = false
-        window.delegate = self
-        window.center()
-
-        status.stringValue = "Sign in below. This window closes by itself once AI Vault is connected."
-        status.lineBreakMode = .byTruncatingTail
-        let stack = NSStackView(views: [status, webView])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 0, right: 0)
-        webView.translatesAutoresizingMaskIntoConstraints = false
-        webView.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-        window.contentView = stack
-
-        webView.navigationDelegate = self
-        webView.uiDelegate = self
-        if let url = URL(string: site.url) { webView.load(URLRequest(url: url)) }
-        timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in self?.checkCookies() }
-        print("[VaultSignIn] opened \(provider)")
+        // ai-vault saves whatever it is given, so the session it already has (the one that
+        // expired) counts as tried; the browser then has to come up with a new one.
+        triedSession = VaultSignIn.savedSession(provider, site: site)
     }
 
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { checkCookies() }
-
-    /// "Continue with Google" and similar open a popup that reports back to the page; a
-    /// web view without this silently drops the click.
-    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
-                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        let popup = WKWebView(frame: .zero, configuration: configuration)
-        popup.customUserAgent = webView.customUserAgent
-        popup.uiDelegate = self
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 680),
-                         styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        w.isReleasedWhenClosed = false
-        w.title = window.title
-        w.contentView = popup
-        w.center()
-        w.makeKeyAndOrderFront(nil)
-        popups.append(w)
-        return popup
+    private static func savedSession(_ provider: String, site: Site) -> String? {
+        guard let data = FileManager.default.contents(atPath: NSHomeDirectory() + "/.ai-vault/config.json"),
+              let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let providers = config["providers"] as? [String: Any],
+              let entry = providers[provider] as? [String: Any],
+              let cookies = entry["cookies"] as? [String: Any] else { return nil }
+        return site.session.lazy.compactMap { cookies[$0] as? String }.first
     }
 
-    func webViewDidClose(_ webView: WKWebView) {
-        popups.filter { $0.contentView === webView }.forEach { $0.close() }
-        popups.removeAll { $0.contentView === webView }
-    }
-
-    private func checkCookies() {
-        guard !saving, !connected else { return }
-        webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { [weak self] cookies in
-            guard let self = self, !self.saving, !self.connected else { return }
-            let mine = cookies.filter { $0.domain.hasSuffix(self.site.domain) }
-            // Try each new session value once; a refused one is not retried until it changes.
-            guard let session = mine.first(where: { self.site.session.contains($0.name) })?.value,
-                  session != self.triedSession else { return }
-            self.triedSession = session
-            self.save(mine)
-        }
-    }
-
-    private func save(_ cookies: [HTTPCookie]) {
-        saving = true
-        status.stringValue = "Signed in. Connecting AI Vault…"
-        let provider = self.provider
-        let values = Dictionary(cookies.map { ($0.name, $0.value) }, uniquingKeysWith: { a, _ in a })
+    private func check() {
+        guard !busy else { return }
+        busy = true
+        let (provider, site, tried, browser) = (self.provider, self.site, triedSession, self.browser)
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = VaultSignIn.runSetup(provider, cookies: values)
-            DispatchQueue.main.async {
-                self.saving = false
-                if result.ok {
-                    self.connected = true
-                    self.timer?.invalidate()
-                    print("[VaultSignIn] \(provider): ai-vault accepted the session; exporting")
-                    self.status.stringValue = "Connected. Exporting your chats…"
-                    VaultExport.shared.signedIn(provider)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self.window.close() }
-                } else {
-                    print("[VaultSignIn] \(provider): ai-vault setup failed: \(result.detail)")
-                    self.status.stringValue = "AI Vault could not use this sign-in (\(result.detail)). Sign out and in again below."
-                }
-            }
+            let cookies = BrowserCookies.read(browser, domain: site.domain)
+            let session = site.session.lazy.compactMap { cookies[$0] }.first
+            // Try each session value once; a refused one is not retried until it changes.
+            let result = session.flatMap { $0 == tried ? nil : VaultSignIn.runSetup(provider, cookies: cookies) }
+            DispatchQueue.main.async { self.checked(session: session, result: result) }
         }
+    }
+
+    private func checked(session: String?, result: (ok: Bool, detail: String)?) {
+        busy = false
+        if let session = session { triedSession = session }
+        if let result = result, result.ok {
+            print("[VaultSignIn] \(provider): ai-vault accepted \(browser.name)'s session; exporting")
+            stop()
+            VaultExport.shared.signedIn(provider)
+            return
+        }
+        if let result = result { print("[VaultSignIn] \(provider): ai-vault setup failed: \(result.detail)") }
+        if Date() > deadline {
+            print("[VaultSignIn] \(provider): no new session in \(browser.name) after \(Int(VaultSignIn.waitLimit / 60)) min; stopped watching")
+            stop()
+            return
+        }
+        guard !openedBrowser else { return }
+        openedBrowser = true
+        browser.open(site.url)
+        print("[VaultSignIn] \(provider): opened the sign-in page in \(browser.name)")
+        timer = Timer.scheduledTimer(withTimeInterval: VaultSignIn.pollInterval, repeats: true) { [weak self] _ in self?.check() }
+    }
+
+    private func stop() {
+        timer?.invalidate()
+        timer = nil
+        VaultSignIn.active[provider] = nil
     }
 
     /// `ai-vault setup <provider> --cookies-file <0600 file>`; the file is removed afterwards.
@@ -2368,16 +2331,158 @@ final class VaultSignIn: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUID
         let last = text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.last { !$0.isEmpty }
         return (ok, ok ? "ok" : String((last ?? "exit \(p.terminationStatus)").prefix(160)))
     }
+}
 
-    func windowWillClose(_ notification: Notification) {
-        timer?.invalidate()
-        timer = nil
-        webView.navigationDelegate = nil
-        webView.uiDelegate = nil
-        popups.forEach { $0.close() }
-        popups.removeAll()
-        VaultSignIn.open[provider] = nil
+/// A Chromium browser whose cookie store VaultSignIn can read. Brave and Chrome share the
+/// store format and differ only in where it lives and which Keychain item holds its key.
+struct ChromiumBrowser {
+    let id: String
+    let name: String
+    let bundleId: String
+    let dataDir: String
+    let keychainService: String
+    let keychainAccount: String
+
+    static let all = [
+        ChromiumBrowser(id: "brave", name: "Brave", bundleId: "com.brave.Browser",
+                        dataDir: "BraveSoftware/Brave-Browser", keychainService: "Brave Safe Storage", keychainAccount: "Brave"),
+        ChromiumBrowser(id: "chrome", name: "Chrome", bundleId: "com.google.Chrome",
+                        dataDir: "Google/Chrome", keychainService: "Chrome Safe Storage", keychainAccount: "Chrome"),
+    ]
+    static let defaultsKey = "vault_sign_in_browser"
+
+    static var selected: ChromiumBrowser {
+        get { all.first { $0.id == UserDefaults.standard.string(forKey: defaultsKey) } ?? all[0] }
+        set { UserDefaults.standard.set(newValue.id, forKey: defaultsKey) }
     }
+
+    func open(_ url: String) {
+        guard let url = URL(string: url) else { return }
+        guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) else {
+            NSWorkspace.shared.open(url)
+            return
+        }
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+        NSWorkspace.shared.open([url], withApplicationAt: app, configuration: config)
+    }
+}
+
+/// Reads one site's cookies from a Chromium browser's on-disk store. Values are AES-128-CBC
+/// encrypted with a key derived from the browser's "… Safe Storage" Keychain item; macOS
+/// asks once for access (choose Always Allow). Store version 24 and later prefix each
+/// plaintext with a 32-byte SHA-256 of the host. Of all profiles, the one whose cookies
+/// were used last wins.
+enum BrowserCookies {
+    private static var keys: [String: [UInt8]] = [:]
+
+    static func read(_ browser: ChromiumBrowser, domain: String) -> [String: String] {
+        let root = NSHomeDirectory() + "/Library/Application Support/" + browser.dataDir
+        let profiles = ((try? FileManager.default.contentsOfDirectory(atPath: root)) ?? [])
+            .filter { $0 == "Default" || $0.hasPrefix("Profile ") }
+        var best: (lastUsed: Int64, cookies: [String: String]) = (0, [:])
+        for profile in profiles {
+            let found = read(db: "\(root)/\(profile)/Cookies", domain: domain, browser: browser)
+            if found.lastUsed > best.lastUsed { best = found }
+        }
+        return best.cookies
+    }
+
+    private static func read(db path: String, domain: String, browser: ChromiumBrowser) -> (lastUsed: Int64, cookies: [String: String]) {
+        guard FileManager.default.fileExists(atPath: path) else { return (0, [:]) }
+        var db: OpaquePointer?
+        // immutable: the browser holds the store open; read it without taking a lock.
+        let uri = "file:" + path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)! + "?immutable=1"
+        guard sqlite3_open_v2(uri, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil) == SQLITE_OK else {
+            sqlite3_close(db)
+            return (0, [:])
+        }
+        defer { sqlite3_close(db) }
+        var version = 0
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "SELECT value FROM meta WHERE key = 'version'", -1, &stmt, nil) == SQLITE_OK,
+           sqlite3_step(stmt) == SQLITE_ROW, let v = sqlite3_column_text(stmt, 0) {
+            version = Int(String(cString: v)) ?? 0
+        }
+        sqlite3_finalize(stmt)
+        stmt = nil
+        let sql = "SELECT name, value, encrypted_value, last_access_utc FROM cookies WHERE host_key = ?1 OR host_key LIKE '%.' || ?1 ORDER BY last_access_utc"
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return (0, [:]) }
+        defer { sqlite3_finalize(stmt) }
+        let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        sqlite3_bind_text(stmt, 1, (domain as NSString).utf8String, -1, SQLITE_TRANSIENT)
+        var cookies: [String: String] = [:]
+        var lastUsed: Int64 = 0
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let name = String(cString: sqlite3_column_text(stmt, 0))
+            var value = String(cString: sqlite3_column_text(stmt, 1))
+            let count = Int(sqlite3_column_bytes(stmt, 2))
+            if value.isEmpty, count > 0, let blob = sqlite3_column_blob(stmt, 2) {
+                let bytes = [UInt8](UnsafeRawBufferPointer(start: blob, count: count))
+                guard let plain = decrypt(bytes, dropHostHash: version >= 24, browser: browser) else { continue }
+                value = plain
+            }
+            // Rows come oldest first, so a newer duplicate (another host spelling) wins.
+            cookies[name] = value
+            lastUsed = max(lastUsed, sqlite3_column_int64(stmt, 3))
+        }
+        return (lastUsed, cookies)
+    }
+
+    private static func decrypt(_ data: [UInt8], dropHostHash: Bool, browser: ChromiumBrowser) -> String? {
+        guard data.count > 3, data[0...2] == [0x76, 0x31, 0x30] /* "v10" */, let key = safeStorageKey(browser) else { return nil }
+        let body = Array(data[3...])
+        let iv = [UInt8](repeating: 0x20, count: kCCBlockSizeAES128)
+        var out = [UInt8](repeating: 0, count: body.count + kCCBlockSizeAES128)
+        var outCount = 0
+        let status = CCCrypt(CCOperation(kCCDecrypt), CCAlgorithm(kCCAlgorithmAES128), CCOptions(kCCOptionPKCS7Padding),
+                             key, key.count, iv, body, body.count, &out, out.count, &outCount)
+        guard status == kCCSuccess else { return nil }
+        let plain = out.prefix(outCount).dropFirst(dropHostHash ? 32 : 0)
+        return String(bytes: plain, encoding: .utf8)
+    }
+
+    /// Asked through /usr/bin/security so an Always Allow survives rebuilds of this app.
+    private static func safeStorageKey(_ browser: ChromiumBrowser) -> [UInt8]? {
+        if let key = keys[browser.id] { return key }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        p.arguments = ["find-generic-password", "-w", "-s", browser.keychainService, "-a", browser.keychainAccount]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return nil }
+        let raw = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        guard p.terminationStatus == 0,
+              let password = String(data: raw, encoding: .utf8)?.trimmingCharacters(in: .newlines), !password.isEmpty else {
+            print("[VaultSignIn] could not read \(browser.keychainService) from the Keychain")
+            return nil
+        }
+        let salt = Array("saltysalt".utf8)
+        var derived = [UInt8](repeating: 0, count: kCCKeySizeAES128)
+        guard CCKeyDerivationPBKDF(CCPBKDFAlgorithm(kCCPBKDF2), password, password.utf8.count, salt, salt.count,
+                                   CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA1), 1003, &derived, derived.count) == kCCSuccess else {
+            return nil
+        }
+        keys[browser.id] = derived
+        return derived
+    }
+}
+
+/// `--browser-cookie-check <brave|chrome> <domain>` lists which cookies the browser holds
+/// for a site, with value lengths only, then exits: a check that the store can be read
+/// and decrypted.
+func runBrowserCookieCheckCLI() {
+    let args = CommandLine.arguments
+    guard let idx = args.firstIndex(of: "--browser-cookie-check"), idx + 2 < args.count,
+          let browser = ChromiumBrowser.all.first(where: { $0.id == args[idx + 1] }) else {
+        print("usage: --browser-cookie-check <brave|chrome> <domain>")
+        exit(2)
+    }
+    let cookies = BrowserCookies.read(browser, domain: args[idx + 2])
+    for (name, value) in cookies.sorted(by: { $0.key < $1.key }) { print("\(name)\t\(value.count) chars") }
+    exit(cookies.isEmpty ? 1 : 0)
 }
 
 // MARK: - screenpipe Update Check
@@ -3876,7 +3981,11 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let export = VaultExport.shared
         _ = add("   └─ Last export: " + (export.lastRun.map { DateFormatter.localizedString(from: $0, dateStyle: .none, timeStyle: .short) + " — " } ?? "") + export.lastSummary)
         for provider in export.expiredLogins.sorted() {
-            add("   ⚠️ \(provider) login expired — Sign In Again...", #selector(signInToVault(_:))).representedObject = provider
+            if VaultSignIn.isWaiting(provider) {
+                _ = add("   ⏳ \(provider): sign in in \(ChromiumBrowser.selected.name); the app picks it up from there")
+            } else {
+                add("   ⚠️ \(provider) login expired — Sign In Again...", #selector(signInToVault(_:))).representedObject = provider
+            }
         }
         _ = add("   📥 Pull Latest Chats (Incremental Sweep)", #selector(pullVaultChats))
 
@@ -3962,6 +4071,11 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let settings = NSMenu()
         _ = add(talkMonitor.alertOnlyDuringCalls ? "✓ Alert Only During Calls (Off-Call Silent)" : "○ Alert On All Monologues (Any App)",
                 #selector(toggleAlertOnlyDuringCalls), to: settings)
+        let browserMenu = NSMenu()
+        for browser in ChromiumBrowser.all {
+            add("\(ChromiumBrowser.selected.id == browser.id ? "✓ " : "   ")\(browser.name)", #selector(selectVaultBrowser(_:)), to: browserMenu).representedObject = browser.id
+        }
+        add("Sign AI Vault In From", to: settings).submenu = browserMenu
         let armMenu = NSMenu()
         for arm in HabitTreatmentArm.allCases {
             add("\(mode == arm ? "✓ " : "   ")\(arm.displayName)", #selector(selectExperimentArm(_:)), to: armMenu).representedObject = arm.rawValue
@@ -4458,9 +4572,16 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    @objc func selectVaultBrowser(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String,
+              let browser = ChromiumBrowser.all.first(where: { $0.id == id }) else { return }
+        ChromiumBrowser.selected = browser
+        rebuildMenu()
+    }
+
     @objc func signInToVault(_ sender: NSMenuItem) {
         guard let provider = sender.representedObject as? String else { return }
-        VaultSignIn.show(provider)
+        VaultSignIn.start(provider)
     }
 
     @objc func pullVaultChats() {
@@ -4733,6 +4854,10 @@ func runPavlokTestFireCLI() {
 }
 
 // MARK: - Application Entrypoint
+
+if CommandLine.arguments.contains("--browser-cookie-check") {
+    runBrowserCookieCheckCLI()
+}
 
 if CommandLine.arguments.contains("--pavlok-test-fire") {
     runPavlokTestFireCLI()
