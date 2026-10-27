@@ -84,7 +84,7 @@ private func read(_ relative: String) -> String { (try? String(contentsOfFile: V
         CaptureEnvironment.screenpipeAppVersion = "2.7.1"
         CaptureEnvironment.screenpipeVersion = "0.3.0"
         #expect(CaptureEnvironment.capturePhase == "screenpipe 2.7.1 / engine 0.3.0")
-        #expect(read("scripts/start-capture-phase.py").contains("return f\"screenpipe {app} / engine {engine}\""))
+        #expect(CapturePhase.phaseName(app: "2.7.1", engine: "0.3.0") == CaptureEnvironment.capturePhase)
     }
 
     // MARK: The agent's fence
@@ -108,8 +108,8 @@ private func read(_ relative: String) -> String { (try? String(contentsOfFile: V
             #expect(runbook.contains(command), "\(command)")
             #expect(allow.contains("Bash(\(command))"), "\(command)")
         }
-        #expect(runbook.contains("python3 scripts/start-capture-phase.py"))
-        #expect(allow.contains("Bash(python3 scripts/start-capture-phase.py:*)"))
+        #expect(runbook.contains("tool start-capture-phase"))
+        #expect(allow.contains { $0.hasPrefix("Bash(") && $0.contains("learner-desktop\" tool start-capture-phase:*)") })
     }
 
     @Test func canReadTheLogsItIsToldToCheck() {

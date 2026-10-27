@@ -35,13 +35,13 @@ private let fixtureConfig = """
 
 @Suite("Tools end to end", .serialized) struct ToolsEndToEndTests {
 
-    func phaseFixture(_ dir: TempDir) throws -> (CapturePhase.Options, StandInServer) {
-        let screenpipe = try StandInServer { _ in StandInServer.json(200, ["status": "healthy", "version": "0.4.52"]) }
+    func phaseFixture(_ dir: TempDir) throws -> (CapturePhase.Options, HTTPStandIn) {
+        let screenpipe = try HTTPStandIn { _ in HTTPStandIn.Response.json(200, ["status": "healthy", "version": "0.4.52"]) }
         let plist = dir.file("Info.plist")
         try PropertyListSerialization.data(fromPropertyList: ["CFBundleShortVersionString": "2.7.125"], format: .xml, options: 0)
             .write(to: URL(fileURLWithPath: plist))
         var o = CapturePhase.Options(config: dir.write("settings.json", fixtureConfig))
-        o.healthURL = screenpipe.url + "/health"
+        o.healthURL = screenpipe.baseURL + "/health"
         o.appPlist = plist
         return (o, screenpipe)
     }

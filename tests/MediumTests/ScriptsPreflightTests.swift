@@ -7,7 +7,7 @@ import TestSupport
 //
 // SAFETY: never touches the real capture stack. HOME is a temp directory holding a
 // synthetic store.bin, PREFLIGHT_EXPECTED points at a temp expectations file,
-// SCREENPIPE_API at a local StandInServer and SCREENPIPE_APP at a bundle that does not
+// SCREENPIPE_API at a local HTTPStandIn and SCREENPIPE_APP at a bundle that does not
 // exist. The live run is HeavyTests/CaptureLiveTests.
 
 private let preflight = toolsRepoRoot() + "/scripts/preflight-capture.sh"
@@ -18,21 +18,21 @@ private let rowOK = #"[{"id":1,"audio_chunk_id":2,"timestamp":"2026-09-09T00:00:
 @Suite("Preflight (stand-in screenpipe)") struct ScriptsPreflightTests {
 
     func run(settings: [String: Any], expected: [String: Any] = baseline, pins: [String: Any] = [:],
-             health: String? = #"{"status":"healthy","version":"0.4.50"}"#, rows: String = rowOK) throws -> (status: Int32?, output: String, server: StandInServer?) {
+             health: String? = #"{"status":"healthy","version":"0.4.50"}"#, rows: String = rowOK) throws -> (status: Int32?, output: String, server: HTTPStandIn?) {
         let dir = TempDir("preflight")
         defer { dir.cleanup() }
         dir.write(".screenpipe/store.bin", Tools.json(["settings": settings]))
         var exp = pins
         exp["settings"] = expected
         let expFile = dir.write("expected.json", Tools.json(exp))
-        var server: StandInServer?
+        var server: HTTPStandIn?
         var api = "http://127.0.0.1:9"   // nothing listens: unreachable
         if let health = health {
-            let s = try StandInServer { req in
-                req.path == "/raw_sql" ? (200, Data(rows.utf8)) : (200, Data(health.utf8))
+            let s = try HTTPStandIn { req in
+                HTTPStandIn.Response(status: 200, body: Data((req.path == "/raw_sql" ? rows : health).utf8))
             }
             server = s
-            api = s.url
+            api = s.baseURL
         }
         defer { server?.stop() }
         var env = ProcessInfo.processInfo.environment

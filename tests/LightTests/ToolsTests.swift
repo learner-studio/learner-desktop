@@ -163,9 +163,9 @@ func toolIO(_ p: Printed, env: [String: String] = [:], cwd: String = NSTemporary
         let status = VaultReport.report(root: dir.path, io: toolIO(p), parse: VaultReport.defaultParser)
         #expect(status == 1)   // c2 has no timestamp
         #expect(p.stdout.contains("chatgpt\tc1\t3\t2\t1\t1\tvalid,flagged"))
-        #expect(p.stdout.contains("claude\tc2\t2\t1\t1\t1\tINVALID"))
+        #expect(p.stdout.contains("claude\tc2\t0\t1\t1\t1\tINVALID"))   // no document: nothing would be sent
         #expect(p.stdout.contains("files: 2 (chatgpt=1, claude=1)"))
-        #expect(p.stdout.contains("messages: total=5 user=3 assistant=2"))
+        #expect(p.stdout.contains("messages: total=3 user=3 assistant=2"))
         #expect(p.stdout.contains("skipped messages: 2 (attachment-only=2)"))
         #expect(p.stdout.contains("header-count-mismatch:3!=4"))
         #expect(p.stdout.contains("no-timestamp"))

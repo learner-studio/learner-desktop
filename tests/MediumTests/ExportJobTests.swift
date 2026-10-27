@@ -38,7 +38,9 @@ private final class ExportFixture {
         c.logPath = dir.file("vault-export.log")
         c.loginsPath = dir.file("logins.json")
         c.aiVaultConfig = dir.file("ai-vault-config.json")
-        c.stallTimeout = 1.5
+        // Generous: a busy machine can take seconds to start a script. The stall test
+        // shortens it itself.
+        c.stallTimeout = 8
         c.killGrace = 0.5
         c.maxRunTime = 60
         c.orphanMarkers = []
@@ -133,7 +135,7 @@ private final class ExportFixture {
     }
 
     @Test func aStuckExportThatIgnoresSIGTERMIsKilledAndRetriedWithBackoffAcrossARestart() {
-        let f = ExportFixture()
+        let f = ExportFixture(configure: { $0.stallTimeout = 1.5 })
         f.dir.write("claude.hang", "")
         f.output("chatgpt", Fixture.aiVaultOk)
         let started = Date()

@@ -57,7 +57,8 @@ public func pid(in path: String) -> pid_t? {
 private let captureLock = NSLock()
 public func capturingLog(_ body: () throws -> Void) rethrows -> [String] {
     captureLock.lock()
-    defer { captureLock.unlock(); LogSink.set(nil) }
+    // Clear the sink BEFORE releasing the lock, or the next test's sink gets cleared.
+    defer { LogSink.set(nil); captureLock.unlock() }
     let lines = LockedLines()
     LogSink.set { lines.append($0) }
     try body()

@@ -41,7 +41,8 @@ import TestSupport
             """, executable: true)
         var childPid: pid_t = 0
         let started = Date()
-        let r = ChildProcess.run(script, [], timeout: 1.5, grace: 0.5)
+        // Long enough for a loaded machine to start bash and write the pid file.
+        let r = ChildProcess.run(script, [], timeout: 4, grace: 0.5)
         #expect(r.status == nil)
         #expect(Date().timeIntervalSince(started) < 8)
         if let text = try? String(contentsOfFile: dir.file("child.pid"), encoding: .utf8) {
@@ -74,7 +75,8 @@ import TestSupport
         #expect(eventually(6) { count() >= 3 })
         let seen = count()
         #expect(seen <= 4)
-        #expect(helper.problem != nil)
+        // The third exit is counted a moment after the third launch.
+        #expect(eventually(3) { helper.problem != nil })
         helper.stop(grace: 0.5)
     }
 

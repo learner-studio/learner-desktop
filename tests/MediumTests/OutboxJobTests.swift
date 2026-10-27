@@ -41,8 +41,10 @@ private func eventIds(_ req: HTTPStandIn.Request) -> [String] {
 @Suite("Outbox job (real TCP stand-in)", .serialized, .timeLimit(.minutes(1))) struct OutboxJobTests {
     @Test func theJobSendsTheQueueOverHTTP() throws {
         let f = try OutboxFixture(turns: 3, handler: accepted)
-        f.sender.job.kick("test")
-        #expect(waitFor(10) { f.logger.getUnsyncedCount() == 0 })
+        // Wait for the job's recorded outcome: rows are marked sent a moment before the
+        // status line is written, so waiting on the queue alone races.
+        run(f.sender.job)
+        #expect(f.logger.getUnsyncedCount() == 0)
         let req = try #require(f.server.requests.first)
         #expect(req.method == "POST")
         #expect(req.path == "/learner-api/rpc/recordHabitEvents")

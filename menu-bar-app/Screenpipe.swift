@@ -24,11 +24,11 @@ enum CaptureEnvironment {
         set { lock.lock(); storedAppVersion = newValue; lock.unlock() }
     }
 
-    /// The experiment phase a turn belongs to: each screenpipe version is its own phase.
-    /// scripts/start-capture-phase.py names the GrowthBook phase with the same string.
+    /// The experiment phase a turn belongs to: each screenpipe version is its own phase,
+    /// named exactly as `tool start-capture-phase` names it in GrowthBook.
     static var capturePhase: String? {
         guard let app = screenpipeAppVersion, let engine = screenpipeVersion else { return nil }
-        return "screenpipe \(app) / engine \(engine)"
+        return CapturePhase.phaseName(app: app, engine: engine)
     }
 }
 

@@ -54,7 +54,11 @@ run_lane() {
     mkdir -p "$LEARNER_DATA_DIR" "$AI_VAULT_DATA"
     trap 'rm -rf "$sandbox"' RETURN
   fi
-  swift test --skip-build --filter "$target" "$@"
+  # Medium and heavy run one test at a time: they start real processes and servers, and
+  # running dozens at once makes timing tests flaky. Light stays parallel.
+  local parallel=()
+  [ "$lane" != light ] && parallel=(--no-parallel)
+  swift test --skip-build --filter "$target" ${parallel[@]+"${parallel[@]}"} "$@"
   status=$?
   end=$(date +%s)
   took=$((end - start))
