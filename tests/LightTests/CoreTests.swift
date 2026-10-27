@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import LearnerDesktop
+import TestSupport
 
 // The shared workflow primitives every workflow runs through (Core.swift).
 // Serialized: AppLog.sink and Job.stateDir are process-wide.
@@ -17,14 +18,13 @@ import Testing
     }
 
     @Test func warningsAreNeverCollapsedButNoisyRepeatsAre() {
-        var lines: [String] = []
-        AppLog.sink = { lines.append($0) }
-        defer { AppLog.sink = nil }
         let log = Log("Test\(UUID().uuidString.prefix(4))")
-        log.warn("server down 1")
-        log.warn("server down 2")
-        log.noisy("band out of range 1")
-        log.noisy("band out of range 2")
+        let lines = capturingLog {
+            log.warn("server down 1")
+            log.warn("server down 2")
+            log.noisy("band out of range 1")
+            log.noisy("band out of range 2")
+        }
         #expect(lines.filter { $0.contains("WARN  [") && $0.contains("server down") }.count == 2)
         #expect(lines.filter { $0.contains("band out of range") }.count == 1)
         #expect(lines.allSatisfy { $0.range(of: #"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d "#, options: .regularExpression) != nil })

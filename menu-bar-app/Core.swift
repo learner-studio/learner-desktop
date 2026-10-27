@@ -392,7 +392,7 @@ final class Job {
             return true
         }
         guard go else { return }
-        if let reason = reason { log.info("run: \(reason)") } else if !quiet { log.info("run") }
+        if !quiet { log.info(reason.map { "run: \($0)" } ?? "run") }
         queue.async { self.execute() }
     }
 
@@ -434,8 +434,9 @@ final class Job {
                 state.problemSince = state.problemSince ?? now
                 state.summary = summary
             }
+            let routine = quiet && state.failures == 0 && state.problemSince == nil && !state.blocked
             state.lastRun = now
-            save()
+            if !routine { save() }
         }
         if again { start(reason: "queued while running") }
     }
@@ -472,6 +473,12 @@ enum Scheduler {
         RunLoop.main.add(t, forMode: .common)
         timer = t
         Log("Scheduler").info("started: \(tasks.map { "\($0.name) every \(Job.describe($0.every))" }.joined(separator: ", ")); jobs: \(Job.all.map(\.name).joined(separator: ", "))")
+    }
+
+    /// At quit: no more ticks or job runs.
+    static func stop() {
+        timer?.invalidate()
+        timer = nil
     }
 
     private static func fire() {

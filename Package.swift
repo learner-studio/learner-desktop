@@ -17,11 +17,12 @@ let package = Package(
             swiftSettings: [.swiftLanguageMode(.v5)],
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
-        .testTarget(name: "LightTests", dependencies: ["LearnerDesktop"], path: "Tests/LightTests",
+        .target(name: "TestSupport", path: "Tests/TestSupport", swiftSettings: [.swiftLanguageMode(.v5)]),
+        .testTarget(name: "LightTests", dependencies: ["LearnerDesktop", "TestSupport"], path: "Tests/LightTests",
                     swiftSettings: [.swiftLanguageMode(.v5)]),
-        .testTarget(name: "MediumTests", dependencies: ["LearnerDesktop"], path: "Tests/MediumTests",
+        .testTarget(name: "MediumTests", dependencies: ["LearnerDesktop", "TestSupport"], path: "Tests/MediumTests",
                     swiftSettings: [.swiftLanguageMode(.v5)]),
-        .testTarget(name: "HeavyTests", dependencies: ["LearnerDesktop"], path: "Tests/HeavyTests",
+        .testTarget(name: "HeavyTests", dependencies: ["LearnerDesktop", "TestSupport"], path: "Tests/HeavyTests",
                     swiftSettings: [.swiftLanguageMode(.v5)]),
     ]
 )

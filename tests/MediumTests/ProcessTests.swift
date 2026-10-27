@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import LearnerDesktop
+import TestSupport
 
 // ChildProcess and ManagedHelper against real child processes: stalls, programs that
 // ignore SIGTERM, process trees, orphans from a crashed launch, crash loops.
@@ -113,13 +114,12 @@ import Testing
         let dir = TempDir()
         defer { dir.cleanup() }
         let helper = ManagedHelper(name: "missing", executable: dir.file("not-there"), arguments: [], marker: "not-there", runtimeDir: dir.path)
-        var lines: [String] = []
-        let lock = NSLock()
-        AppLog.sink = { l in lock.withLock { lines.append(l) } }
-        defer { AppLog.sink = nil }
-        DispatchQueue.main.sync { helper.start() }
-        // Retries at 1 s, 2 s: at least two "could not start" lines within 3.5 s.
-        #expect(eventually(4) { lock.withLock { lines.filter { $0.contains("could not start") }.count } >= 2 })
+        let lines = capturingLog {
+            DispatchQueue.main.sync { helper.start() }
+            // Retries at 1 s, 2 s: two "could not start" lines within 3.5 s.
+            usleep(3_500_000)
+        }
+        #expect(lines.filter { $0.contains("could not start") }.count >= 2)
         // The binary appears (an upgrade finished): the helper comes up on its own.
         _ = dir.write("not-there", "#!/bin/bash\nwhile true; do sleep 1; done\n", executable: true)
         #expect(eventually(6) { helper.isRunning })

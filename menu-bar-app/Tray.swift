@@ -9,38 +9,33 @@ import CommonCrypto
 class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
     var statusMenu: NSMenu!
-    var backgroundTimer: Timer?
-    var speechTimer: Timer?
     private var isShuttingDown = false
+    let log = Log("Tray")
     private var signalSources: [DispatchSourceSignal] = []
 
     let homeDir = NSHomeDirectory()
     let talkMonitor = TalkTimeMonitor.shared
 
-    // Cached states
-    var screenpipeHealth: String = "Checking..."
-    var screenpipeDetail: String = ""
-    var isScreenpipeHealthy: Bool = false
-    var isScreenpipeDegraded: Bool = false
-
-    var vaultCount: Int = 0
-    var vaultChatGptCount: Int = 0
-    var vaultClaudeCount: Int = 0
-
-    /// learner-server answers GET /api/health (public; no key involved).
-    var isServerReachable: Bool = false
-    /// A watcher problem that has lasted (from its status.json), or nil when it is sending.
-    var watcherProblem: String?
-    var watcherParked = 0
-    static let watcherProblemGrace: TimeInterval = 10 * 60
-    /// The watcher sweeps hourly; no status update for this long means it is not working.
-    static let watcherStaleAfter: TimeInterval = 150 * 60
+    /// Collected off the main thread by the Status job; the tray and menu only read it.
+    var status = AppStatus()
+    private var trayKind = ""
+    private lazy var statusJob = Job("Status", period: 8, backoff: Backoff(base: 8, max: 60), quiet: true) { [weak self] _ in
+        guard let self = self else { return .idle }
+        let previous = DispatchQueue.main.sync { self.status }
+        let next = StatusProbe.collect(previous: previous, helpers: [self.tunnel, self.watcher], appAgentPlist: self.appAgentPlist)
+        self.ensureScreenpipeSkipsSignIn()
+        if let appVersion = ScreenpipeUpdateCheck.installedAppVersion() {
+            CaptureEnvironment.screenpipeAppVersion = appVersion
+            DispatchQueue.main.async { ScreenpipeUpdateCheck.shared.observe(appVersion: appVersion) }
+        }
+        DispatchQueue.main.async { self.apply(next) }
+        return .ok("collected")
+    }
 
     /// The app's own LaunchAgent. If it is switched off in System Settings -> Login Items,
     /// launchd skips it at login -- and the tunnel and watcher with it -- so a manual start
     /// does not survive the next reboot. Only the owner can re-allow it there.
     let appAgentPlist = NSHomeDirectory() + "/Library/LaunchAgents/com.benpollack.learner-desktop.plist"
-    var needsLoginApproval = false
 
     // Helpers the app runs itself, from its own bundle (see ManagedHelper).
     lazy var tunnel = ManagedHelper(
@@ -94,9 +89,8 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         tunnel.start()
         watcher.start()
 
-        VaultExport.shared.onFinished = { [weak self] in self?.updateTrayButton() }
+        VaultExport.shared.onFinished = { [weak self] in self?.statusJob.kick("export finished") }
         rebuildMenu()
-        updateAllStatuses()
 
         talkMonitor.onStreakUpdated = { [weak self] _ in
             DispatchQueue.main.async {
@@ -110,27 +104,29 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
 
-        // Poll speech & monologue detection every 1.0 second
-        speechTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.talkMonitor.tick()
+        _ = statusJob
+        Scheduler.every(1, "coach") { [weak self] in self?.talkMonitor.tick() }
+        Scheduler.every(8, "export+outbox") { [weak self] in
+            VaultExport.shared.tick()
+            OutboxSender.shared.tick(heartbeat: { self?.heartbeatInput() ?? [:] })
         }
-
-        // Poll background server statuses every 8.0 seconds
-        backgroundTimer = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: true) { [weak self] _ in
-            self?.updateAllStatuses()
-        }
+        Scheduler.start()
     }
 
+    /// Main thread: swap in a fresh status and redraw the tray.
+    func apply(_ next: AppStatus) {
+        status = next
+        updateTrayButton()
+    }
+
+    /// Draws from the last status snapshot (no I/O), then refreshes it in the background.
     func menuWillOpen(_ menu: NSMenu) {
-        var mark = Date()
-        func timed(_ step: String) {
-            let ms = Int(Date().timeIntervalSince(mark) * 1000)
-            if ms > 150 { print("[Menu] slow open: \(step) took \(ms) ms") }
-            mark = Date()
-        }
-        updateVaultCount(); timed("updateVaultCount")
-        PavlokController.shared.updateConnectionStatus(); timed("Pavlok status")
-        rebuildMenu(); timed("rebuildMenu")
+        let started = Date()
+        rebuildMenu()
+        let ms = Int(Date().timeIntervalSince(started) * 1000)
+        if ms > 100 { log.warn("menu took \(ms) ms to build") }
+        statusJob.kick("menu opened")
+        PavlokController.shared.updateConnectionStatus()
     }
 
     // MARK: - Menu Bar Tray Dropdown Menu
@@ -143,10 +139,15 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         addSpeakingCoachSection()
 
         // --- Capture, chats, server ---
-        let spState = isScreenpipeHealthy ? "🟢 Recording" : (isScreenpipeDegraded ? "🟡 Idle / Degraded" : "🔴 Stopped")
-        statusMenu.addItem(NSMenuItem(title: "📹 Screenpipe: \(spState)" + (screenpipeDetail.isEmpty ? "" : " — \(screenpipeDetail)"), action: nil, keyEquivalent: ""))
-
-        statusMenu.addItem(NSMenuItem(title: "🗄️ AI Vault: 🟢 \(vaultCount) Archived (ChatGPT \(vaultChatGptCount) · Claude \(vaultClaudeCount))", action: nil, keyEquivalent: ""))
+        let capture: String
+        switch status.capture {
+        case .unknown: capture = "… checking"
+        case .recording: capture = "🟢 Recording"
+        case let .degraded(why): capture = "🟡 Degraded — \(why)"
+        case let .stopped(why): capture = "🔴 Stopped — \(why)"
+        }
+        add("📹 Screenpipe: \(capture)")
+        add("🗄️ AI Vault: \(status.chats) Archived (ChatGPT \(status.chatgptChats) · Claude \(status.claudeChats))")
         let export = VaultExport.shared
         _ = add("   └─ Last export: " + (export.lastRun.map { DateFormatter.localizedString(from: $0, dateStyle: .none, timeStyle: .short) + " — " } ?? "") + export.lastSummary)
         for provider in export.expiredLogins.sorted() {
@@ -159,14 +160,13 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         _ = add("   📥 Pull Latest Chats (Incremental Sweep)", #selector(pullVaultChats))
 
         let outbox = OutboxSender.shared
-        let serverState = !isServerReachable ? "🔴 unreachable" : outbox.keyProblem ? "🔑 no working device key" : "🟢 reachable"
-        statusMenu.addItem(NSMenuItem(title: "☁️ learner-server: \(serverState)", action: nil, keyEquivalent: ""))
-        _ = add("   └─ 📤 \(HabitEventLogger.shared.getUnsyncedCount()) queued | last: \(outbox.lastStatus)"
-            + " | Tunnel \(tunnel.isRunning ? "🟢" : "🔴") | Watcher \(watcher.isRunning ? (watcherProblem == nil ? "🟢" : "🔴") : "🔴")")
-        if let problem = watcherProblem { _ = add("   ⚠️ Chats not sending: \(problem)") }
-        if watcherParked > 0 { _ = add("   ⚠️ \(watcherParked) chat(s) refused by the server (see watcher log)") }
-        _ = add("   ⚡ Send Queued Trials Now", #selector(triggerHabitSync))
-        if needsLoginApproval {
+        let serverState = !status.serverReachable ? "🔴 unreachable" : outbox.keyProblem ? "🔑 no working device key" : "🟢 reachable"
+        add("☁️ learner-server: \(serverState)")
+        add("   └─ 📤 \(status.outboxDepth) queued | last: \(outbox.lastStatus)"
+            + " | Tunnel \(tunnel.isRunning ? "🟢" : "🔴") | Watcher \(watcher.isRunning ? "🟢" : "🔴")")
+        for p in status.problems { add("   ⚠️ \(p.source): \(p.text)") }
+        add("   ⚡ Send Queued Trials Now", #selector(triggerHabitSync))
+        if status.loginItemBlocked {
             _ = add("   ⚠️ Won't start at login: allow Learner Desktop in Login Items...", #selector(openLoginItemsSettings))
         }
         statusMenu.addItem(NSMenuItem.separator())
@@ -176,7 +176,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let mode = HabitExperimentManager.shared.currentMode
         let assignedArm = HabitExperimentManager.shared.resolveArm(for: talkMonitor.activeSessionId)
         _ = add("   🎯 Condition: \(mode.shortTag) [Active: \(assignedArm)]")
-        _ = add("   📈 Recorded Trials: \(HabitEventLogger.shared.getTotalTrialCount())")
+        add("   📈 Recorded Trials: \(status.trialCount)")
         _ = add("   🌐 Open GrowthBook Dashboard...", #selector(openGrowthBookDashboard))
         statusMenu.addItem(NSMenuItem.separator())
 
@@ -219,60 +219,26 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusMenu.addItem(quitItem)
     }
 
-    // MARK: - Status Polling & Dynamic Tray Title
-    func updateAllStatuses() {
-        updateVaultCount()
-        updateScreenpipeStatus()
-        updateServerStatus()
-        updateLoginItemApproval()
-        ensureScreenpipeSkipsSignIn()
-        if let appVersion = ScreenpipeUpdateCheck.installedAppVersion() {
-            CaptureEnvironment.screenpipeAppVersion = appVersion
-            ScreenpipeUpdateCheck.shared.observe(appVersion: appVersion)
-        }
-        VaultExport.shared.tick()
-        updateWatcherStatus()
-        OutboxSender.shared.tick(heartbeat: { [weak self] in self?.heartbeatInput() ?? [:] })
-    }
-
-    /// Reads ~/.ai-aggregator/status.json, which the watcher writes after each sweep and
-    /// while sending keeps failing.
-    func updateWatcherStatus() {
-        let path = NSHomeDirectory() + "/.ai-aggregator/status.json"
-        guard watcher.isRunning,
-              let data = FileManager.default.contents(atPath: path),
-              let status = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            watcherProblem = nil
-            return
-        }
-        let iso = ISO8601DateFormatter()
-        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let date = { (key: String) in (status[key] as? String).flatMap { iso.date(from: $0) } }
-        watcherParked = status["failed"] as? Int ?? 0
-        let started = watcher.startedAt
-        if let problem = status["problem"] as? String, let since = date("problemSince"),
-           Date().timeIntervalSince(since) > TrayAppManager.watcherProblemGrace {
-            watcherProblem = "\(problem) since \(DateFormatter.localizedString(from: since, dateStyle: .none, timeStyle: .short))"
-        } else if Date().timeIntervalSince(max(date("lastUpdated") ?? .distantPast, started)) > TrayAppManager.watcherStaleAfter {
-            watcherProblem = "no sweep since \(date("lastUpdated").map { DateFormatter.localizedString(from: $0, dateStyle: .short, timeStyle: .short) } ?? "start")"
-        } else {
-            watcherProblem = nil
-        }
-    }
-
     /// recordAppHeartbeat input (contract/desktop.ts, RecordAppHeartbeatInput).
     func heartbeatInput() -> [String: Any] {
-        let captureState = isScreenpipeHealthy ? "recording" : (isScreenpipeDegraded ? "paused" : "stopped")
+        let current = DispatchQueue.main.sync { status }
+        let captureState: String
+        switch current.capture {
+        case .recording: captureState = "recording"
+        case .degraded: captureState = "paused"
+        default: captureState = "stopped"
+        }
         let iso = ISO8601DateFormatter()
         return [
             "clientId": LearnerAPI.clientId,
             "appVersion": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev",
             "screenpipeVersion": CaptureEnvironment.screenpipeVersion as Any? ?? NSNull(),
             "captureState": captureState,
-            "outboxDepth": HabitEventLogger.shared.getUnsyncedCount(),
+            "outboxDepth": current.outboxDepth,
             "lastSentAt": OutboxSender.shared.lastSentAt.map { iso.string(from: $0) } as Any? ?? NSNull(),
             "lastVaultExportAt": lastVaultExport().map { iso.string(from: $0) } as Any? ?? NSNull(),
-            "detail": ["screenpipeDetail": screenpipeDetail, "outboxStatus": OutboxSender.shared.lastStatus,
+            "detail": ["capture": StatusProbe.describe(current.capture), "outboxStatus": OutboxSender.shared.lastStatus,
+                       "problems": current.problems.map { "\($0.source): \($0.text)" },
                        "capturePhase": CaptureEnvironment.capturePhase as Any? ?? NSNull()],
         ]
     }
@@ -290,89 +256,6 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         return newest
-    }
-
-    func updateVaultCount() {
-        let fm = FileManager.default
-        let chatgptPath = homeDir + "/ai-vault-data/chatgpt/conversations"
-        let claudePath = homeDir + "/ai-vault-data/claude/conversations"
-
-        vaultChatGptCount = (try? fm.contentsOfDirectory(atPath: chatgptPath).filter { !$0.hasPrefix(".") }.count) ?? 0
-        vaultClaudeCount = (try? fm.contentsOfDirectory(atPath: claudePath).filter { !$0.hasPrefix(".") }.count) ?? 0
-        vaultCount = vaultChatGptCount + vaultClaudeCount
-        updateTrayButton()
-    }
-
-    func updateScreenpipeStatus() {
-        guard let url = URL(string: "http://localhost:3030/health") else { return }
-        var req = URLRequest(url: url)
-        req.timeoutInterval = 2.0
-
-        let task = URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                guard let data = data,
-                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    self.isScreenpipeHealthy = false
-                    self.isScreenpipeDegraded = false
-                    self.screenpipeDetail = "Port 3030 closed"
-                    self.updateTrayButton()
-                    return
-                }
-
-                if let reportedVersion = json["version"] as? String {
-                    CaptureEnvironment.screenpipeVersion = reportedVersion
-                }
-
-                let status = json["status"] as? String ?? "unknown"
-                let frameStatus = json["frame_status"] as? String ?? "unknown"
-                let audioStatus = json["audio_status"] as? String ?? "unknown"
-
-                if let captureStatus = json["capture_status"] as? [String: Any],
-                   let activeDevices = captureStatus["active_audio_devices"] as? Int,
-                   activeDevices == 0 {
-                    self.ensureAudioDevicesActive()
-                }
-
-                if status == "healthy" || (frameStatus == "ok" && audioStatus == "ok") {
-                    self.isScreenpipeHealthy = true
-                    self.isScreenpipeDegraded = false
-                    self.screenpipeDetail = "Vision: OK | Audio: OK"
-                } else {
-                    self.isScreenpipeHealthy = false
-                    self.isScreenpipeDegraded = true
-                    self.screenpipeDetail = "Vision: \(frameStatus) | Audio: \(audioStatus)"
-                }
-                self.updateTrayButton()
-            }
-        }
-        task.resume()
-    }
-
-    func ensureAudioDevicesActive() {
-        guard let url = URL(string: "http://localhost:3030/audio/device/start") else { return }
-        for dev in ["MacBook Pro Microphone (input)", "System Audio (output)"] {
-            var req = URLRequest(url: url)
-            req.httpMethod = "POST"
-            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            req.httpBody = try? JSONSerialization.data(withJSONObject: ["device_name": dev])
-            URLSession.shared.dataTask(with: req).resume()
-        }
-    }
-
-    func updateServerStatus() {
-        guard let healthUrl = URL(string: LearnerAPI.baseURL + "/api/health") else { return }
-        var req = URLRequest(url: healthUrl)
-        req.timeoutInterval = 2.0
-
-        let task = URLSession.shared.dataTask(with: req) { [weak self] _, response, _ in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                self.isServerReachable = (response as? HTTPURLResponse)?.statusCode == 200
-                self.updateTrayButton()
-            }
-        }
-        task.resume()
     }
 
     // MARK: - screenpipe sign-in flag
@@ -401,9 +284,8 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
                   !started.contains("SCREENPIPE_SKIP_ONBOARDING=1"),
                   // Signed out, screenpipe never starts its server. One that answers is (or
                   // can be) recording, and quitting it would only drop it to search-only.
-                  self?.screenpipeServerResponds() == false else { return }
-            print("[Screenpipe] Started without SCREENPIPE_SKIP_ONBOARDING, so it is waiting for a sign-in; relaunching it with the flag")
-            fflush(stdout)
+                  HTTPProbe.get(StatusProbe.screenpipeURL + "/health").status == 0 else { return }
+            self?.log.warn("screenpipe started without SCREENPIPE_SKIP_ONBOARDING, so it is waiting for a sign-in; relaunching it with the flag")
             // A normal quit: screenpipe handles no termination signals, so a signal could
             // leave its database mid-write.
             _ = screenpipe.terminate()
@@ -412,106 +294,32 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if kill(pid, 0) == 0 {
                 // Still there: it went to search-only instead of exiting. Reopening is
                 // screenpipe's own way back, and resumes recording.
-                print("[Screenpipe] Did not quit within 30s; reopening it instead")
-                fflush(stdout)
+                self?.log.warn("screenpipe did not quit within 30 s; reopening it instead")
             }
             let config = NSWorkspace.OpenConfiguration()
             config.activates = false
             config.environment = ["SCREENPIPE_SKIP_ONBOARDING": "1"]
             NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: "/Applications/screenpipe.app"),
                                                configuration: config) { _, error in
-                print(error.map { "[Screenpipe] Relaunch failed: \($0.localizedDescription)" }
-                      ?? "[Screenpipe] Relaunched with SCREENPIPE_SKIP_ONBOARDING")
-                fflush(stdout)
+                if let error = error { self?.log.error("screenpipe relaunch failed: \(error.localizedDescription)") }
+                else { self?.log.info("screenpipe relaunched with SCREENPIPE_SKIP_ONBOARDING") }
             }
         }
     }
 
-    /// Whether screenpipe's local server answers at all (degraded still counts). Blocking;
-    /// call off the main thread.
-    func screenpipeServerResponds() -> Bool {
-        guard let url = URL(string: "http://localhost:3030/health") else { return false }
-        var req = URLRequest(url: url)
-        req.timeoutInterval = 2.0
-        let done = DispatchSemaphore(value: 0)
-        var answered = false
-        URLSession.shared.dataTask(with: req) { _, response, _ in
-            answered = response != nil
-            done.signal()
-        }.resume()
-        _ = done.wait(timeout: .now() + 3)
-        return answered
-    }
-
-    func updateLoginItemApproval() {
-        let plist = URL(fileURLWithPath: appAgentPlist)
-        // statusForLegacyPlist is a synchronous XPC round trip; keep it off the main thread.
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            let blocked = SMAppService.statusForLegacyPlist(at: plist) == .requiresApproval
-            DispatchQueue.main.async {
-                guard let self = self, blocked != self.needsLoginApproval else { return }
-                if blocked {
-                    print("[LoginItem] Learner Desktop is switched off in Login Items; it will not start at login.")
-                } else {
-                    print("[LoginItem] Learner Desktop is allowed in Login Items; it will start at login.")
-                }
-                fflush(stdout)
-                self.needsLoginApproval = blocked
-                self.updateTrayButton()
-            }
-        }
-    }
-
+    /// Cheap (no I/O): called on every coach update and every status swap.
     func updateTrayButton() {
         guard let button = statusItem?.button else { return }
-
-        let callHint = talkMonitor.activeCallApp != nil ? " [\(talkMonitor.activeCallApp!)]" : ""
-
-        let baseTitle: String
-        if talkMonitor.isAlertActive {
-            baseTitle = "🗣️ 🚨 \(talkMonitor.formattedDuration)"
-            button.toolTip = "Talk-Time Alert: Continuous speech for \(talkMonitor.formattedDuration)\(callHint)\nFloating alert toast displayed (hidden from screenshare)"
-        } else if talkMonitor.isWarningActive {
-            baseTitle = "🗣️ ⚠️ \(talkMonitor.formattedDuration)"
-            button.toolTip = "Talk-Time Warning: Continuous speech for \(talkMonitor.formattedDuration)\(callHint)"
-        } else if needsLoginApproval {
-            baseTitle = "🧠 🔴 LOGIN"
-            button.toolTip = "Learner Desktop\nSwitched off in Login Items: it will not start at login, and neither will the tunnel or watcher"
-        } else if OutboxSender.shared.keyProblem {
-            baseTitle = "🧠 🔑"
-            button.toolTip = "Learner Desktop\nNo working learner-server device key (Keychain: learner-server / ben-mbp); trials queue locally"
-        } else if !isServerReachable {
-            baseTitle = "🧠 🔴 ERR"
-            button.toolTip = "Learner Desktop\nlearner-server unreachable; trials queue locally"
-        } else if !isScreenpipeHealthy && !isScreenpipeDegraded {
-            baseTitle = "🧠 🔴 SP"
-            button.toolTip = "Learner Desktop\nScreenpipe stopped"
-        } else if !VaultExport.shared.expiredLogins.isEmpty {
-            baseTitle = "🧠 🔴 VAULT"
-            button.toolTip = "Learner Desktop\nAI Vault login expired (\(VaultExport.shared.expiredLogins.sorted().joined(separator: ", "))): no new chats are exported.\nOpen the menu and choose Sign In Again."
-        } else if let problem = HabitEventLogger.shared.problem {
-            baseTitle = "🧠 🔴 DB"
-            button.toolTip = "Learner Desktop\nHabit trials are not being saved: \(problem)"
-        } else if let problem = watcherProblem {
-            baseTitle = "🧠 🔴 SYNC"
-            button.toolTip = "Learner Desktop\nChats are not reaching learner-server: \(problem).\nSee View Watcher Log in Troubleshooting."
-        } else if isScreenpipeDegraded {
-            baseTitle = "🧠 🟡 \(vaultCount)"
-            button.toolTip = "Learner Desktop\nScreenpipe idle/degraded"
-        } else if let call = talkMonitor.activeCallApp {
-            baseTitle = "🗣️ 📞 \(vaultCount)"
-            button.toolTip = "Active Call: \(call)\nSpeaking Coach monitoring talk-time limits"
-        } else {
-            baseTitle = "🧠 🟢 \(vaultCount)"
-            button.toolTip = "Learner Desktop\nAll systems healthy (\(vaultCount) chats vaulted)"
+        let coach = CoachLive(alert: talkMonitor.isAlertActive, warning: talkMonitor.isWarningActive,
+                              duration: talkMonitor.formattedDuration, call: talkMonitor.activeCallApp)
+        let state = TrayState.make(status, coach: coach)
+        if state.kind != trayKind {
+            log.info("\(trayKind.isEmpty ? "start" : trayKind) -> \(state.kind): \(state.tooltip.replacingOccurrences(of: "\n", with: " / "))")
+            trayKind = state.kind
         }
-
-        let queued = HabitEventLogger.shared.getUnsyncedCount()
-        let attrTitle = NSMutableAttributedString(
-            string: baseTitle + (queued > 0 ? " 📤\(queued)" : ""),
-            attributes: [.font: NSFont.systemFont(ofSize: 14)]
-        )
-        button.attributedTitle = attrTitle
+        let queued = status.outboxDepth > 0 ? " 📤\(status.outboxDepth)" : ""
+        button.attributedTitle = NSAttributedString(string: state.title + queued, attributes: [.font: NSFont.systemFont(ofSize: 14)])
+        button.toolTip = state.tooltip
         button.image = nil
         button.imagePosition = .noImage
     }
@@ -536,9 +344,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func restartAggregatorServices() {
         tunnel.restart()
         watcher.restart()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-            self?.updateServerStatus()
-        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.statusJob.kick("helpers restarted") }
     }
 
     @objc func openLoginItemsSettings() {
@@ -555,7 +361,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func triggerHabitSync() {
         OutboxSender.shared.sendNow()
-        updateAllStatuses()
+        statusJob.kick("send queued trials")
     }
 
     @objc func openGrowthBookDashboard() {
@@ -587,8 +393,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         isShuttingDown = true
 
         // Stop generating new work first.
-        speechTimer?.invalidate()
-        backgroundTimer?.invalidate()
+        Scheduler.stop()
 
         // Done synchronously on the main thread and bounded to ~90s. The app is quitting,
         // so blocking its UI is fine, and this avoids the .terminateLater/reply handshake,
