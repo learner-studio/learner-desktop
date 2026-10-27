@@ -9,7 +9,7 @@ import TestSupport
 // (json_populate_recordset), so no table is read or written.
 // Needs LEARNER_HEAVY=1 and LEARNER_REMOTE_E2E=1.
 
-@Suite("GrowthBook design on the server (read-only)", .serialized,
+@Suite("GrowthBook design on the server (read-only)", .quietLog, .serialized,
        .enabled(if: Live.remote, "remote opt-in: set LEARNER_HEAVY=1 LEARNER_REMOTE_E2E=1"))
 struct GrowthBookRemoteTests {
     let remote = OVHRemote(timeout: 60)

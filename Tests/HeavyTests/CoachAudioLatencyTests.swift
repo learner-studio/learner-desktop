@@ -73,7 +73,7 @@ final class NoCalls: CallSource {
     func poll(deliver: @escaping (CallPoll) -> Void) { deliver(.answered(CallState(app: "Audio benchmark", title: nil))) }
 }
 
-@Suite("Coach, heavy: audio to warning latency",
+@Suite("Coach, heavy: audio to warning latency", .quietLog,
        .enabled(if: env["LEARNER_HEAVY"] == "1", "heavy lane: set LEARNER_HEAVY=1"),
        .enabled(if: env["LEARNER_HEAVY_AUDIO"] == "1", "runs screenpipe's STT for ~80 s: set LEARNER_HEAVY_AUDIO=1"),
        .serialized)

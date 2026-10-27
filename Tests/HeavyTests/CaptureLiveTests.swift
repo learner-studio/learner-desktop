@@ -27,7 +27,7 @@ enum Live {
     static func sql(_ query: String) -> Any? { json(api + "/raw_sql", body: ["query": query]) }
 }
 
-@Suite("Live screenpipe (read-only)", .enabled(if: Live.heavy, "heavy lane: set LEARNER_HEAVY=1"),
+@Suite("Live screenpipe (read-only)", .quietLog, .enabled(if: Live.heavy, "heavy lane: set LEARNER_HEAVY=1"),
        .enabled(if: Live.screenpipeUp, "screenpipe is not answering on :3030"))
 struct CaptureLiveTests {
     let health = Live.health ?? [:]
@@ -39,7 +39,8 @@ struct CaptureLiveTests {
         #expect((health["audio_pipeline"] as? [String: Any])?["transcription_mode"] as? String == "realtime")
     }
 
-    @Test func capturesBothTheMicrophoneAndSystemAudio() {
+    @Test(.enabled(if: !LiveMachine.screenpipeWaiting, "screenpipe has paused capture (screen locked)"))
+    func capturesBothTheMicrophoneAndSystemAudio() {
         let devices = ((health["audio_pipeline"] as? [String: Any])?["audio_devices"] as? [String] ?? []).map { $0.lowercased() }
         #expect(devices.contains { $0.contains("output") || $0.contains("system audio") || $0.contains("tap") }, "no meeting-side device in \(devices)")
         #expect(devices.contains { $0.contains("input") || $0.contains("mic") || $0.contains("airpods") }, "no microphone in \(devices)")

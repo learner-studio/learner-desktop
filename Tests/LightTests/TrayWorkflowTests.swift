@@ -5,7 +5,7 @@ import TestSupport
 
 // The tray's own workflows: the quit sequence, the heartbeat it sends, and which problem
 // the tray shows when several are true at once.
-@Suite("Tray workflows", .timeLimit(.minutes(1))) struct TrayWorkflowTests {
+@Suite("Tray workflows", .quietLog, .timeLimit(.minutes(1))) struct TrayWorkflowTests {
 
     @Test func quitSendsEveryQueuedTrialBeforeClosingTheDatabase() {
         let dir = TempDir("quit")

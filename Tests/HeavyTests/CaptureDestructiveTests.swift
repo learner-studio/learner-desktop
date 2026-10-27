@@ -45,7 +45,7 @@ private enum Launchd {
     }
 }
 
-@Suite("Destructive: capture stack and app lifecycle", .serialized,
+@Suite("Destructive: capture stack and app lifecycle", .quietLog, .serialized,
        .enabled(if: Live.destructive, "destructive: set LEARNER_HEAVY=1 LEARNER_HEAVY_DESTRUCTIVE=1"))
 struct CaptureDestructiveTests {
     private let repo = toolsRepoRoot()

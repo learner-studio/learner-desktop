@@ -5,7 +5,7 @@ import TestSupport
 
 // ChildProcess and ManagedHelper against real child processes: stalls, programs that
 // ignore SIGTERM, process trees, orphans from a crashed launch, crash loops.
-@Suite("Child processes and helpers", .serialized) struct ProcessTests {
+@Suite("Child processes and helpers", .quietLog, .serialized) struct ProcessTests {
 
     private func alive(_ pid: pid_t) -> Bool { kill(pid, 0) == 0 }
 

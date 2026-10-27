@@ -5,7 +5,7 @@ import TestSupport
 
 // The shared workflow primitives every workflow runs through (Core.swift).
 // Serialized within the suite; log capture is locked and each test has its own job folder.
-@Suite("Core primitives", .serialized) struct CoreTests {
+@Suite("Core primitives", .quietLog, .serialized) struct CoreTests {
 
     @Test func backoffDoublesFromTheBaseUpToTheCapAndResets() {
         var b = Backoff(base: 10, max: 60, jitter: 0)
@@ -178,7 +178,7 @@ import TestSupport
 }
 
 // Shutdown: ordered, each step logged, bounded overall, a hung step skipped not waited on.
-@Suite("Shutdown") struct ShutdownTests {
+@Suite("Shutdown", .quietLog) struct ShutdownTests {
     @Test func stepsRunInOrderAndAHungStepIsLeftBehind() {
         var order: [String] = []
         let lock = NSLock()

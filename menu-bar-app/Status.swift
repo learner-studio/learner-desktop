@@ -173,6 +173,12 @@ enum StatusProbe {
     }
 
     /// screenpipe's /health. Restarts its audio devices when it reports none active.
+    /// Restarting screenpipe's audio after it lost its devices: backs off 1 min doubling to
+    /// 30 min while screenpipe keeps refusing, instead of retrying on every 8 s check.
+    private static var audioRestart = Backoff(base: 60, max: 1800, jitter: 0)
+    private static var nextAudioRestart = Date.distantPast
+    private static let restartLock = NSLock()
+
     static func screenpipe() -> AppStatus.Capture {
         let r = HTTPProbe.get(screenpipeURL + "/health")
         guard r.status == 200, let data = r.data,
@@ -180,19 +186,47 @@ enum StatusProbe {
             return .stopped(r.status == 0 ? "port 3030 closed" : "health returned \(r.status)")
         }
         if let v = json["version"] as? String { CaptureEnvironment.screenpipeVersion = v }
-        if let capture = json["capture_status"] as? [String: Any], capture["active_audio_devices"] as? Int == 0 {
-            log.warn("screenpipe reports no active audio devices; starting \(audioDevices.joined(separator: ", "))")
-            for device in audioDevices {
-                let start = HTTPProbe.postJSON(screenpipeURL + "/audio/device/start", ["device_name": device])
-                if start.status != 200 { log.warn("could not start \(device): \(start.error ?? "HTTP \(start.status)")") }
-            }
+        let capture = json["capture_status"] as? [String: Any] ?? [:]
+        // screenpipe pauses on purpose (screen locked, a schedule): show it, never fight it.
+        if capture["severity"] as? String == "waiting" {
+            return .degraded("paused: \(capture["reason"] as? String ?? capture["status"] as? String ?? "waiting")")
         }
+        if capture["active_audio_devices"] as? Int == 0 { restartAudio() } else { restartLock.withLock { audioRestart.succeeded() } }
         let status = json["status"] as? String ?? "unknown"
         let frames = json["frame_status"] as? String ?? "unknown"
         let audio = json["audio_status"] as? String ?? "unknown"
+        if capture["active_audio_devices"] as? Int == 0 { return .degraded("no audio devices recording") }
         if status == "healthy" || (frames == "ok" && audio == "ok") { return .recording }
         return .degraded("vision \(frames), audio \(audio)")
     }
+
+    private static func restartAudio() {
+        let due = restartLock.withLock { Date() >= nextAudioRestart }
+        guard due else { return }
+        log.warn("screenpipe reports no active audio devices; starting \(audioDevices.joined(separator: ", "))")
+        var failed = false
+        for device in audioDevices {
+            let start = HTTPProbe.postJSON(screenpipeURL + "/audio/device/start", ["device_name": device])
+            if start.status != 200 {
+                failed = true
+                let said = start.data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["message"] as? String
+                log.warn("could not start \(device): \(said ?? start.error ?? "HTTP \(start.status)")")
+            }
+        }
+        restartLock.withLock {
+            if failed {
+                let wait = audioRestart.failed()
+                nextAudioRestart = Date().addingTimeInterval(wait)
+                log.warn("next audio restart in \(Job.describe(wait))")
+            } else {
+                audioRestart.succeeded()
+                nextAudioRestart = .distantPast
+            }
+        }
+    }
+
+    /// Tests: forget the restart backoff.
+    static func resetAudioRestart() { restartLock.withLock { audioRestart.succeeded(); nextAudioRestart = .distantPast } }
 
     static func logChanges(from a: AppStatus, to b: AppStatus, serverError: String?) {
         if a.capture != b.capture { log.info("screenpipe: \(describe(a.capture)) -> \(describe(b.capture))") }

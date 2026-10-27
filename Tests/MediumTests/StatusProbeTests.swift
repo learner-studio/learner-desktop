@@ -4,7 +4,7 @@ import Testing
 import TestSupport
 
 // The status workflow against stand-ins for screenpipe and learner-server over real HTTP.
-@Suite("Status probe", .serialized) struct StatusProbeTests {
+@Suite("Status probe", .quietLog, .serialized) struct StatusProbeTests {
 
     @Test func recordingDegradedAndStoppedScreenpipe() throws {
         var health: [String: Any] = ["status": "healthy", "frame_status": "ok", "audio_status": "ok", "version": "9.9.9"]
@@ -28,15 +28,38 @@ import TestSupport
             if req.path == "/health" {
                 return HTTPStandIn.Response.json(200, ["status": "healthy", "capture_status": ["active_audio_devices": 0]])
             }
-            return HTTPStandIn.Response.json(500, ["error": "no"])
+            return HTTPStandIn.Response.json(500, ["success": false, "message": "capture is gated or the stream is unavailable"])
         }
         let saved = StatusProbe.screenpipeURL
         StatusProbe.screenpipeURL = screenpipe.baseURL
+        StatusProbe.resetAudioRestart()
+        defer { StatusProbe.screenpipeURL = saved; screenpipe.stop(); StatusProbe.resetAudioRestart() }
+        var capture: AppStatus.Capture = .unknown
+        let lines = capturingLog { capture = StatusProbe.screenpipe() }
+        let starts = { screenpipe.requests.filter { $0.path == "/audio/device/start" && $0.method == "POST" }.count }
+        #expect(starts() == StatusProbe.audioDevices.count)
+        #expect(lines.filter { $0.contains("could not start") && $0.contains("capture is gated") }.count == StatusProbe.audioDevices.count)
+        #expect(capture == .degraded("no audio devices recording"))
+        // Refused: the next check (8 s later in the app) does not try again; it backs off.
+        _ = capturingLog { _ = StatusProbe.screenpipe() }
+        #expect(starts() == StatusProbe.audioDevices.count)
+    }
+
+    @Test func aScreenpipePausedOnPurposeIsShownNotFought() throws {
+        let screenpipe = try HTTPStandIn { req in
+            req.path == "/health"
+                ? HTTPStandIn.Response.json(200, ["status": "healthy", "capture_status": [
+                    "status": "screen_locked", "severity": "waiting", "active_audio_devices": 0,
+                    "reason": "audio capture is paused while the screen is locked"]])
+                : HTTPStandIn.Response.json(500, [:])
+        }
+        let saved = StatusProbe.screenpipeURL
+        StatusProbe.screenpipeURL = screenpipe.baseURL
+        StatusProbe.resetAudioRestart()
         defer { StatusProbe.screenpipeURL = saved; screenpipe.stop() }
-        let lines = capturingLog { _ = StatusProbe.screenpipe() }
-        let starts = screenpipe.requests.filter { $0.path == "/audio/device/start" && $0.method == "POST" }
-        #expect(starts.count == StatusProbe.audioDevices.count)
-        #expect(lines.filter { $0.contains("could not start") }.count == StatusProbe.audioDevices.count)
+        let capture = StatusProbe.screenpipe()
+        #expect(capture == .degraded("paused: audio capture is paused while the screen is locked"))
+        #expect(!screenpipe.requests.contains { $0.path == "/audio/device/start" })
     }
 
     @Test func collectReportsServerJobAndHelperProblems() throws {

@@ -82,3 +82,29 @@ public func silenceUncapturedLog() {
     quietOutsideCaptures = true
     LogSink.set { _ in }
 }
+
+/// The live machine's state, for heavy tests that need the owner present: screenpipe pauses
+/// audio while the screen is locked, and nothing can appear on a sleeping display.
+public enum LiveMachine {
+    public static var displayAsleep: Bool {
+        let r = Process()
+        r.executableURL = URL(fileURLWithPath: "/usr/sbin/system_profiler")
+        r.arguments = ["SPDisplaysDataType"]
+        let out = Pipe()
+        r.standardOutput = out
+        r.standardError = FileHandle.nullDevice
+        guard (try? r.run()) != nil else { return false }
+        let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        r.waitUntilExit()
+        return text.contains("Display Asleep: Yes")
+    }
+
+    /// screenpipe says it is waiting (screen locked, schedule) rather than capturing.
+    public static var screenpipeWaiting: Bool {
+        guard let url = URL(string: "http://localhost:3030/health"),
+              let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let capture = json["capture_status"] as? [String: Any] else { return false }
+        return capture["severity"] as? String == "waiting"
+    }
+}
