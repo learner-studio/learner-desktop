@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import Testing
 @testable import LearnerDesktop
@@ -109,5 +110,36 @@ struct SpeechTests {
         rig.speech.queued.append(orphan)
         rig.coach.tick()
         #expect(rig.coach.currentStreak == 0)
+    }
+
+    // The microphone callback runs on AVAudio's real-time thread, never main. Driven from a
+    // background queue with 48 kHz speech (the Mac's input rate): it must not trap (a
+    // main-actor closure there crashed the app on 10-27), and its 48 -> 16 kHz conversion
+    // must still hear speech. In this serialized suite: `say` fails when run concurrently.
+    @Test func theTapRunsOffTheMainThreadAndHearsSpeech() throws {
+        let dir = TempDir("mic")
+        let wav = dir.file("speech48k.wav")
+        let r = ChildProcess.run("/usr/bin/say", ["-r", "180", "-o", wav, "--file-format=WAVE", "--data-format=LEF32@48000",
+                                                  "We should look at the plan for next week and decide who does what."], timeout: 60, stderr: true)
+        try #require(r.ok, "say failed: \(r.output)")
+        let file = try AVAudioFile(forReading: URL(fileURLWithPath: wav))
+        let format = file.processingFormat
+        let target = try #require(AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: SileroVAD.sampleRate, channels: 1, interleaved: false))
+        let converter = try #require(AVAudioConverter(from: format, to: target))
+        let state = Locked<MicSpeechSource.VADState>(MicSpeechSource.VADState(vad: try SileroVAD()))
+        let queue = DispatchQueue(label: "test.vad")
+        let tap = MicSpeechSource.tap(format: format, target: target, converter: converter, state: state, queue: queue, log: Log("Test"))
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInteractive).async {
+            while file.framePosition < file.length {
+                guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4800) else { break }
+                try? file.read(into: buffer, frameCount: 4800)
+                tap(buffer, AVAudioTime(hostTime: mach_absolute_time()))
+            }
+            done.signal()
+        }
+        #expect(done.wait(timeout: .now() + 30) == .success)
+        queue.sync {}
+        #expect(state.withLock { $0.segmenter.take() } != nil, "no speech heard through the callback")
     }
 }

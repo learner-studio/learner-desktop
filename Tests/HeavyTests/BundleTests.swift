@@ -33,7 +33,17 @@ struct BundleTests {
         #expect((info["NSMicrophoneUsageDescription"] as? String)?.isEmpty == false)
         #expect(FileManager.default.fileExists(atPath: app + "/Contents/Resources/silero-vad.mlmodelc/model.mil"))
         #expect(ChildProcess.run("/usr/bin/codesign", ["--verify", "--strict", app], timeout: 30).status == 0)
-        let help = ChildProcess.run(exe, ["tool", "--help"], timeout: 30, stderr: true)
+        // The microphone + Silero, started from the signed bundle exactly as the app does: a
+        // callback that traps on AVAudio's thread (10-27) fails here, not in the owner's tray.
+        // Launched through LaunchServices (open), so macOS checks the app's own microphone
+        // grant (a binary started directly is attributed to its parent, the test runner).
+        let selftest = out.file("speech-selftest.txt")
+        let launched = ChildProcess.run("/usr/bin/open", ["-n", "-W", "--stdout", selftest, "--stderr", selftest, app,
+                                                          "--args", "tool", "speech-selftest"], timeout: 40, stderr: true)
+        let said = (try? String(contentsOfFile: selftest, encoding: .utf8)) ?? ""
+        #expect(launched.ok && said.range(of: #"speech-selftest: ([5-9][0-9]|[1-9][0-9]{2,}) frames scored"#, options: .regularExpression) != nil,
+                "speech self-test: \(said.isEmpty ? launched.output : said)")
+                let help = ChildProcess.run(exe, ["tool", "--help"], timeout: 30, stderr: true)
         #expect(help.status == 0 && help.output.contains("usage: learner-desktop tool"))
         #expect(!r.output.contains("Installing to"), "BUNDLE_ONLY must not install")
     }

@@ -143,6 +143,8 @@ final class MicSpeechSource: SpeechSource {
         var segmenter = VADSegmenter()
         var vad: SileroVAD?
         var lastError: String?
+        /// Frames the model has scored (the self-test's proof that audio arrives).
+        var frames = 0
     }
 
     init(screenpipe: SpeechSource) { self.screenpipe = screenpipe }
@@ -184,8 +186,29 @@ final class MicSpeechSource: SpeechSource {
             log.error(problem!)
             return false
         }
-        let state = self.state, queue = self.queue, log = self.log
-        input.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, _ in
+        input.installTap(onBus: 0, bufferSize: 4096, format: format,
+                         block: MicSpeechSource.tap(format: format, target: target, converter: converter,
+                                                    state: state, queue: queue, log: log))
+        do {
+            try engine.start()
+            started = true
+            problem = nil
+            log.info("listening on \(format.sampleRate / 1000) kHz \(format.channelCount)-channel input; Silero VAD on device")
+            return true
+        } catch {
+            input.removeTap(onBus: 0)
+            problem = "microphone would not start: \(error.localizedDescription)"
+            log.error(problem!)
+            return false
+        }
+    }
+
+    /// The microphone callback. Built outside the main actor on purpose: AVAudio calls it on
+    /// its real-time thread, and a main-actor closure there is a Swift 6 isolation trap
+    /// (the app crashed on 10-27 exactly so).
+    nonisolated static func tap(format: AVAudioFormat, target: AVAudioFormat, converter: AVAudioConverter,
+                                state: Locked<VADState>, queue: DispatchQueue, log: Log) -> @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void {
+        { buffer, _ in
             // When this buffer's first sample was heard.
             let heard = Date().addingTimeInterval(-Double(buffer.frameLength) / format.sampleRate)
             let capacity = AVAudioFrameCount(Double(buffer.frameLength) * SileroVAD.sampleRate / format.sampleRate) + 32
@@ -207,6 +230,7 @@ final class MicSpeechSource: SpeechSource {
                     guard let vad = s.vad else { return }
                     do {
                         let probs = try vad.process(samples)
+                        s.frames += probs.count
                         // Frames run back from the newest sample; good to a few ms.
                         let newest = heard.addingTimeInterval(Double(samples.count) / SileroVAD.sampleRate)
                         for (i, p) in probs.enumerated() {
@@ -221,19 +245,9 @@ final class MicSpeechSource: SpeechSource {
                 }
             }
         }
-        do {
-            try engine.start()
-            started = true
-            problem = nil
-            log.info("listening on \(format.sampleRate / 1000) kHz \(format.channelCount)-channel input; Silero VAD on device")
-            return true
-        } catch {
-            input.removeTap(onBus: 0)
-            problem = "microphone would not start: \(error.localizedDescription)"
-            log.error(problem!)
-            return false
-        }
     }
+
+    var framesScored: Int { state.withLock { $0.frames } }
 
     func stop() {
         guard started else { return }

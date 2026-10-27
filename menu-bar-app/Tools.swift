@@ -15,7 +15,8 @@ import Foundation
 //   "$HOME/Applications/Learner Desktop.app/Contents/MacOS/learner-desktop" tool start-capture-phase --dry-run
 
 /// Where a tool writes: the terminal by default, a buffer in tests.
-struct ToolIO {
+// @unchecked: a one-shot CLI tool uses it on the main thread only.
+struct ToolIO: @unchecked Sendable {
     var out: (String) -> Void = { s in FileHandle.standardOutput.write(Data((s + "\n").utf8)) }
     var err: (String) -> Void = { s in FileHandle.standardError.write(Data((s + "\n").utf8)) }
     var env: [String: String] = ProcessInfo.processInfo.environment
@@ -34,6 +35,7 @@ enum Tools {
           growthbook-design [--apply]                        print (or apply over ssh ovh) the Speaking Coach GrowthBook design
           vault-report [ROOT]                                ai-vault conversation counts (never text)
           preflight [--quiet]                                the capture stack still matches config/screenpipe-settings.json
+          speech-selftest                                    start the microphone + Silero as the app does, for 3 s
         """
 
     /// Dispatches `args` (what follows `tool`) and returns the exit status.
@@ -46,6 +48,7 @@ enum Tools {
             case "growthbook-design": return try GrowthBookDesign.main(rest, io: io)
             case "vault-report": return VaultReport.main(rest, io: io, parse: VaultReport.defaultParser)
             case "preflight": return try Preflight.main(rest, io: io)
+            case "speech-selftest": return MainActor.assumeIsolated { SpeechSelfTest.main(io: io) }
             case "-h", "--help", "help": io.out(usage); return 0
             default: io.err("unknown tool: \(name)\n\(usage)"); return 2
             }
@@ -173,5 +176,31 @@ struct OVHRemote {
             throw ToolError("unexpected mongosh output: \(String(output.suffix(300)))")
         }
         return obj
+    }
+}
+
+
+// MARK: - tool speech-selftest
+
+/// Starts the speech detector exactly as the app does (the real microphone, the real
+/// callback on AVAudio's thread, Silero) for 3 s and reports how many frames were scored.
+/// The heavy lane runs it from the signed bundle, which shares the app's microphone grant.
+@MainActor
+enum SpeechSelfTest {
+    final class NoSpeech: SpeechSource {
+        func poll(now: Date, deliver: @escaping @MainActor ([SpeechSpan]) -> Void) {}
+    }
+
+    static func main(io: ToolIO) -> Int32 {
+        let source = MicSpeechSource(screenpipe: NoSpeech())
+        guard source.start() else {
+            io.err("speech-selftest: \(source.problem ?? "could not start")")
+            return 2
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(3))
+        let frames = source.framesScored
+        source.stop()
+        io.out("speech-selftest: \(frames) frames scored in 3 s")
+        return frames > 50 ? 0 : 1
     }
 }
