@@ -102,8 +102,16 @@ enum Preflight {
         FileManager.default.contents(atPath: path).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
     }
 
-    /// JSON equality (numbers by value, so 1 == 1.0 like Python's ==).
-    static func equal(_ a: Any, _ b: Any) -> Bool { (a as AnyObject).isEqual(b) }
+    /// JSON equality (numbers by value, so 1 == 1.0 like Python's ==). In an expected array,
+    /// a redacted entry (a device named after the owner, say) matches any one live entry:
+    /// the other entries must all be present and the counts must agree.
+    static func equal(_ live: Any, _ want: Any) -> Bool {
+        if let w = want as? [Any], let l = live as? [Any], w.contains(where: { ($0 as? String) == redacted }) {
+            let named = w.filter { ($0 as? String) != redacted }
+            return l.count == w.count && named.allSatisfy { n in l.contains { equal($0, n) } }
+        }
+        return (live as AnyObject).isEqual(want)
+    }
 
     static func render(_ v: Any) -> String {
         if let s = v as? String { return "\"\(s)\"" }

@@ -204,3 +204,13 @@ func toolIO(_ p: Printed, env: [String: String] = [:], cwd: String = NSTemporary
         #expect(hits.isEmpty, "old SSH-tunnel route referenced: \(hits)")
     }
 }
+
+@Suite("Preflight comparison") struct PreflightCompareTests {
+    @Test func aRedactedArrayEntryMatchesAnyOneLiveEntry() {
+        let want: [Any] = [Preflight.redacted, "MacBook Pro Microphone (input)", "System Audio (output)"]
+        #expect(Preflight.equal(["Someone’s AirPods (input)", "MacBook Pro Microphone (input)", "System Audio (output)"], want))
+        #expect(!Preflight.equal(["MacBook Pro Microphone (input)", "System Audio (output)"], want))          // one missing
+        #expect(!Preflight.equal(["X (input)", "Y (input)", "System Audio (output)"], want))                    // mic gone
+        #expect(Preflight.equal(5, 5.0) && !Preflight.equal("batch", "realtime"))
+    }
+}
