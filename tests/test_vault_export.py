@@ -45,6 +45,15 @@ class VaultExportOutcomeTest(unittest.TestCase):
         # 429 is not an expired login.
         self.assertNotRegex("API request failed: 429", pattern("loginExpiredPattern"))
 
+    def test_voice_transcripts_are_filled_after_each_chatgpt_export(self):
+        with open(SWIFT, encoding="utf-8") as fh:
+            src = fh.read()
+        run = src[src.index("    func runNow() {"):]
+        run = run[:run.index("\n    }\n")]
+        self.assertLess(run.index("self.backup(provider)"), run.index("self.fillVoiceTranscripts()"))
+        self.assertIn('if !expired.contains("chatgpt")', run)
+        self.assertIn('[script, "voice-transcripts"]', src)
+
     def test_a_clean_run_is_ok(self):
         self.assertNotRegex(OK, pattern("loginExpiredPattern"))
         self.assertNotRegex(OK, pattern("failedPattern"))

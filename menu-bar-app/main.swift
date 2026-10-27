@@ -2145,6 +2145,14 @@ final class VaultExport {
                     notes.append("\(provider): \(status == 0 ? "ok" : "exit \(status!)")")
                 }
             }
+            // ai-vault drops ChatGPT voice transcripts; write them back in (see voice-transcripts.ts).
+            if !expired.contains("chatgpt") {
+                let (_, output) = self.fillVoiceTranscripts()
+                if output.contains("stopped: rate-limited") { rateLimited = true }
+                if let m = output.range(of: #"[0-9]+ updated \([0-9]+ messages\)"#, options: .regularExpression), !output[m].hasPrefix("0 ") {
+                    notes.append("voice transcripts: \(output[m])")
+                }
+            }
             DispatchQueue.main.async {
                 self.expiredLogins = expired
                 self.lastRun = Date()
@@ -2158,18 +2166,29 @@ final class VaultExport {
         }
     }
 
-    /// Runs one provider's backup, appending its output to vault-export.log. Returns the
-    /// exit status (nil on timeout) and the output, for the auth check.
     private func backup(_ provider: String) -> (Int32?, String) {
         guard let cli = VaultExport.cliPath() else { return (127, "ai-vault CLI not found") }
-        AppLog.rotate(helperLog: logPath)
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: cli)
         var args = ["backup", provider, "--only-new", "--skip-media", "-y"]
         if provider == "chatgpt" { args.append("--random-delay") }
+        return runLogged(cli, args, label: provider)
+    }
+
+    /// `learner-watcher voice-transcripts`, through the app's bundled watcher script.
+    private func fillVoiceTranscripts() -> (Int32?, String) {
+        let script = URL(fileURLWithPath: Bundle.main.resourcePath ?? "").appendingPathComponent("learner-watcher.js").path
+        return runLogged(NSHomeDirectory() + "/.bun/bin/bun", [script, "voice-transcripts"], label: "voice-transcripts")
+    }
+
+    /// Runs a command, appending its output to vault-export.log. Returns the exit status
+    /// (nil on timeout) and the output, for the auth check.
+    private func runLogged(_ executable: String, _ args: [String], label: String) -> (Int32?, String) {
+        AppLog.rotate(helperLog: logPath)
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: executable)
         p.arguments = args
         var env = ProcessInfo.processInfo.environment
-        env["PATH"] = (cli as NSString).deletingLastPathComponent + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+        // ai-vault's node (and the browser it drives) sit beside the CLI under nvm.
+        env["PATH"] = ((VaultExport.cliPath() ?? "/usr/bin/x") as NSString).deletingLastPathComponent + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
         p.environment = env
         p.standardInput = FileHandle.nullDevice
         let out = Pipe()
@@ -2181,7 +2200,7 @@ final class VaultExport {
             let chunk = h.availableData
             reader.sync { data.append(chunk) }
         }
-        guard (try? p.run()) != nil else { return (126, "could not start ai-vault") }
+        guard (try? p.run()) != nil else { return (126, "could not start \(label)") }
         let deadline = Date().addingTimeInterval(VaultExport.perProviderTimeout)
         while p.isRunning && Date() < deadline { usleep(500_000) }
         let timedOut = p.isRunning
@@ -2194,7 +2213,7 @@ final class VaultExport {
             return FileHandle(forWritingAtPath: logPath)
         }() {
             h.seekToEndOfFile()
-            h.write(Data("=== \(Date()) \(provider)\(timedOut ? " (timed out)" : "")\n\(text)\n".utf8))
+            h.write(Data("=== \(Date()) \(label)\(timedOut ? " (timed out)" : "")\n\(text)\n".utf8))
             try? h.close()
         }
         return (timedOut ? nil : p.terminationStatus, text)

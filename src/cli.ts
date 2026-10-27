@@ -5,6 +5,9 @@ import { LearnerApiClient } from './learner-api.js'
 import { SyncLedger } from './ledger.js'
 import { SyncService, type SyncSummary } from './sync-service.js'
 import { AggregatorWatcher } from './watcher.js'
+import { readFileSync } from 'node:fs'
+import { findConversationFiles } from './parsers/ai-vault-messages.js'
+import { fillVoiceTranscripts, hasVoiceGaps } from './voice-transcripts.js'
 
 const program = new Command()
 
@@ -84,6 +87,27 @@ program
     }
     process.on('SIGINT', cleanup)
     process.on('SIGTERM', cleanup)
+  })
+
+program
+  .command('voice-transcripts')
+  .description('Write the ChatGPT voice-chat transcripts ai-vault leaves out into conversation.md')
+  .option('-l, --limit <number>', 'At most N conversations', (v) => parseInt(v, 10))
+  .option('--delay <ms>', 'Pause between ChatGPT requests', (v) => parseInt(v, 10), 3000)
+  .option('--dry-run', 'Only count the conversations that need transcripts')
+  .action(async (options) => {
+    const files = findConversationFiles(config.paths.aiVaultData, 'chatgpt')
+    if (options.dryRun) {
+      const n = files.filter((f) => hasVoiceGaps(readFileSync(f, 'utf8'))).length
+      console.log(`[Voice] ${n} of ${files.length} ChatGPT conversations have voice messages without text`)
+      return
+    }
+    const s = await fillVoiceTranscripts(files, { delayMs: options.delay, limit: options.limit, log: console.log })
+    console.log(
+      `[Voice] ${s.candidates} conversations need transcripts: ${s.updated} updated (${s.filled} messages), ` +
+        `${s.missing} messages without a transcript, ${s.failed} failed` + (s.stopped ? `; stopped: ${s.stopped}` : ''),
+    )
+    process.exit(s.stopped ? 2 : 0)
   })
 
 // A watcher that dies stops archiving; log and keep going instead.

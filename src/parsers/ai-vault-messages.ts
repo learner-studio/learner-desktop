@@ -154,12 +154,12 @@ function followsSeparator(lines: string[], i: number): boolean {
   return lines[i - 1]?.trim() === '' && isSeparator(lines[i - 2])
 }
 
-interface Section {
+export interface Section {
   kind: 'user' | 'assistant' | 'metadata'
   start: number // heading line index
 }
 
-function findSections(lines: string[]): Section[] {
+export function findSections(lines: string[]): Section[] {
   const out: Section[] = []
   for (let i = 0; i < lines.length; i++) {
     const m = lines[i].match(/^##\s+(.+?)\s*$/)
@@ -172,7 +172,7 @@ function findSections(lines: string[]): Section[] {
 }
 
 /** Strips trailing blank lines and the `---` separator that closes a section. */
-function trimSectionTail(body: string[]): string[] {
+export function trimSectionTail(body: string[]): string[] {
   let end = body.length
   while (end > 0 && body[end - 1].trim() === '') end--
   if (end > 0 && isSeparator(body[end - 1])) end--
@@ -181,7 +181,7 @@ function trimSectionTail(body: string[]): string[] {
 }
 
 /** Removes `**Attachments:**` blocks (heading + `- ` list); returns the remaining lines and the item count. */
-function stripAttachments(body: string[]): { lines: string[]; attachments: number } {
+export function stripAttachments(body: string[]): { lines: string[]; attachments: number } {
   const lines: string[] = []
   let attachments = 0
   for (let i = 0; i < body.length; i++) {
