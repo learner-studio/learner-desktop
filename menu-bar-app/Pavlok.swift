@@ -321,12 +321,13 @@ final class PavlokController: NSObject, Wearable, CBCentralManagerDelegate, CBPe
         DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: work)
     }
 
-    func disconnectBle() {
+    /// Closes the link on purpose (switched off). Its disconnect callback is then ignored.
+    func disconnectBle(_ why: String = "switched off") {
         reconnectWork?.cancel()
         failPendingWrites("Bluetooth disconnected")
         central?.stopScan()
         if let p = peripheral { central?.cancelPeripheralConnection(p) }
-        if isBleConnected || isBleScanning { log.info("Bluetooth link closed (switched off)") }
+        if isBleConnected || isBleScanning { log.info("Bluetooth link closed (\(why))") }
         clearLink()
         statusChanged()
     }
@@ -405,10 +406,13 @@ final class PavlokController: NSObject, Wearable, CBCentralManagerDelegate, CBPe
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
+        guard peripheral === self.peripheral else { return }
         connectFailed(error?.localizedDescription ?? "unknown error")
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        // A link this controller closed itself has already been cleared.
+        guard peripheral === self.peripheral else { return }
         failPendingWrites("Bluetooth disconnected")
         let wasUsable = !characteristics.isEmpty
         let why = error?.localizedDescription ?? "link dropped"
@@ -484,7 +488,7 @@ final class PavlokController: NSObject, Wearable, CBCentralManagerDelegate, CBPe
             guard let self = self, self.pendingWrites[c.uuid]?.id == id else { return }
             self.log.warn("no acknowledgement within \(Int(PavlokController.ackTimeout)) s; dropping the link")
             self.failPendingWrites("BLE acknowledgement timed out")
-            self.disconnectBle()
+            self.disconnectBle("no acknowledgement")
             self.scheduleReconnect()
         }
     }

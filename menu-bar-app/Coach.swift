@@ -21,7 +21,7 @@ protocol CoachToast: AnyObject {
 final class MonologueToastController: NSObject, CoachToast {
     static let shared = MonologueToastController()
 
-    private var panel: NSPanel?
+    private(set) var panel: NSPanel?
     private var frame: NSVisualEffectView?
     private let icon = NSTextField(labelWithString: "⚠️")
     private let title = NSTextField(labelWithString: "")
@@ -442,7 +442,8 @@ final class SpeakingCoach {
             wearable.send(.vibe, intensity: settings.rewardVibe,
                           reason: "Good behavior reward: concise turn (\(Int(streak)) s) yielded cleanly", context: context()) { [weak self] r in
                 t.reward = r
-                self?.log.info("turn \(t.number): reward vibration \(r.delivered ? "delivered" : "NOT delivered") via \(r.transport.rawValue): \(r.detail)")
+                let line = "turn \(t.number): reward vibration \(r.delivered ? "delivered" : "NOT delivered") via \(r.transport.rawValue): \(r.detail)"
+                if r.delivered { self?.log.info(line) } else { self?.log.warn(line) }
                 t.pending -= 1
                 self?.write(t)
             }
