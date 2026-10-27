@@ -11,6 +11,9 @@ if CommandLine.arguments.contains("--browser-cookie-check") {
     runBrowserCookieCheckCLI()
 }
 
+// `tool <name> ...`: the owner's one-shot tools (Tools.swift); prints and exits.
+if CommandLine.arguments.count > 1 && CommandLine.arguments[1] == "tool" { exit(runToolCLI(Array(CommandLine.arguments.dropFirst(2)))) }
+
 if CommandLine.arguments.contains("--pavlok-test-fire") {
     runPavlokTestFireCLI()
 }

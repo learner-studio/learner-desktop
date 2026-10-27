@@ -3,23 +3,23 @@
 A self-experiment in interrupting monologues on calls. Learner Desktop, a macOS menu-bar app, watches
 [screenpipe](https://github.com/mediar-ai/screenpipe)'s live transcription, tracks how long
 the owner has been talking without yielding, and delivers a stimulus at 30 s and 60 s under a
-randomised treatment arm. Historical Read AI transcripts supply the pre-treatment baseline.
+randomised treatment arm. The pre-treatment baseline (historical meeting transcripts) already
+lives on learner-server.
 
 ## Architecture
 
 ```
-screenpipe (localhost:3030)        Read AI .docx exports           ai-vault export
-  audio_transcriptions                     │                       (~/ai-vault-data)
-       │ /raw_sql poll                     │ parse_readai_transcripts.py    │
-       ▼                                   ▼                                │
- Learner Desktop (Swift)        data/historical_calls_export.json          │
-  TalkTimeMonitor                          │                                │
-       │ logTurn()                         │ import-baseline-via-rpc.ts     │ learner-watcher.js
-       ▼                                   │                                │ (src/cli.ts watch)
- behavior_experiments.sqlite               │                                │
-       │ recordHabitEvents                 │ recordCallTranscripts,         │ archiveConversation-
-       │                                   │ recordHabitEvents              │ Documents
-       ▼                                   ▼                                ▼
+screenpipe (localhost:3030)                          ai-vault export
+  audio_transcriptions                               (~/ai-vault-data)
+       │ /raw_sql poll                                      │
+       ▼                                                    │
+ Learner Desktop (Swift)                                    │
+  TalkTimeMonitor                                           │ learner-watcher.js
+       │ logTurn()                                          │ (src/cli.ts watch)
+       ▼                                                    │
+ behavior_experiments.sqlite                                │
+       │ recordHabitEvents                                  │ archiveConversation-
+       ▼                                                    ▼ Documents
           learner-server RPC: POST $LEARNER_API_URL/rpc/<name>, header x-api-key
 ```
 
@@ -80,13 +80,19 @@ and the tray shows `🧠 🔴 LOGIN` if it is not.
 The bundle identifier is still `com.benpollack.ai-aggregator-menubar`: the Bluetooth
 permission and the saved Pavlok settings are keyed to it, so renaming it would reset both.
 
-Re-import the historical baseline (parse, then send over RPC):
+### Owner tools
+
+One-shot maintenance tools are subcommands of the app binary (`menu-bar-app/Tools*.swift`).
+They print to the terminal and exit; run them from this repository:
 
 ```bash
-python3 scripts/parse_readai_transcripts.py
-bun scripts/import-baseline-via-rpc.ts            # dry run: build + validate, counts only
-LEARNER_API_URL=... LEARNER_API_KEY=... bun scripts/import-baseline-via-rpc.ts --send
+swift run LearnerDesktop tool start-capture-phase --dry-run   # new experiment phase after a screenpipe update
+swift run LearnerDesktop tool growthbook-design               # print the Speaking Coach GrowthBook design
+swift run LearnerDesktop tool growthbook-design --apply       # ...or write it over `ssh ovh` (refuses to overwrite)
+swift run LearnerDesktop tool vault-report [root]             # ai-vault conversation counts, never text
 ```
+
+The installed app answers the same (`".../Learner Desktop.app/Contents/MacOS/learner-desktop" tool ...`).
 
 ## Tests
 
@@ -100,29 +106,30 @@ in the fast lane when bun is installed.
 ```
 
 **Fast lane** (`tests/*.py`) is pure and hermetic: no network, no database, no
-launchd, no `.docx` corpus, no Swift compile. It covers the Read AI transcript
-functions and both capture scripts. The capture-script tests run the real
-`stop-capture.sh` / `start-capture.sh`, but inside a sandbox where every
+launchd, no Swift compile. The capture scripts are covered by the Swift medium lane
+(`Tests/MediumTests/ScriptsCaptureTests.swift`), which runs the real
+`stop-capture.sh` / `start-capture.sh` inside a sandbox where every
 state-changing command (`launchctl`, `pkill`, `curl`, `osascript`, `open`, `nc`,
 `sqlite3`, `bun`) is a recording stub on `PATH` and `HOME` points at a throwaway
 directory — they assert the ordering and flag handling without touching the real
-capture stack. `tests/ts/` covers the ai-vault message parser (and, read-only, every
+capture stack; `ScriptsPreflightTests.swift` runs `preflight-capture.sh` against a
+stand-in screenpipe. `tests/ts/` covers the ai-vault message parser (and, read-only, every
 file in `~/ai-vault-data` when it exists), the RPC client against a local mock server
-(2xx, 422, 401, 413, 429), and the baseline RPC mapping. Run this on every change.
+(2xx, 422, 401, 413, 429). Run this on every change.
 
-**Heavy lane** (`tests/heavy/*.py`) needs the real world: screenpipe on `:3030`,
-the 209-file `.docx` corpus, `swiftc`. Each suite skips rather than fails when its
+**Heavy lane** (`Tests/HeavyTests`, `LEARNER_HEAVY=1`) needs the real world: screenpipe
+on `:3030` (read-only queries), and with `LEARNER_REMOTE_E2E=1` the deployed GrowthBook
+design over `ssh ovh` (read-only). Each suite skips, with the reason, when its
 dependency is missing.
 
-One heavy test really does stop and restart the capture stack, and stays skipped
-even in the heavy lane unless you opt in a second time:
+Two heavy suites really do stop and restart the capture stack and the installed app,
+and stay skipped even in the heavy lane unless you opt in a second time:
 
 ```bash
-AIAGG_HEAVY=1 AIAGG_HEAVY_DESTRUCTIVE=1 \
-  python3 -m unittest discover -s tests/heavy -p 'test_capture_scripts_live.py'
+LEARNER_HEAVY_DESTRUCTIVE=1 scripts/test.sh heavy --filter Destructive
 ```
 
-Nothing is recorded while it runs. Do not run it during a call.
+Nothing is recorded while they run. Do not run them during a call.
 
 ## screenpipe
 
@@ -159,7 +166,7 @@ Desktop starts a fresh headless Claude Code session (`claude -p`) in this repo. 
 [`docs/screenpipe-update-runbook.md`](docs/screenpipe-update-runbook.md) with only the
 commands allowed in `config/screenpipe-update-agent.json`: it checks the whole system,
 re-applies the sign-in flag, resumes capture, and on a version-only change starts the new
-phase with `scripts/start-capture-phase.py` (new GrowthBook phase, re-pinned config,
+phase with `learner-desktop tool start-capture-phase` (new GrowthBook phase, re-pinned config,
 committed). Runs are capped at $5 and 30 minutes, once per version. The menu has "Run
 screenpipe Update Check Now".
 
@@ -243,31 +250,11 @@ toast is recorded in `metadata.interventions[]` with `modality: "toast"`.
 Synthetic data never reaches production metrics: simulated turns are written with
 `call_category = 'demo'` and `metadata.simulated = true`, which the server filters out.
 
-## Historical baseline rules
-
-`parse_readai_transcripts.py` turns Read AI `.docx` exports into `habit_events`:
-
-1. Consecutive lines by one speaker merge into a single turn (`metadata.lines_merged`).
-2. Duration is the gap to the next line, capped at `words / 2.0` s so silence and
-   untranscribed audio are not credited as speech; the final turn of a call is estimated at
-   `words / 2.5` s; floor 1 s. `metadata.gap_sec` and `metadata.duration_basis`
-   (`gap` | `words_cap` | `words_last`) record which applied.
-3. Speakers match exactly against `{the owner, ben, the owner, the owner}`.
-   Conference-room labels such as `Conference Room (the owner) - Speaker 1` are other
-   people in the room and are **not** the owner.
-4. Read AI exported some meetings twice (`X.docx` and `X(1).docx`). These are not identical
-   re-exports — they are separate recordings of the same meeting, often on a different
-   platform and frequently partial, colliding on a title-derived `session_id`. Only one can
-   be kept, since keeping both would double-count the speech. The fuller recording wins.
-5. `call_app` comes from the transcript's own platform — one source of truth.
-6. A transcript with no other named speaker is `call_category = 'solo'`, so a lone 20-minute
-   Desktop recording does not dominate the conversation metrics.
-
 ## Data notes
 
 - `Past Call Transcripts/` and `data/` are gitignored: they hold real customer meeting
   transcripts and everything derived from them. The baseline already lives on learner-server,
-  so `data/` is normally absent; `parse_readai_transcripts.py` recreates it if a re-import is needed.
+  so `data/` is normally absent.
 - Baseline rows are tagged `metadata.source = 'readai_docx_import_v2'`.
 - An earlier server-side rebuild tagged `transcript_rebuild_20260908` has been replaced.
 
