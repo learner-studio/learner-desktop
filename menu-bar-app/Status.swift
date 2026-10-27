@@ -35,6 +35,8 @@ struct Problem: Equatable {
     /// The job or helper it comes from: "Export", "Outbox", "Archive", "Helper:tunnel", "Trials".
     let source: String
     let text: String
+    /// Held off by someone else (a rate limit): shown yellow, not red.
+    var waiting = false
 }
 
 /// The live speaking-coach numbers the tray shows; read on the main thread, no I/O.
@@ -54,6 +56,7 @@ struct TrayState: Equatable {
 
     /// Worst first. Problems are tagged by where they come from.
     static func make(_ s: AppStatus, coach: CoachLive) -> TrayState {
+        let red = s.problems.filter { !$0.waiting }
         let call = coach.call.map { " [\($0)]" } ?? ""
         if coach.alert {
             return TrayState(kind: "talk-alert", title: "🗣️ 🚨 \(coach.duration)",
@@ -70,7 +73,7 @@ struct TrayState: Equatable {
             return TrayState(kind: "login-item", title: "🧠 🔴 LOGIN",
                              tooltip: "Learner Desktop\nSwitched off in Login Items: it will not start at login")
         }
-        if let p = s.problems.first(where: { $0.source == "Outbox" }) {
+        if let p = red.first(where: { $0.source == "Outbox" }) {
             return TrayState(kind: "outbox", title: "🧠 🔑", tooltip: "Learner Desktop\nTrials are not reaching learner-server: \(p.text)")
         }
         if !s.serverReachable {
@@ -79,17 +82,22 @@ struct TrayState: Equatable {
         if case let .stopped(why) = s.capture {
             return TrayState(kind: "screenpipe", title: "🧠 🔴 SP", tooltip: "Learner Desktop\nScreenpipe stopped: \(why)")
         }
-        if let p = s.problems.first(where: { $0.source == "Export" }) {
+        if let p = red.first(where: { $0.source == "Export" }) {
             return TrayState(kind: "export", title: "🧠 🔴 VAULT",
                              tooltip: "Learner Desktop\nChat export: \(p.text)\nOpen the menu for details.")
         }
-        if let p = s.problems.first(where: { $0.source == "Trials" }) {
+        if let p = red.first(where: { $0.source == "Trials" }) {
             return TrayState(kind: "trials", title: "🧠 🔴 DB", tooltip: "Learner Desktop\nHabit trials are not being saved: \(p.text)")
         }
-        if let p = s.problems.first {
+        if let p = red.first {
             let tag = p.source == "Archive" ? "SYNC" : p.source.replacingOccurrences(of: "Helper:", with: "").uppercased()
             return TrayState(kind: "problem:\(p.source)", title: "🧠 🔴 \(tag)",
                              tooltip: "Learner Desktop\n\(p.source): \(p.text)\nSee Troubleshooting in the menu.")
+        }
+        if let p = s.problems.first(where: { $0.waiting }) {
+            let tag = p.source == "Export" ? "VAULT" : p.source.uppercased()
+            return TrayState(kind: "waiting:\(p.source)", title: "🧠 🟡 \(tag)",
+                             tooltip: "Learner Desktop\n\(p.source == "Export" ? "Chat export" : p.source) is waiting out a rate limit (nothing to do): \(p.text)")
         }
         if case let .degraded(why) = s.capture {
             return TrayState(kind: "screenpipe-degraded", title: "🧠 🟡 \(s.chats)", tooltip: "Learner Desktop\nScreenpipe: \(why)")
@@ -173,6 +181,7 @@ enum StatusProbe {
         s.trialCount = HabitEventLogger.shared.getTotalTrialCount()
         s.archiveParked = Archive.shared.parkedCount
         s.problems = Job.all.compactMap { j in j.problem.map { Problem(source: j.name, text: $0) } }
+            + Job.all.compactMap { j in j.waiting.map { Problem(source: j.name, text: $0, waiting: true) } }
             + helpers.compactMap { h in h.problem.map { Problem(source: "Helper:\(h.name)", text: $0) } }
             + (HabitEventLogger.shared.problem.map { [Problem(source: "Trials", text: $0)] } ?? [])
         s.problems += extraProblems

@@ -140,14 +140,40 @@ private final class ExportFixture {
         #expect((2...3).contains(runs), "\(runs) runs")
     }
 
-    @Test func aRateLimitRetriesInThirtyMinutes() throws {
-        let f = ExportFixture()
-        f.output("claude", Fixture.aiVaultRateLimited)
+    /// On 10-27 ChatGPT answered 429 for hours while both logins worked, and the tray sat at
+    /// 🔴 VAULT (a stale block, then "failed" every 30 min). A rate limit is waiting, not failing:
+    /// it clears a stale expired mark and block, is not a tray problem, and waits longer each time.
+    @Test func aRateLimitWaitsLongerEachTimeAndIsNotAFailure() throws {
+        let f = ExportFixture(configure: { $0.problemGrace = 0; $0.blockedRecheck = 1 })
+        // Blocked first (both "expired"), as the owner's state was; the re-check then meets
+        // a working Claude login and ChatGPT's 429.
+        f.output("claude", Fixture.aiVaultExpired)
+        f.output("chatgpt", Fixture.aiVaultExpired)
+        #expect(run(f.export.job).blocked)
+        f.output("claude", Fixture.aiVaultOk)
+        f.output("chatgpt", Fixture.aiVaultRateLimited)
+        let blockedAt = try #require(f.export.job.snapshot.lastRun)
+        #expect(waitFor(3) { f.export.job.snapshot.nextRun <= Date() })
+        f.export.job.tick()
+        #expect(waitFor(15) { f.export.job.snapshot.lastRun != blockedAt })
+        var waits: [TimeInterval] = []
+        for i in 0..<5 {
+            let s = i == 0 ? f.export.job.snapshot : run(f.export.job)
+            #expect(!s.blocked)
+            #expect(s.summary.hasPrefix("claude: ok (3 new), chatgpt: rate limited"), "\(s.summary)")
+            waits.append(s.nextRun.timeIntervalSince(try #require(s.lastRun)))
+        }
+        #expect(waits.map { Int(($0 / 60).rounded()) } == [30, 60, 120, 240, 360])
+        #expect(f.export.expiredLogins.isEmpty, "a 429 comes after a working login")
+        #expect(f.export.job.problem == nil)
+        #expect(f.export.job.waiting?.contains("chatgpt: rate limited") == true)
+        // Over: back to normal, and the next limit starts at 30 min again.
         f.output("chatgpt", Fixture.aiVaultOk)
-        let s = run(f.export.job)
-        #expect(s.summary.hasPrefix("claude: rate limited"))
-        let wait = s.nextRun.timeIntervalSince(try #require(s.lastRun))
-        #expect(abs(wait - 1800) < 5)
+        let ok = run(f.export.job)
+        #expect(ok.waitingSince == nil && ok.failures == 0 && f.export.job.waiting == nil)
+        f.output("chatgpt", Fixture.aiVaultRateLimited)
+        let again = run(f.export.job)
+        #expect(abs(again.nextRun.timeIntervalSince(try #require(again.lastRun)) - 1800) < 5)
     }
 
     @Test func aStuckExportThatIgnoresSIGTERMIsKilledAndRetriedWithBackoffAcrossARestart() throws {

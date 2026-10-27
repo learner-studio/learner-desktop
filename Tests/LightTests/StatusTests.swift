@@ -33,6 +33,12 @@ import TestSupport
         #expect(kind({ $0.problems = [Problem(source: "Archive", text: "HTTP 503")] }) == "problem:Archive")
         #expect(kind({ $0.problems = [Problem(source: "Helper:tunnel", text: "tunnel keeps exiting")] }) == "problem:Helper:tunnel")
         #expect(kind({ $0.capture = .degraded("vision ok, audio stalled") }) == "screenpipe-degraded")
+        // A rate limit is waiting (yellow): below every red problem, above a degraded capture.
+        let limited = Problem(source: "Export", text: "chatgpt: rate limited", waiting: true)
+        #expect(kind({ $0.problems = [limited] }) == "waiting:Export")
+        #expect(TrayState.make({ var s = AppStatus(capture: .recording); s.problems = [limited]; return s }(), coach: CoachLive()).title.contains("🟡"))
+        #expect(kind({ $0.problems = [limited]; $0.capture = .degraded("audio stalled") }) == "waiting:Export")
+        #expect(kind({ $0.problems = [limited, Problem(source: "Archive", text: "HTTP 503")] }) == "problem:Archive")
         #expect(kind({ _ in }, coach: CoachLive(call: "Zoom")) == "call")
     }
 

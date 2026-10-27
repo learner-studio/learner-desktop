@@ -14,6 +14,7 @@ func describe(_ o: Job.Outcome) -> String {
     case let .ok(s, _): return "ok: \(s)"
     case let .failed(s, retry): return "failed: \(s)" + (retry.map { " (retry \(Int($0)))" } ?? "")
     case let .blocked(s): return "blocked: \(s)"
+    case let .waiting(s, retry): return "waiting: \(s) (retry \(Int(retry)))"
     case .idle: return "idle"
     }
 }

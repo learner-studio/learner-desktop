@@ -346,6 +346,9 @@ final class Job: Sendable {
         case ok(String, next: TimeInterval? = nil)
         /// Failed; retried after the backoff (or `retryAfter`, e.g. a rate limit's).
         case failed(String, retryAfter: TimeInterval? = nil)
+        /// Held off by someone else (a rate limit): nothing is broken and nothing for the user
+        /// to do, so not a failure. Retried after `retryAfter`; shown as waiting, not red.
+        case waiting(String, retryAfter: TimeInterval)
         /// Needs the user (an expired login, no device key): no retry until `kick()`.
         case blocked(String)
         /// Nothing to do this time; does not touch the backoff or the log.
@@ -359,6 +362,8 @@ final class Job: Sendable {
         var summary = "not run yet"
         var problemSince: Date?
         var blocked = false
+        /// Since when it has been held off (`.waiting`), back to back.
+        var waitingSince: Date?
     }
 
     private static let registry = Locked<[Job]>([])
@@ -433,6 +438,12 @@ final class Job: Sendable {
         return s.summary
     }
 
+    /// What the tray shows as waiting (yellow): held off by a rate limit, not failing.
+    var waiting: String? {
+        let s = snapshot
+        return s.waitingSince == nil || s.blocked ? nil : s.summary
+    }
+
     /// Called by the Scheduler; runs the job when it is due.
     func tick() {
         let due = live.withLock { !$0.running && Date() >= $0.state.nextRun }
@@ -477,6 +488,7 @@ final class Job: Sendable {
                 l.state.failures = 0
                 l.state.problemSince = nil
                 l.state.blocked = false
+                l.state.waitingSince = nil
                 l.state.summary = summary
                 l.state.nextRun = now.addingTimeInterval(next ?? period)
             case let .failed(summary, retryAfter):
@@ -485,12 +497,25 @@ final class Job: Sendable {
                 let wait = retryAfter ?? backedOff
                 l.state.failures = l.backoff.failures
                 l.state.problemSince = l.state.problemSince ?? now
+                l.state.blocked = false
+                l.state.waitingSince = nil
                 l.state.summary = summary
                 l.state.nextRun = now.addingTimeInterval(wait)
                 log.warn("failed in \(took) (attempt \(l.state.failures)): \(summary); retrying in \(Job.describe(wait))")
+            case let .waiting(summary, retryAfter):
+                // Counted as an attempt (callers grow the wait with it), but not a problem.
+                _ = l.backoff.failed()
+                l.state.failures = l.backoff.failures
+                l.state.problemSince = nil
+                l.state.blocked = false
+                l.state.waitingSince = l.state.waitingSince ?? now
+                l.state.summary = summary
+                l.state.nextRun = now.addingTimeInterval(retryAfter)
+                log.warn("held off in \(took) (attempt \(l.state.failures)): \(summary); trying again in \(Job.describe(retryAfter))")
             case let .blocked(summary):
                 if !l.state.blocked || l.state.summary != summary { log.warn("blocked: \(summary); waiting for the user (checking again in \(Job.describe(blockedRecheck)))") }
                 l.state.blocked = true
+                l.state.waitingSince = nil
                 l.state.nextRun = now.addingTimeInterval(blockedRecheck)
                 l.state.problemSince = l.state.problemSince ?? now
                 l.state.summary = summary

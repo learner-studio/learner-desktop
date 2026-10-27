@@ -14,7 +14,9 @@ import CommonCrypto
 /// ai-vault exits 0 even when it failed, so each run's output is read:
 ///   expired login            that provider is skipped until Sign In Again (VaultSignIn)
 ///                            or ai-vault's config changes; all expired -> blocked
-///   "API request failed: 429" failed, retried in 30 min
+///   "API request failed: 429" waiting (yellow, not a failure): the login works, the provider
+///                            is throttling; retried in 30 min, doubling to 6 h while it lasts,
+///                            and the voice step (the same ChatGPT API) is skipped meanwhile
 ///   stuck, crashed browser,  failed, retried after 15 min doubling to 2 h
 ///   "✗ Failed:", "Errors: N" (--only-new resumes where a run stopped, so nothing is lost)
 ///   ai-vault not installed   failed, said so
@@ -38,6 +40,7 @@ final class VaultExport: Sendable {
         var maxRunTime: TimeInterval = 4 * 3600
         var killGrace: TimeInterval = 15
         var rateLimitRetry: TimeInterval = 30 * 60
+        var rateLimitMax: TimeInterval = 6 * 3600
         var failureBackoff = Backoff(base: 15 * 60, max: 2 * 3600)
         /// A failing export reaches the tray once it has failed this long (a rate limit or
         /// one stuck run that the next retry gets past does not).
@@ -143,7 +146,7 @@ final class VaultExport: Sendable {
         }
         var notes: [String] = []
         var failed: [String] = []
-        var rateLimited = false
+        var rateLimited: Set<String> = []
         var ran = 0
         let configStamp = VaultExport.modified(config.aiVaultConfig)
         // A run while blocked is the periodic re-check: try the expired logins again (a
@@ -165,7 +168,9 @@ final class VaultExport: Sendable {
                 state.withLock { $0.expired[provider] = configStamp }
                 notes.append("\(provider): login expired")
             case .rateLimited:
-                rateLimited = true
+                // A 429 comes after "✓ Authenticated": the login works.
+                state.withLock { _ = $0.expired.removeValue(forKey: provider) }
+                rateLimited.insert(provider)
                 notes.append("\(provider): rate limited")
             case let .failed(why):
                 failed.append(provider)
@@ -174,11 +179,13 @@ final class VaultExport: Sendable {
         }
         saveLogins()
 
-        // ai-vault drops ChatGPT voice transcripts; write them back in.
-        if let voice = config.voice, !state.withLock({ $0.quitting || $0.expired["chatgpt"] != nil }) {
+        // ai-vault drops ChatGPT voice transcripts; write them back in. Not while ChatGPT is
+        // throttling: the voice step calls the same API, and would only extend the limit.
+        if let voice = config.voice, !rateLimited.contains("chatgpt"),
+           !state.withLock({ $0.quitting || $0.expired["chatgpt"] != nil }) {
             let v = voice.run(cancelled: { [state] in state.value.quitting })
             switch v.stopped {
-            case .rateLimited?: rateLimited = true
+            case .rateLimited?: rateLimited.insert("voice")
             case .loginExpired?:
                 state.withLock { $0.expired["chatgpt"] = configStamp }
                 saveLogins()
@@ -199,9 +206,13 @@ final class VaultExport: Sendable {
         if allExpired {
             return finish(notes, .blocked("ai-vault login expired (\(config.providers.joined(separator: ", "))): Sign In Again"))
         }
-        if rateLimited {
-            return finish(notes + ["retrying in \(Int(config.rateLimitRetry / 60)) min"],
-                          .failed(notes.joined(separator: ", "), retryAfter: config.rateLimitRetry))
+        if !rateLimited.isEmpty {
+            // Back to back limits wait longer each time: 30 min, 1 h, 2 h … up to 6 h.
+            let streak = job.snapshot.waitingSince == nil ? 0 : job.snapshot.failures
+            let wait = min(config.rateLimitRetry * pow(2, Double(min(streak, 10))), config.rateLimitMax)
+            let text = notes.joined(separator: ", ")
+            if !failed.isEmpty { return finish(notes, .failed(text, retryAfter: wait)) }
+            return finish(notes + ["trying again in \(Job.describe(wait))"], .waiting(text, retryAfter: wait))
         }
         if !failed.isEmpty { return finish(notes, .failed(notes.joined(separator: ", "))) }
         return finish(notes, .ok(notes.joined(separator: ", ")))

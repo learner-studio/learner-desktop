@@ -167,7 +167,7 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
             + " | Tunnel \(tunnel.isRunning ? "🟢" : "🔴")")
         if status.archiveParked > 0 { add("   ⚠️ \(status.archiveParked) chat(s) refused by the server (see menubar.log)") }
         add(status.cliSessions.map { "💻 CLI sessions (uploader): \($0)" } ?? "💻 CLI sessions: read by learner-server on this Mac")
-        for p in status.problems { add("   ⚠️ \(p.source): \(p.text)") }
+        for p in status.problems { add("   \(p.waiting ? "⏳" : "⚠️") \(p.source): \(p.text)") }
         add("   ⚡ Send Queued Trials Now", #selector(triggerHabitSync))
         if status.loginItemBlocked {
             _ = add("   ⚠️ Won't start at login: allow Learner Desktop in Login Items...", #selector(openLoginItemsSettings))
