@@ -129,11 +129,11 @@ enum Schema {
         #expect(ts.contains("text: z.string().min(1).max(500_000)") && ConversationContract.maxText == 500_000)
         #expect(ts.contains("title: z.string().max(\(ConversationContract.maxTitle))"))
         #expect(ts.contains("events: z.array(DesktopHabitEvent).min(1).max(\(OutboxSender.maxBatch))"))
-        #expect(ts.contains("documentId: z.string().min(1).max(300).regex(/\(ConversationContract.documentId.re.pattern)/)"))
+        #expect(ts.contains("documentId: z.string().min(1).max(300).regex(/\(ConversationContract.documentId.source)/)"))
         #expect(ts.contains("source: z.enum(['chatgpt', 'claude-ai', 'gemini', 'other'])"))
         let schemaDateTime = ((Schema.input("archiveConversationDocuments")["properties"] as! [String: Any])["documents"] as! [String: Any])
         let occurred = (((schemaDateTime["items"] as! [String: Any])["properties"] as! [String: Any])["occurredAt"] as! [String: Any])["pattern"] as! String
-        #expect(occurred == ConversationContract.dateTime.re.pattern)
+        #expect(occurred == ConversationContract.dateTime.source)
     }
 
     @Test func theClientIdIsValid() {

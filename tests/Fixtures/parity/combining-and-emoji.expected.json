@@ -1,0 +1,52 @@
+{
+ "filePath": "/x/ai-vault-data/chatgpt/conversations/conv 😀 café ok/conversation.md",
+ "documentId": "ai-vault:chatgpt:conv____cafe__ok",
+ "conversationId": "conv 😀 café ok",
+ "provider": "chatgpt",
+ "contentSha256": "849730adadbcfc1f320a0a4c4dbc16da4ada9079bd5b0115c75a9c8b0e71baf0",
+ "stats": {
+  "sections": 2,
+  "user": 1,
+  "assistant": 1,
+  "skipped": 0,
+  "skippedByReason": {},
+  "truncated": 0,
+  "attachments": 0
+ },
+ "problems": [],
+ "document": {
+  "documentId": "ai-vault:chatgpt:conv____cafe__ok",
+  "source": "chatgpt",
+  "title": "Café vs Café 👨‍👩‍👧 🇩🇪 👍🏽",
+  "occurredAt": "2024-06-22T12:45:56.025Z",
+  "messages": [
+   {
+    "role": "user",
+    "text": "Decomposed: Café. Composed: Café. Family: 👨‍👩‍👧. Flag: 🇩🇪. Tone: 👍🏽. Ångström Å",
+    "at": "2024-06-22T12:45:57.000Z"
+   },
+   {
+    "role": "assistant",
+    "text": "é́ double accent, Hangul 한국어 vs 한국어 (jamo), ﬁ ligature",
+    "at": "2024-06-22T12:45:58.000Z"
+   }
+  ],
+  "metadata": {
+   "exporter": "ai-vault",
+   "provider": "chatgpt",
+   "conversationId": "conv 😀 café ok",
+   "contentSha256": "849730adadbcfc1f320a0a4c4dbc16da4ada9079bd5b0115c75a9c8b0e71baf0",
+   "createdAt": "2024-06-22T12:45:56.025Z",
+   "updatedAt": "2024-06-22T12:46:03.820Z",
+   "headerMessageCount": 2,
+   "sectionCount": 2,
+   "messageCount": 2,
+   "userMessageCount": 1,
+   "assistantMessageCount": 1,
+   "skippedMessageCount": 0,
+   "skippedByReason": {},
+   "truncatedMessageCount": 0,
+   "attachmentCount": 0
+  }
+ }
+}

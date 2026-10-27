@@ -1,0 +1,53 @@
+{
+ "filePath": "/x/ai-vault-data/chatgpt/conversations/conv-crlf/conversation.md",
+ "documentId": "ai-vault:chatgpt:conv-crlf",
+ "conversationId": "conv-crlf",
+ "provider": "chatgpt",
+ "contentSha256": "18ef621473259a46183120a7674d79c127c62b16b053ff6258da0eac61faa892",
+ "stats": {
+  "sections": 2,
+  "user": 1,
+  "assistant": 1,
+  "skipped": 0,
+  "skippedByReason": {},
+  "truncated": 0,
+  "attachments": 0
+ },
+ "problems": [],
+ "document": {
+  "documentId": "ai-vault:chatgpt:conv-crlf",
+  "source": "chatgpt",
+  "title": "A fictional chat",
+  "occurredAt": "2024-06-22T12:45:56.025Z",
+  "messages": [
+   {
+    "role": "user",
+    "text": "Line one   \n\tindented line\t \nlast",
+    "at": "2024-06-22T12:45:56.033Z"
+   },
+   {
+    "role": "assistant",
+    "text": "leading spaces kept inside?  \n\n\nAfter blank lines.",
+    "at": "2024-06-22T12:46:02.830Z"
+   }
+  ],
+  "metadata": {
+   "exporter": "ai-vault",
+   "provider": "chatgpt",
+   "conversationId": "conv-crlf",
+   "contentSha256": "18ef621473259a46183120a7674d79c127c62b16b053ff6258da0eac61faa892",
+   "createdAt": "2024-06-22T12:45:56.025Z",
+   "updatedAt": "2024-06-22T12:46:03.820Z",
+   "headerMessageCount": 2,
+   "sectionCount": 2,
+   "messageCount": 2,
+   "userMessageCount": 1,
+   "assistantMessageCount": 1,
+   "skippedMessageCount": 0,
+   "skippedByReason": {},
+   "truncatedMessageCount": 0,
+   "attachmentCount": 0,
+   "exportCharacterCount": 1234
+  }
+ }
+}

@@ -1,0 +1,62 @@
+{
+ "filePath": "/x/ai-vault-data/chatgpt/conversations/conv-ws/conversation.md",
+ "documentId": "ai-vault:chatgpt:conv-ws",
+ "conversationId": "conv-ws",
+ "provider": "chatgpt",
+ "contentSha256": "6f760ced819f0cd286b909128e0715b7bdb396f311e6d8bd80b215c7f2d692b2",
+ "stats": {
+  "sections": 4,
+  "user": 2,
+  "assistant": 2,
+  "skipped": 0,
+  "skippedByReason": {},
+  "truncated": 0,
+  "attachments": 0
+ },
+ "problems": [],
+ "document": {
+  "documentId": "ai-vault:chatgpt:conv-ws",
+  "source": "chatgpt",
+  "title": "A fictional chat",
+  "occurredAt": "2024-06-22T12:45:56.025Z",
+  "messages": [
+   {
+    "role": "user",
+    "text": "Non-breaking spaces around",
+    "at": "2024-06-22T12:45:57.000Z"
+   },
+   {
+    "role": "assistant",
+    "text": "Ends with a byte-order mark",
+    "at": "2024-06-22T12:45:58.000Z"
+   },
+   {
+    "role": "user",
+    "text": "Next-line characters",
+    "at": "2024-06-22T12:45:59.000Z"
+   },
+   {
+    "role": "assistant",
+    "text": "Line separator and paragraph and　ideographic​zero-width",
+    "at": "2024-06-22T12:46:00.000Z"
+   }
+  ],
+  "metadata": {
+   "exporter": "ai-vault",
+   "provider": "chatgpt",
+   "conversationId": "conv-ws",
+   "contentSha256": "6f760ced819f0cd286b909128e0715b7bdb396f311e6d8bd80b215c7f2d692b2",
+   "createdAt": "2024-06-22T12:45:56.025Z",
+   "updatedAt": "2024-06-22T12:46:03.820Z",
+   "headerMessageCount": 4,
+   "sectionCount": 4,
+   "messageCount": 4,
+   "userMessageCount": 2,
+   "assistantMessageCount": 2,
+   "skippedMessageCount": 0,
+   "skippedByReason": {},
+   "truncatedMessageCount": 0,
+   "attachmentCount": 0
+  }
+ }
+}

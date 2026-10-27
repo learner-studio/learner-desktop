@@ -1,0 +1,73 @@
+{
+ "filePath": "/x/ai-vault-data/gemini/conversations/conv-many/conversation.md",
+ "documentId": "ai-vault:gemini:conv-many",
+ "conversationId": "conv-many",
+ "provider": "gemini",
+ "contentSha256": "875df2a0a1c8d6c229fc12a193a208c89565cc3df2464549e78a6f579ddae4bd",
+ "stats": {
+  "sections": 5003,
+  "user": 2502,
+  "assistant": 2501,
+  "skipped": 0,
+  "skippedByReason": {},
+  "truncated": 0,
+  "attachments": 0
+ },
+ "problems": [
+  "too-many-messages:5003"
+ ],
+ "document": {
+  "documentId": "ai-vault:gemini:conv-many",
+  "source": "gemini",
+  "title": "A fictional chat",
+  "occurredAt": "2024-06-22T12:45:56.025Z",
+  "messages": {
+   "count": 5000,
+   "head": [
+    {
+     "role": "user",
+     "text": "turn 0"
+    },
+    {
+     "role": "assistant",
+     "text": "turn 1"
+    },
+    {
+     "role": "user",
+     "text": "turn 2"
+    }
+   ],
+   "tail": [
+    {
+     "role": "assistant",
+     "text": "turn 4997"
+    },
+    {
+     "role": "user",
+     "text": "turn 4998"
+    },
+    {
+     "role": "assistant",
+     "text": "turn 4999"
+    }
+   ]
+  },
+  "metadata": {
+   "exporter": "ai-vault",
+   "provider": "gemini",
+   "conversationId": "conv-many",
+   "contentSha256": "875df2a0a1c8d6c229fc12a193a208c89565cc3df2464549e78a6f579ddae4bd",
+   "createdAt": "2024-06-22T12:45:56.025Z",
+   "updatedAt": "2024-06-22T12:46:03.820Z",
+   "headerMessageCount": 5003,
+   "sectionCount": 5003,
+   "messageCount": 5000,
+   "userMessageCount": 2502,
+   "assistantMessageCount": 2501,
+   "skippedMessageCount": 0,
+   "skippedByReason": {},
+   "truncatedMessageCount": 0,
+   "attachmentCount": 0
+  }
+ }
+}

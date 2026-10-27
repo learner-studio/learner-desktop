@@ -74,19 +74,19 @@ final class VoiceTranscripts {
         for (s, sec) in sections.enumerated() where sec.kind != "metadata" {
             let end = s + 1 < sections.count ? sections[s + 1].start : lines.count
             let body = ConversationParser.trimSectionTail(Array(lines[(sec.start + 1)..<end]))
-            guard let first = body.firstIndex(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }),
-                  let stamp = ConversationParser.stampLine.match(body[first].trimmingCharacters(in: .whitespacesAndNewlines)),
+            guard let first = body.firstIndex(where: { !JSText.trim($0).isEmpty }),
+                  let stamp = ConversationParser.stampLine.match(JSText.trim(body[first])),
                   let at = stamp[1] else { continue }
             let rest = Array(body[(first + 1)...])
             guard ConversationParser.stripAttachments(rest).lines.joined(separator: "\n")
-                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
-            guard rest.contains(where: { $0.contains("[audio:") }) else { continue }
+                .isEmptyAfterJSTrim else { continue }
+            guard rest.contains(where: { $0.range(of: "[audio:", options: .literal) != nil }) else { continue }
             gaps.append(Gap(at: at, stampLine: sec.start + 1 + first))
         }
         return gaps
     }
 
-    static func hasVoiceGaps(_ md: String) -> Bool { !findGaps(md.components(separatedBy: "\n")).isEmpty }
+    static func hasVoiceGaps(_ md: String) -> Bool { !findGaps(JSText.lines(md)).isEmpty }
 
     /// Transcript text by message timestamp (ISO, as ai-vault writes it), from a
     /// /backend-api/conversation/<id> reply.
@@ -98,7 +98,7 @@ final class VoiceTranscripts {
             let parts = (m["content"] as? [String: Any])?["parts"] as? [Any] ?? []
             let text = parts.compactMap { p -> String? in
                 guard let p = p as? [String: Any], p["content_type"] as? String == "audio_transcription" else { return nil }
-                let t = (p["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let t = JSText.trim(p["text"] as? String ?? "")
                 return t.isEmpty ? nil : t
             }.joined(separator: "\n")
             // JS: new Date(create_time * 1000).toISOString() (milliseconds truncated).
@@ -111,13 +111,13 @@ final class VoiceTranscripts {
 
     /// Writes each blank voice section's transcript under its timestamp line.
     static func fillTranscripts(_ md: String, _ transcripts: [String: String]) -> (md: String, filled: Int, missing: Int) {
-        var lines = md.components(separatedBy: "\n")
+        var lines = JSText.lines(md)
         let gaps = findGaps(lines)
         var filled = 0
         // Back to front, so earlier line numbers stay valid.
         for gap in gaps.reversed() {
             guard let text = transcripts[gap.at], !text.isEmpty else { continue }
-            lines.insert(contentsOf: [""] + text.components(separatedBy: "\n"), at: gap.stampLine + 1)
+            lines.insert(contentsOf: [""] + JSText.lines(text), at: gap.stampLine + 1)
             filled += 1
         }
         return (lines.joined(separator: "\n"), filled, gaps.count - filled)
@@ -210,7 +210,7 @@ final class VoiceTranscripts {
             }
             guard VoiceTranscripts.hasVoiceGaps(String(decoding: data, as: UTF8.self)) else { continue }
             let id = ((path as NSString).deletingLastPathComponent as NSString).lastPathComponent
-            let hash = ConversationParser.sha256(data)
+            let hash = ConversationParser.sha256(Data(String(decoding: data, as: UTF8.self).utf8))
             if memo[id] == hash { summary.known += 1; continue }
             candidates.append((path, id, hash))
         }
@@ -298,4 +298,8 @@ final class VoiceTranscripts {
             throw NSError(domain: "Voice", code: Int(errno), userInfo: [NSLocalizedDescriptionKey: "rename: \(why)"])
         }
     }
+}
+
+private extension String {
+    var isEmptyAfterJSTrim: Bool { JSText.trim(self).isEmpty }
 }

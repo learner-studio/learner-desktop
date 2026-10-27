@@ -1,0 +1,55 @@
+{
+ "filePath": "/x/ai-vault-data/chatgpt/conversations/conv-md/conversation.md",
+ "documentId": "ai-vault:chatgpt:conv-md",
+ "conversationId": "conv-md",
+ "provider": "chatgpt",
+ "contentSha256": "8d1eaf374c54d83312f0dd6fdba5e534158028861dcff7ace20215d5b60cc67d",
+ "stats": {
+  "sections": 3,
+  "user": 1,
+  "assistant": 2,
+  "skipped": 0,
+  "skippedByReason": {},
+  "truncated": 0,
+  "attachments": 0
+ },
+ "problems": [],
+ "document": {
+  "documentId": "ai-vault:chatgpt:conv-md",
+  "source": "chatgpt",
+  "title": "A fictional chat",
+  "occurredAt": "2024-06-22T12:45:56.025Z",
+  "messages": [
+   {
+    "role": "user",
+    "text": "q"
+   },
+   {
+    "role": "assistant",
+    "text": "Intro\n## Summary\nSee below\n## User\nnot a heading (no separator)\n\n---\n\nafter a rule\n\n## Bottom line\nDone.\n***\n___\n\n## Notes\nend"
+   },
+   {
+    "role": "assistant",
+    "text": "heading with extra spaces\n\n---\n\n\n## User\ntwo blank lines: still the previous section"
+   }
+  ],
+  "metadata": {
+   "exporter": "ai-vault",
+   "provider": "chatgpt",
+   "conversationId": "conv-md",
+   "contentSha256": "8d1eaf374c54d83312f0dd6fdba5e534158028861dcff7ace20215d5b60cc67d",
+   "createdAt": "2024-06-22T12:45:56.025Z",
+   "updatedAt": "2024-06-22T12:46:03.820Z",
+   "headerMessageCount": 3,
+   "sectionCount": 3,
+   "messageCount": 3,
+   "userMessageCount": 1,
+   "assistantMessageCount": 2,
+   "skippedMessageCount": 0,
+   "skippedByReason": {},
+   "truncatedMessageCount": 0,
+   "attachmentCount": 0,
+   "exportCharacterCount": 1234
+  }
+ }
+}

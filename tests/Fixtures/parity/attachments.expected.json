@@ -1,0 +1,62 @@
+{
+ "filePath": "/x/ai-vault-data/chatgpt/conversations/conv-att/conversation.md",
+ "documentId": "ai-vault:chatgpt:conv-att",
+ "conversationId": "conv-att",
+ "provider": "chatgpt",
+ "contentSha256": "6da9465549e00a4e35363077f16c8942090d58ebbc57c1ea2373e77b015e1e2c",
+ "stats": {
+  "sections": 5,
+  "user": 1,
+  "assistant": 2,
+  "skipped": 2,
+  "skippedByReason": {
+   "empty": 1,
+   "attachment-only": 1
+  },
+  "truncated": 0,
+  "attachments": 3
+ },
+ "problems": [],
+ "document": {
+  "documentId": "ai-vault:chatgpt:conv-att",
+  "source": "chatgpt",
+  "title": "A fictional chat",
+  "occurredAt": "2024-06-22T12:45:56.025Z",
+  "messages": [
+   {
+    "role": "assistant",
+    "text": "Real answer.\n\nText after the list stays.",
+    "at": "2024-06-22T12:45:58.000Z"
+   },
+   {
+    "role": "user",
+    "text": "Not a list item, kept.",
+    "at": "2024-06-22T12:45:59.000Z"
+   },
+   {
+    "role": "assistant",
+    "text": "*_2024-06-22T12:46:00+02:00_*\n\nInline **Attachments:** mention is text."
+   }
+  ],
+  "metadata": {
+   "exporter": "ai-vault",
+   "provider": "chatgpt",
+   "conversationId": "conv-att",
+   "contentSha256": "6da9465549e00a4e35363077f16c8942090d58ebbc57c1ea2373e77b015e1e2c",
+   "createdAt": "2024-06-22T12:45:56.025Z",
+   "updatedAt": "2024-06-22T12:46:03.820Z",
+   "headerMessageCount": 5,
+   "sectionCount": 5,
+   "messageCount": 3,
+   "userMessageCount": 1,
+   "assistantMessageCount": 2,
+   "skippedMessageCount": 2,
+   "skippedByReason": {
+    "empty": 1,
+    "attachment-only": 1
+   },
+   "truncatedMessageCount": 0,
+   "attachmentCount": 3
+  }
+ }
+}

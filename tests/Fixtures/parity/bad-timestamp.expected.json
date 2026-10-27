@@ -1,0 +1,20 @@
+{
+ "filePath": "/x/ai-vault-data/chatgpt/conversations/conv-badts/conversation.md",
+ "documentId": "ai-vault:chatgpt:conv-badts",
+ "conversationId": "conv-badts",
+ "provider": "chatgpt",
+ "contentSha256": "4377b5e99ebb152068902117501505419a39339e29e83975a484441ba76b76e7",
+ "stats": {
+  "sections": 1,
+  "user": 1,
+  "assistant": 0,
+  "skipped": 0,
+  "skippedByReason": {},
+  "truncated": 0,
+  "attachments": 0
+ },
+ "problems": [
+  "invalid:messages.0.at:invalid_format"
+ ],
+ "document": null
+}

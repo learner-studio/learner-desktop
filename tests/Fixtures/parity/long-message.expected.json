@@ -1,0 +1,48 @@
+{
+ "filePath": "/x/ai-vault-data/chatgpt/conversations/conv-long/conversation.md",
+ "documentId": "ai-vault:chatgpt:conv-long",
+ "conversationId": "conv-long",
+ "provider": "chatgpt",
+ "contentSha256": "07fa4e3c65bf30d3a46f25bda2a7769f6ff7dcee3b17fb380e8d34d6585d9b4d",
+ "stats": {
+  "sections": 1,
+  "user": 1,
+  "assistant": 0,
+  "skipped": 0,
+  "skippedByReason": {},
+  "truncated": 1,
+  "attachments": 0
+ },
+ "problems": [],
+ "document": {
+  "documentId": "ai-vault:chatgpt:conv-long",
+  "source": "chatgpt",
+  "title": "A fictional chat",
+  "occurredAt": "2024-06-22T12:45:56.025Z",
+  "messages": [
+   {
+    "role": "user",
+    "at": "2024-06-22T12:45:56.033Z",
+    "textLength": 500000,
+    "textSha256": "031b8dc9a975b84620559bc2170b3275db4b6c22869c2a3b4dd55a8e948d8d46"
+   }
+  ],
+  "metadata": {
+   "exporter": "ai-vault",
+   "provider": "chatgpt",
+   "conversationId": "conv-long",
+   "contentSha256": "07fa4e3c65bf30d3a46f25bda2a7769f6ff7dcee3b17fb380e8d34d6585d9b4d",
+   "createdAt": "2024-06-22T12:45:56.025Z",
+   "updatedAt": "2024-06-22T12:46:03.820Z",
+   "headerMessageCount": 1,
+   "sectionCount": 1,
+   "messageCount": 1,
+   "userMessageCount": 1,
+   "assistantMessageCount": 0,
+   "skippedMessageCount": 0,
+   "skippedByReason": {},
+   "truncatedMessageCount": 1,
+   "attachmentCount": 0
+  }
+ }
+}

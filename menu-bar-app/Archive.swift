@@ -105,14 +105,49 @@ struct ParseResult {
     let problems: [String]
 }
 
-/// NSRegularExpression with the JS semantics the parser needs: whole-string matches on
-/// single lines, capture groups as optional strings.
+/// JavaScript's whitespace (String.prototype.trim and regex `\s`): WhiteSpace plus
+/// LineTerminator. Not Swift's `.whitespacesAndNewlines`, which adds U+0085 and lacks U+FEFF.
+enum JSText {
+    static let whitespace: Set<UInt32> = [0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20, 0xA0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004,
+                                          0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF]
+    /// The same set as the inside of an ICU character class.
+    static let classBody = #"\t\n\x{0B}\f\r\x{20}\x{A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}"#
+
+    static func isSpace(_ s: Unicode.Scalar) -> Bool { whitespace.contains(s.value) }
+
+    /// `split('\n')` on the exact scalars.
+    static func lines(_ s: String) -> [String] {
+        s.unicodeScalars.split(separator: "\n", omittingEmptySubsequences: false).map { String(String.UnicodeScalarView($0)) }
+    }
+
+    /// `String.prototype.trim`, on the exact scalars (no normalisation).
+    static func trim(_ s: String) -> String {
+        let scalars = s.unicodeScalars
+        guard let first = scalars.firstIndex(where: { !isSpace($0) }) else { return "" }
+        let last = scalars.lastIndex(where: { !isSpace($0) })!
+        return String(scalars[first...last])
+    }
+}
+
+/// NSRegularExpression (ICU) with JavaScript's semantics for the patterns the parser uses:
+/// `\s`/`\S` are JS whitespace, `\d` is ASCII only, `.` excludes only JS line terminators,
+/// and a trailing `$` is the end of input (ICU's also matches before a final newline).
+/// Matching is on UTF-16, as in JS, with no normalisation.
 struct JSRegex {
     let re: NSRegularExpression
+    /// The pattern as JavaScript wrote it.
+    let source: String
 
-    init(_ pattern: String, caseInsensitive: Bool = false) {
+    init(_ js: String, caseInsensitive: Bool = false) {
+        source = js
+        let space = "[\(JSText.classBody)]"
+        var p = js.replacingOccurrences(of: #"\s"#, with: space, options: .literal)
+            .replacingOccurrences(of: #"\S"#, with: "[^\(JSText.classBody)]", options: .literal)
+            .replacingOccurrences(of: #"\d"#, with: "[0-9]", options: .literal)
+            .replacingOccurrences(of: "(.", with: #"([^\n\r\x{2028}\x{2029}]"#, options: .literal)
+        if p.hasSuffix("$") && !p.hasSuffix(#"\$"#) { p = String(p.dropLast()) + #"\z"# }
         // Patterns are literals in this file: a bad one is a programming error.
-        re = try! NSRegularExpression(pattern: pattern, options: caseInsensitive ? [.caseInsensitive] : [])
+        re = try! NSRegularExpression(pattern: p, options: caseInsensitive ? [.caseInsensitive] : [])
     }
 
     func test(_ s: String) -> Bool { re.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil }
@@ -153,7 +188,7 @@ enum ConversationParser {
     }
 
     static func normalizeProvider(_ raw: String) -> VaultProvider? {
-        switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        switch JSText.trim(raw).lowercased() {
         case "chatgpt", "openai": return .chatgpt
         case "claude", "claude-ai", "claude.ai", "anthropic": return .claude
         case "gemini", "bard": return .gemini
@@ -161,11 +196,12 @@ enum ConversationParser {
         }
     }
 
-    private static let idUnsafe = JSRegex("[^A-Za-z0-9._:-]")
-
     /// `ai-vault:<provider>:<id>`, with characters outside the contract's id alphabet replaced.
     static func documentId(_ provider: VaultProvider, _ conversationId: String) -> String {
-        var safe = idUnsafe.re.stringByReplacingMatches(in: conversationId, range: NSRange(conversationId.startIndex..., in: conversationId), withTemplate: "_")
+        // JS `replace(/[^A-Za-z0-9._:-]/g, '_')` works on UTF-16 units: an emoji (a surrogate
+        // pair) becomes two underscores, a combining accent one.
+        let allowed = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-".utf16)
+        var safe = String(decoding: conversationId.utf16.map { allowed.contains($0) ? $0 : 0x5F }, as: UTF16.self)
         if safe.isEmpty { safe = "unnamed" }
         return String("ai-vault:\(provider.rawValue):\(safe)".prefix(300))
     }
@@ -174,7 +210,7 @@ enum ConversationParser {
         let re = JSRegex("^\\*\\*\(NSRegularExpression.escapedPattern(for: name)):\\*\\*\\s*(.*)$", caseInsensitive: true)
         for line in lines {
             if let m = re.match(line) {
-                let v = (m[1] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let v = JSText.trim(m[1] ?? "")
                 return v.isEmpty ? nil : v
             }
         }
@@ -188,7 +224,7 @@ enum ConversationParser {
     /// ai-vault writes and normalises it to UTC `Z` with milliseconds (toISOString).
     static func toIsoInstant(_ raw: String?) -> String? {
         guard let raw = raw else { return nil }
-        let v = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let v = JSText.trim(raw)
         guard !v.isEmpty else { return nil }
         if isoPattern.test(v) { return v }
         return jsDateParse(v).map(isoMillis)
@@ -246,7 +282,7 @@ enum ConversationParser {
 
     static func isSeparator(_ line: String?) -> Bool { line.map(separator.test) ?? false }
 
-    private static func trimmed(_ s: String) -> String { s.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private static func trimmed(_ s: String) -> String { JSText.trim(s) }
 
     /// A section heading counts only after a separator, optionally with one blank line between.
     static func followsSeparator(_ lines: [String], _ i: Int) -> Bool {
@@ -259,7 +295,7 @@ enum ConversationParser {
     static func findSections(_ lines: [String]) -> [Section] {
         var out: [Section] = []
         for i in lines.indices {
-            guard lines[i].hasPrefix("##"), let m = heading.match(lines[i]), followsSeparator(lines, i) else { continue }
+            guard lines[i].utf8.starts(with: "##".utf8), let m = heading.match(lines[i]), followsSeparator(lines, i) else { continue }
             let name = (m[1] ?? "").lowercased()
             if name == "metadata" { out.append(Section(kind: "metadata", start: i)) }
             else if let role = roleByHeading[name] { out.append(Section(kind: role, start: i)) }
@@ -310,6 +346,7 @@ enum ConversationParser {
 
     static let stampLine = JSRegex(#"^[*_](\d{4}-\d{2}-\d{2}T[^*_\s]+)[*_]$"#)
     private static let titleLine = JSRegex(#"^#\s+\S"#)
+    private static let titleMarker = JSRegex(#"^#\s+"#)
     private static let digits = JSRegex(#"^\d+$"#)
 
     /// JS `String.prototype.slice(0, n)` by UTF-16 units, kept on a character boundary.
@@ -329,8 +366,9 @@ enum ConversationParser {
     static func parse(content raw: String, sha256 given: String? = nil, filePath: String? = nil,
                       provider forced: VaultProvider? = nil, conversationId forcedId: String? = nil) -> ParseResult {
         let contentSha256 = given ?? sha256(Data(raw.utf8))
-        let content = raw.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
-        let lines = content.components(separatedBy: "\n")
+        // JS `replace(/\r\n?/g, '\n')`, on UTF-16 (a Swift "\r\n" is one Character).
+        let content = raw.replacingOccurrences(of: "\r\n", with: "\n", options: .literal).replacingOccurrences(of: "\r", with: "\n", options: .literal)
+        let lines = JSText.lines(content)
         var problems: [String] = []
 
         let sections = findSections(lines)
@@ -343,7 +381,7 @@ enum ConversationParser {
         let documentId = documentId(provider, conversationId)
 
         let title = head.first(where: { titleLine.test($0) }).map { line -> String in
-            let rest = line.replacingOccurrences(of: #"^#\s+"#, with: "", options: .regularExpression)
+            let rest = titleMarker.re.stringByReplacingMatches(in: line, range: NSRange(line.startIndex..., in: line), withTemplate: "")
             return prefixUTF16(trimmed(rest), maxTitleChars)
         }
         let createdAt = toIsoInstant(headerField(head, "Created"))
@@ -440,8 +478,11 @@ enum ConversationParser {
     /// Reads and parses one file. The hash is of the bytes on disk (what the ledger keys on).
     static func parseFile(_ path: String) throws -> ParseResult {
         let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        // As Node's readFileSync(path, 'utf8'): invalid bytes become U+FFFD, a BOM is kept.
+        // The hash is of that text (what the watcher's ledger holds), which is the bytes
+        // themselves for any valid UTF-8 file.
         let text = String(decoding: data, as: UTF8.self)
-        return parse(content: text, sha256: sha256(data), filePath: path)
+        return parse(content: text, filePath: path)
     }
 
     /// Every `conversation.md` under the export root, sorted; optionally only one provider's
