@@ -50,14 +50,14 @@ func accepted(_ s: StubTransport.Seen) -> HTTPReply {
     StubTransport.json(200, ["data": ["accepted": s.eventIds.count, "duplicates": 0]])
 }
 
-@Suite("Trial outbox", .timeLimit(.minutes(1))) struct OutboxTests {
-    @Test func sendsEverythingAndMarksItSent() {
+@Suite("Trial outbox", .quietLog, .timeLimit(.minutes(1))) struct OutboxTests {
+    @Test func sendsEverythingAndMarksItSent() throws {
         let f = OutboxFixture(turns: 3, handler: accepted)
         #expect(describe(f.sender.runOnce()) == "ok: sent 3")
         #expect(f.logger.getUnsyncedCount() == 0)
         #expect(f.sender.lastStatus == "sent 3 (3 accepted, 0 duplicates)")
         #expect(f.sender.lastSentAt != nil)
-        let r = f.stub.seen[0]
+        let r = try #require(f.stub.seen.first)
         #expect(r.path == "/rpc/recordHabitEvents")
         #expect(r.headers["x-api-key"] == "test-key")
         // Nothing left: idle, no request.
@@ -73,7 +73,8 @@ func accepted(_ s: StubTransport.Seen) -> HTTPReply {
         #expect(describe(f.sender.runOnce()) == "ok: sent 4, parked 1")
         #expect(f.logger.getUnsyncedCount() == 0)
         #expect(f.logger.parkedCount() == 1)
-        #expect(f.sender.lastStatus.contains("parked event \(bad)") || f.sender.lastStatus.hasPrefix("sent"))
+        // The row after the parked one goes in its own batch, and that is the last status.
+        #expect(f.sender.lastStatus == "sent 1 (1 accepted, 0 duplicates)")
         // Parked rows are never sent again.
         let before = f.stub.seen.count
         #expect(describe(f.sender.runOnce()) == "idle")
@@ -129,15 +130,17 @@ func accepted(_ s: StubTransport.Seen) -> HTTPReply {
         // Every call hangs until its timeout: the drain must cut each one to the time left.
         let f = OutboxFixture(turns: 3) { _ in HTTPReply(status: 0, body: nil, error: "slow") }
         let slow = SlowTransport()
+        // Its own job names: their state files (under Job.stateDir) go when the test ends.
+        let drainJob = JobName("drain"), drainHeartbeat = JobName("drain-hb")
         let sender = OutboxSender(logger: f.logger, rpc: LearnerRPC(baseURL: "http://x.invalid", transport: slow, key: { _ in "k" }),
-                                  config: { var c = OutboxSender.Config(); c.jobName = f.job.name + "-d"; c.heartbeatJobName = f.heartbeat.name + "-d"; return c }())
+                                  config: { var c = OutboxSender.Config(); c.jobName = drainJob.name; c.heartbeatJobName = drainHeartbeat.name; return c }())
         let started = Date()
         let left = sender.drain(until: Date().addingTimeInterval(1))
         let took = Date().timeIntervalSince(started)
         #expect(left == 3)
         #expect(took < 1.5, "drain took \(took) s")
         #expect(slow.timeouts.allSatisfy { $0 <= 1.0 })
-        try? FileManager.default.removeItem(atPath: NSHomeDirectory() + "/.ai-aggregator/jobs/\(f.job.name)-d.json")
+        withExtendedLifetime((sender, drainJob, drainHeartbeat)) {}
     }
 
     @Test func theDrainSendsWhatIsQueued() {
@@ -153,8 +156,8 @@ func accepted(_ s: StubTransport.Seen) -> HTTPReply {
         #expect(built == 0)
         #expect(describe(f.sender.sendHeartbeat()) == "ok: sent")
         #expect(built == 1)
-        #expect(f.stub.seen[0].path == "/rpc/recordAppHeartbeat")
-        #expect((f.stub.seen[0].body?["data"] as? [String: Any])?["outboxDepth"] as? Int == 0)
+        #expect(f.stub.seen.first?.path == "/rpc/recordAppHeartbeat")
+        #expect((f.stub.seen.first?.body?["data"] as? [String: Any])?["outboxDepth"] as? Int == 0)
         f.stub.handler = { _ in StubTransport.status(401) }
         #expect(describe(f.sender.sendHeartbeat()).hasPrefix("blocked: device key refused"))
         f.stub.handler = { _ in StubTransport.status(400) }

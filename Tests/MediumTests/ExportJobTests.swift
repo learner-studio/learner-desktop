@@ -60,7 +60,7 @@ private final class ExportFixture {
     var calls: [String] { dir.read("calls.log").split(separator: "\n").map(String.init) }
 }
 
-@Suite("Export job (fake ai-vault, real processes)", .serialized, .timeLimit(.minutes(1))) struct ExportJobTests {
+@Suite("Export job (fake ai-vault, real processes)", .quietLog, .serialized, .timeLimit(.minutes(1))) struct ExportJobTests {
     @Test func anExpiredProviderIsSkippedUntilItsLoginChanges() throws {
         let f = ExportFixture()
         f.output("claude", Fixture.aiVaultOk)
@@ -124,17 +124,17 @@ private final class ExportFixture {
         #expect((2...3).contains(runs), "\(runs) runs")
     }
 
-    @Test func aRateLimitRetriesInThirtyMinutes() {
+    @Test func aRateLimitRetriesInThirtyMinutes() throws {
         let f = ExportFixture()
         f.output("claude", Fixture.aiVaultRateLimited)
         f.output("chatgpt", Fixture.aiVaultOk)
         let s = run(f.export.job)
         #expect(s.summary.hasPrefix("claude: rate limited"))
-        let wait = s.nextRun.timeIntervalSince(s.lastRun!)
+        let wait = s.nextRun.timeIntervalSince(try #require(s.lastRun))
         #expect(abs(wait - 1800) < 5)
     }
 
-    @Test func aStuckExportThatIgnoresSIGTERMIsKilledAndRetriedWithBackoffAcrossARestart() {
+    @Test func aStuckExportThatIgnoresSIGTERMIsKilledAndRetriedWithBackoffAcrossARestart() throws {
         let f = ExportFixture(configure: { $0.stallTimeout = 1.5 })
         f.dir.write("claude.hang", "")
         f.output("chatgpt", Fixture.aiVaultOk)
@@ -144,11 +144,10 @@ private final class ExportFixture {
         #expect(took < 10, "took \(took) s")
         #expect(s.summary.hasPrefix("claude: stuck, stopped (no output for"))
         #expect(s.failures == 1)
-        let shPid = pid(in: f.dir.file("sh.pid")), sleepPid = pid(in: f.dir.file("sleep.pid"))
-        #expect(shPid != nil && sleepPid != nil)
-        #expect(waitFor(2) { !isAlive(shPid!) && !isAlive(sleepPid!) })
+        let shPid = try #require(pid(in: f.dir.file("sh.pid"))), sleepPid = try #require(pid(in: f.dir.file("sleep.pid")))
+        #expect(waitFor(2) { !isAlive(shPid) && !isAlive(sleepPid) })
         // 15 min doubling: the first retry is 12-15 min away (jitter), not an hour.
-        let wait = s.nextRun.timeIntervalSince(s.lastRun!)
+        let wait = s.nextRun.timeIntervalSince(try #require(s.lastRun))
         #expect(wait >= 15 * 60 * 0.8 - 2 && wait <= 15 * 60 + 2)
         #expect(f.dir.read("vault-export.log").contains("=== stopped: no output for"))
 
@@ -160,7 +159,7 @@ private final class ExportFixture {
         #expect(abs(relaunched.job.snapshot.nextRun.timeIntervalSince(s.nextRun)) < 1)
     }
 
-    @Test func quitStopsARunningExportAtOnce() {
+    @Test func quitStopsARunningExportAtOnce() throws {
         let f = ExportFixture(configure: { $0.stallTimeout = 60 })
         f.dir.write("claude.hang", "")
         f.output("chatgpt", Fixture.aiVaultOk)
@@ -170,7 +169,7 @@ private final class ExportFixture {
         f.export.stopForQuit()
         #expect(Date().timeIntervalSince(started) < 2)
         #expect(waitFor(5) { f.export.job.snapshot.lastRun != nil })
-        #expect(!isAlive(pid(in: f.dir.file("sh.pid"))!))
+        #expect(!isAlive(try #require(pid(in: f.dir.file("sh.pid")))))
         #expect(f.calls == ["claude"]) // chatgpt not started after quit
     }
 
@@ -217,7 +216,7 @@ private final class ExportFixture {
         let s = run(f.export.job)
         #expect(s.summary == "claude: ok (3 new), chatgpt: ok (3 new), voice: 1 need transcripts: 1 updated (2 messages)")
         #expect(chatgpt.requests.map(\.path) == ["/api/auth/session", "/backend-api/conversation/voice-1"])
-        #expect(chatgpt.requests[0].header("cookie") == "__Secure-next-auth.session-token=fake-session")
+        #expect(chatgpt.requests.first?.header("cookie") == "__Secure-next-auth.session-token=fake-session")
 
         #expect(waitFor(15) { archive.status.ledger.synced == 2 })
         let req = try #require(server.requests.first)

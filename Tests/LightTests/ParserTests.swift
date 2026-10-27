@@ -23,15 +23,15 @@ private func vault(title: String = "A title", provider: String, created: String?
 
 private func path(_ provider: String, _ id: String) -> String { "/x/ai-vault-data/\(provider)/conversations/\(id)/conversation.md" }
 
-@Suite("Conversation parser", .timeLimit(.minutes(1))) struct ParserTests {
-    @Test func chatgptTwoMessagesWithTimestampsValidAgainstTheContract() {
+@Suite("Conversation parser", .quietLog, .timeLimit(.minutes(1))) struct ParserTests {
+    @Test func chatgptTwoMessagesWithTimestampsValidAgainstTheContract() throws {
         let content = vault(provider: "chatgpt", sections: [
             Sec(role: "User", at: "2024-06-22T12:45:56.033Z", body: "Question?"),
             Sec(role: "Assistant", at: "2024-06-22T12:46:02.830Z", body: "Answer."),
         ])
         let r = ConversationParser.parse(content: content, filePath: path("chatgpt", "67d5e570-3b94-8008-8dd3-dc1cdf6033c9"))
         #expect(r.problems == [])
-        let doc = r.document!
+        let doc = try #require(r.document)
         #expect(ConversationContract.issues(doc) == [])
         #expect(doc.documentId == "ai-vault:chatgpt:67d5e570-3b94-8008-8dd3-dc1cdf6033c9")
         #expect(doc.source == "chatgpt")
@@ -107,7 +107,7 @@ private func path(_ provider: String, _ id: String) -> String { "/x/ai-vault-dat
         #expect(r.document?.messages.last?.text == body)
     }
 
-    @Test func oddHeadersCRLFNoCreatedNoTitleCountMismatchNoMetadata() {
+    @Test func oddHeadersCRLFNoCreatedNoTitleCountMismatchNoMetadata() throws {
         let content = vault(provider: "chatgpt", created: "", count: 7, sections: [
             Sec(role: "Human", at: "2025-01-01T10:00:00Z", body: "hi"),
             Sec(role: "Claude", body: "hello"),
@@ -115,7 +115,7 @@ private func path(_ provider: String, _ id: String) -> String { "/x/ai-vault-dat
             .replacingOccurrences(of: "# A title\n", with: "")
             .replacingOccurrences(of: "\n", with: "\r\n")
         let r = ConversationParser.parse(content: content, filePath: path("claude", "id with spaces%"))
-        let doc = r.document!
+        let doc = try #require(r.document)
         #expect(ConversationContract.issues(doc) == [])
         #expect(doc.title == nil)
         #expect(doc.json["title"] is NSNull)

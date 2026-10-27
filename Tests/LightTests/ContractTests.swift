@@ -65,13 +65,13 @@ enum Schema {
     static func input(_ name: String) -> [String: Any] { (rpc[name] as! [String: Any])["input"] as! [String: Any] }
 
     /// What actually went over the wire: the request's `data`, as JSON.
-    static func wire(_ seen: StubTransport.Seen) -> Any { seen.body!["data"]! }
+    static func wire(_ seen: StubTransport.Seen) throws -> Any { try #require(seen.body?["data"]) }
 
     static var desktopTs: String { try! String(contentsOfFile: Vault.repo + "/contract/desktop.ts", encoding: .utf8) }
 }
 
-@Suite("Wire payloads match the pinned contract", .timeLimit(.minutes(1))) struct ContractTests {
-    @Test func archivedDocumentsMatchArchiveConversationDocumentsInput() {
+@Suite("Wire payloads match the pinned contract", .quietLog, .timeLimit(.minutes(1))) struct ContractTests {
+    @Test func archivedDocumentsMatchArchiveConversationDocumentsInput() throws {
         let dir = TempDir("contract")
         let job = JobName("contract")
         let stub = StubTransport { s in StubTransport.json(200, ["data": ["accepted": 1, "updated": 0, "unchanged": 0]]) }
@@ -85,13 +85,13 @@ enum Schema {
         dir.write("vault/chatgpt/conversations/voice/conversation.md",
                   VoiceTranscripts.fillTranscripts(VoiceFixture.md, VoiceTranscripts.transcriptsByTime(VoiceFixture.api)).md)
         _ = archive.runOnce()
-        #expect(stub.seen.count == 1)
-        let errors = Schema.validate(Schema.wire(stub.seen[0]), Schema.input("archiveConversationDocuments"))
+        try #require(stub.seen.count == 1)
+        let errors = Schema.validate(try Schema.wire(stub.seen[0]), Schema.input("archiveConversationDocuments"))
         #expect(errors == [])
         #expect(stub.seen[0].documentIds.sorted() == ["ai-vault:chatgpt:a", "ai-vault:chatgpt:voice", "ai-vault:claude:b_c"])
     }
 
-    @Test func habitEventsMatchRecordHabitEventsInput() {
+    @Test func habitEventsMatchRecordHabitEventsInput() throws {
         let f = OutboxFixture(turns: 2) { s in StubTransport.json(200, ["data": ["accepted": s.eventIds.count, "duplicates": 0]]) }
         // Optional fields empty, and a non-finite latency (sent as null, which the contract allows).
         f.logger.logTurn(occurredAt: nil, sessionId: "sparse", callApp: nil, treatmentArm: "baseline", turnDurationSec: 12,
@@ -99,8 +99,8 @@ enum Schema {
                          breached30s: false, breached60s: false, wasRewarded: false)
         f.logger.waitUntilIdle()
         _ = f.sender.runOnce()
-        #expect(f.stub.seen.count == 1)
-        let errors = Schema.validate(Schema.wire(f.stub.seen[0]), Schema.input("recordHabitEvents"))
+        try #require(f.stub.seen.count == 1)
+        let errors = Schema.validate(try Schema.wire(f.stub.seen[0]), Schema.input("recordHabitEvents"))
         #expect(errors == [])
         #expect(f.stub.seen[0].eventIds.count == 3)
     }

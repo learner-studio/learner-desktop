@@ -15,20 +15,22 @@ final class CannedScreenpipe {
 
     lazy var api = ScreenpipeAPI(base: URL(string: "http://screenpipe.invalid")!) { [unowned self] req, done in
         if self.hang { return }
-        let http = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)
-        if req.url!.path.hasSuffix("meetings") {
-            return done(try! JSONSerialization.data(withJSONObject: self.meetings), http, nil)
+        // Anything unexpected is answered as an error the source must cope with, never a crash.
+        func json(_ object: Any) -> Data { (try? JSONSerialization.data(withJSONObject: object)) ?? Data("not json".utf8) }
+        let http = req.url.flatMap { HTTPURLResponse(url: $0, statusCode: 200, httpVersion: nil, headerFields: nil) }
+        if req.url?.path.hasSuffix("meetings") == true { return done(json(self.meetings), http, nil) }
+        guard let sql = req.httpBody.flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })?["query"] as? String else {
+            return done(json(["error": "canned screenpipe: no query"]), http, nil)
         }
-        let sql = (try! JSONSerialization.jsonObject(with: req.httpBody!) as! [String: Any])["query"] as! String
         self.queries.append(sql)
         if self.sqlError { return done(Data(#"{"error":"no such table"}"#.utf8), http, nil) }
         let table = sql.contains("meeting_transcript_segments") ? "meeting_transcript_segments" : "audio_transcriptions"
-        if sql.contains("MAX(id)") {
-            return done(try! JSONSerialization.data(withJSONObject: [["id": self.maxId[table]!]]), http, nil)
+        if sql.contains("MAX(id)") { return done(json([["id": self.maxId[table] ?? 0]]), http, nil) }
+        guard let after = sql.range(of: "id > "), let mark = Int(sql[after.upperBound...].prefix { $0.isNumber }) else {
+            return done(json(["error": "canned screenpipe: no id > in \(sql)"]), http, nil)
         }
-        let mark = Int(sql.components(separatedBy: "id > ")[1].prefix { $0.isNumber })!
-        let rows = (table == "audio_transcriptions" ? self.background : self.live).filter { ($0["id"] as! Int) > mark }
-        done(try! JSONSerialization.data(withJSONObject: rows), http, nil)
+        let rows = (table == "audio_transcriptions" ? self.background : self.live).filter { ($0["id"] as? Int ?? 0) > mark }
+        done(json(rows), http, nil)
     }
 }
 
@@ -41,7 +43,7 @@ func settle(_ condition: () -> Bool = { false }, within seconds: Double = 1) asy
 }
 
 @MainActor
-@Suite("Coach sources") struct CoachSourceTests {
+@Suite("Coach sources", .quietLog) struct CoachSourceTests {
     func iso(_ d: Date) -> String { ISO8601DateFormatter().string(from: d) }
 
     @Test func historyIsNeverReplayedAndBackfillIsNotCountedTwice() async {

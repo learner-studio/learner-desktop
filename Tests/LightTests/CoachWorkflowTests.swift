@@ -5,8 +5,8 @@ import TestSupport
 
 /// The whole coach, end to end on fixtures: speech spans -> streak -> 30 s / 60 s ->
 /// the arm's stimulus -> the trial row in SQLite.
-@Suite("Coach workflow") struct CoachWorkflowTests {
-    @Test func pavlokArmFiresEveryConfiguredModalityAndRecordsEachResult() {
+@Suite("Coach workflow", .quietLog) struct CoachWorkflowTests {
+    @Test func pavlokArmFiresEveryConfiguredModalityAndRecordsEachResult() throws {
         let rig = CoachRig(mode: .pavlokShock)
         rig.settings.setLevel(.vibe, 30, for: .warning)
         rig.settings.setLevel(.beep, 1, for: .warning)
@@ -26,7 +26,7 @@ import TestSupport
         #expect(rig.coach.currentStreak == 0)
 
         let rows = rig.rows
-        #expect(rows.count == 1)
+        try #require(rows.count == 1)
         let row = rows[0]
         #expect(row["treatment_arm"] as? String == "pavlok_shock")
         #expect((row["session_id"] as? String)?.hasPrefix("call_zoom_") == true)
@@ -44,12 +44,14 @@ import TestSupport
         #expect(settings?["cue_30"] as? String == "toast+zap_15+vibe_30+beep")
         #expect(settings?["cue_60"] as? String == "toast+zap_35")
 
-        let fired = rig.interventions.map { "\($0["threshold"]!)/\($0["modality"]!)/\($0["transport"]!)/\($0["delivered"]!)" }
+        let fired = rig.interventions.map { i in
+            ["threshold", "modality", "transport", "delivered"].map { k in i[k].map { String(describing: $0) } ?? "-" }.joined(separator: "/")
+        }
         #expect(fired == ["30s_warning/toast/screen/1", "30s_warning/pavlok_zap/ble/1", "30s_warning/pavlok_vibe/ble/0",
                           "30s_warning/pavlok_beep/ble/1", "60s_hard_stop/pavlok_zap/ble/1"])
     }
 
-    @Test func baselineGetsTheToastButNoStimulusAndNoReward() {
+    @Test func baselineGetsTheToastButNoStimulusAndNoReward() throws {
         let rig = CoachRig(mode: .baseline)
         rig.monologue(0, 12)
         rig.say(13, 14, speaker: .other)
@@ -57,7 +59,7 @@ import TestSupport
         rig.say(57, 58, speaker: .other)
         #expect(rig.wearable.sent.isEmpty)
         let rows = rig.rows
-        #expect(rows.count == 2)
+        try #require(rows.count == 2)
         let short = meta(rows[0])
         #expect(rows[0]["was_rewarded"] as? Int == 0)
         #expect(short["reward_eligible"] as? Bool == true)
@@ -70,7 +72,7 @@ import TestSupport
         #expect((long["treatment_settings"] as? [String: Any])?["cue_30"] as? String == "toast_only")
     }
 
-    @Test func hapticArmRewardsAConciseTurnAndRecordsWhetherItArrived() {
+    @Test func hapticArmRewardsAConciseTurnAndRecordsWhetherItArrived() throws {
         let rig = CoachRig(mode: .hapticVibe)
         rig.monologue(0, 12)
         rig.say(13, 14, speaker: .other)
@@ -81,7 +83,7 @@ import TestSupport
         rig.monologue(20, 32)
         rig.say(33, 34, speaker: .other)
         let rows = rig.rows
-        #expect(rows.map { $0["was_rewarded"] as? Int } == [1, 0])
+        try #require(rows.map { $0["was_rewarded"] as? Int } == [1, 0])
         #expect((meta(rows[0])["reward_result"] as? [String: Any])?["transport"] as? String == "ble")
         #expect(meta(rows[1])["reward_requested"] as? Bool == true)
     }

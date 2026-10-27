@@ -55,10 +55,11 @@ public func pid(in path: String) -> pid_t? {
 /// Captures app log lines for one test at a time (the log sink is process-wide and
 /// suites run in parallel). Returns the lines written while `body` ran.
 private let captureLock = NSLock()
+nonisolated(unsafe) private var quietOutsideCaptures = false
 public func capturingLog(_ body: () throws -> Void) rethrows -> [String] {
     captureLock.lock()
-    // Clear the sink BEFORE releasing the lock, or the next test's sink gets cleared.
-    defer { LogSink.set(nil); captureLock.unlock() }
+    // Reset the sink BEFORE releasing the lock, or the next test's sink gets reset.
+    defer { LogSink.set(quietOutsideCaptures ? { _ in } : nil); captureLock.unlock() }
     let lines = LockedLines()
     LogSink.set { lines.append($0) }
     try body()
@@ -71,4 +72,13 @@ public final class LockedLines: @unchecked Sendable {
     public init() {}
     public func append(_ l: String) { lock.withLock { lines.append(l) } }
     public var all: [String] { lock.withLock { lines } }
+}
+
+/// From now on, app log lines that no test is capturing are dropped instead of printed
+/// into the lane output (the `.quietLog` suite trait calls this).
+public func silenceUncapturedLog() {
+    captureLock.lock()
+    defer { captureLock.unlock() }
+    quietOutsideCaptures = true
+    LogSink.set { _ in }
 }

@@ -96,7 +96,7 @@ private func indexes(_ calls: [String], _ needle: String) -> [Int] {
     calls.indices.filter { calls[$0].contains(needle) }
 }
 
-@Suite("Capture scripts (stubbed)") struct ScriptsCaptureTests {
+@Suite("Capture scripts (stubbed)", .quietLog) struct ScriptsCaptureTests {
     static let plists = ["com.benpollack.learner-desktop.plist", "screenpipe.plist"]
 
     func startJail(launchctlLoaded: Bool = false, screenpipeRunning: Bool = false, healthBody: String = "",

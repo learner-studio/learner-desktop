@@ -102,7 +102,7 @@ struct CoachHeavyTests {
     func theCoachRunsOnLiveScreenpipe() async {
         let api = ScreenpipeAPI(base: screenpipe, timeout: 2)
         let (logger, _) = heavyLogger()
-        let settings = CoachSettings(defaults: UserDefaults(suiteName: "coach-heavy-\(UUID().uuidString)")!)
+        let settings = CoachSettings(defaults: ScratchDefaults("coach-heavy"))
         let coach = SpeakingCoach(settings: settings, speech: ScreenpipeSpeechSource(api: api), calls: ScreenpipeCallSource(api: api),
                                   wearable: SilentWearable(), toast: TimedToast(), logger: logger)
         for _ in 0..<5 {

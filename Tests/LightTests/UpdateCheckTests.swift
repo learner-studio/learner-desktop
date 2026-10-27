@@ -18,7 +18,7 @@ private func check(_ dir: TempDir, _ job: JobName) -> ScreenpipeUpdateCheck {
 
 private func read(_ relative: String) -> String { (try? String(contentsOfFile: Vault.repo + "/" + relative, encoding: .utf8)) ?? "" }
 
-@Suite("screenpipe update check", .timeLimit(.minutes(1))) struct UpdateCheckTests {
+@Suite("screenpipe update check", .quietLog, .timeLimit(.minutes(1))) struct UpdateCheckTests {
     @Test func theFirstSightingIsABaselineNotARun() {
         let dir = TempDir("uc"), job = JobName("uc")
         let uc = check(dir, job)
@@ -62,22 +62,19 @@ private func read(_ relative: String) -> String { (try? String(contentsOfFile: V
         #expect(!uc.isRunning)
     }
 
-    @Test func theFencedSessionIsStartedWithTheRunbookAndSettings() {
-        // The arguments live in the source; the run itself is exercised in the medium lane.
-        let src = read("menu-bar-app/Screenpipe.swift")
-        for piece in ["\"-p\"", "\"--settings\"", "config/screenpipe-update-agent.json", "\"--max-budget-usd\"", "\"stream-json\"",
-                      "docs/screenpipe-update-runbook.md", "CLAUDE_CODE_OAUTH_TOKEN"] {
-            #expect(src.contains(piece), "\(piece)")
-        }
-        #expect(!src.contains("\"--resume\","))
-    }
-
     // MARK: Phase tag
 
-    @Test func everyTurnCarriesTheCapturePhase() {
-        let coach = read("menu-bar-app/Coach.swift")
-        #expect(coach.contains("\"capture_phase\": CaptureEnvironment.capturePhase"))
-        #expect(coach.contains("\"screenpipe_app_version\": CaptureEnvironment.screenpipeAppVersion"))
+    @Test func everyTurnCarriesTheCapturePhase() throws {
+        // The same versions as the test below: CaptureEnvironment is process-wide.
+        CaptureEnvironment.screenpipeAppVersion = "2.7.1"
+        CaptureEnvironment.screenpipeVersion = "0.3.0"
+        let rig = CoachRig(mode: .baseline)
+        rig.monologue(0, 12)
+        rig.say(13, 14, speaker: .other)
+        let m = meta(try #require(rig.rows.first))
+        #expect(m["capture_phase"] as? String == "screenpipe 2.7.1 / engine 0.3.0")
+        #expect(m["screenpipe_app_version"] as? String == "2.7.1")
+        #expect(m["screenpipe_version"] as? String == "0.3.0")
     }
 
     @Test func theTurnTagMatchesTheGrowthBookPhaseName() {

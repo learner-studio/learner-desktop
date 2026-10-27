@@ -38,11 +38,11 @@ private func ok(_ s: StubTransport.Seen) -> HTTPReply {
     StubTransport.json(200, ["data": ["accepted": s.documentIds.count, "updated": 0, "unchanged": 0]])
 }
 
-@Suite("Archive sweep", .timeLimit(.minutes(1))) struct ArchiveTests {
-    @Test func postsTheDataEnvelopeWithTheDeviceKey() {
+@Suite("Archive sweep", .quietLog, .timeLimit(.minutes(1))) struct ArchiveTests {
+    @Test func postsTheDataEnvelopeWithTheDeviceKey() throws {
         let f = ArchiveFixture(count: 1, handler: ok)
         _ = f.sweep()
-        let r = f.stub.seen[0]
+        let r = try #require(f.stub.seen.first)
         #expect(r.path == "/learner-api/rpc/archiveConversationDocuments")
         #expect(r.headers["x-api-key"] == "test-key")
         #expect(r.header("content-type") == "application/json")

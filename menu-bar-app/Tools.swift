@@ -58,7 +58,8 @@ enum Tools {
     /// The repository holding `start` (or one of its parents): the directory with
     /// Package.swift and menu-bar-app/. Tools resolve their default paths against it.
     static func repoRoot(from start: String) -> String? {
-        var dir = URL(fileURLWithPath: start).standardizedFileURL
+        // Resolved, so a path through a symlink (/tmp -> /private/tmp) gives the real root.
+        var dir = URL(fileURLWithPath: start).standardizedFileURL.resolvingSymlinksInPath()
         for _ in 0..<12 {
             let fm = FileManager.default
             if fm.fileExists(atPath: dir.appendingPathComponent("Package.swift").path),

@@ -33,7 +33,7 @@ private let fixtureConfig = """
     }
     """
 
-@Suite("Tools end to end", .serialized) struct ToolsEndToEndTests {
+@Suite("Tools end to end", .quietLog, .serialized) struct ToolsEndToEndTests {
 
     func phaseFixture(_ dir: TempDir) throws -> (CapturePhase.Options, HTTPStandIn) {
         let screenpipe = try HTTPStandIn { _ in HTTPStandIn.Response.json(200, ["status": "healthy", "version": "0.4.52"]) }

@@ -3,7 +3,7 @@ import Testing
 @testable import LearnerDesktop
 import TestSupport
 
-@Suite("Coach settings and arms") struct CoachSettingsTests {
+@Suite("Coach settings and arms", .quietLog) struct CoachSettingsTests {
     @Test func armAssignmentIsAStableHashOfTheSession() {
         // Pinned: the same session must land in the same arm in every process and release.
         #expect(TreatmentArm.assigned(to: "call_zoom_1a2b3c4d") == .cawAudio)
@@ -14,6 +14,24 @@ import TestSupport
         for i in 0..<4000 { counts[TreatmentArm.assigned(to: "call_zoom_\(i)"), default: 0] += 1 }
         #expect(counts.count == 4)
         #expect(counts.values.allSatisfy { (850...1150).contains($0) })
+    }
+
+    @Test func scratchSettingsNeverWriteToTheOwnersPreferences() throws {
+        var plist = ""
+        do {
+            let defaults = ScratchDefaults("learner-coach-test")
+            plist = defaults.plistPath
+            let s = CoachSettings(defaults: defaults)
+            s.setLevel(.zap, 20, for: .warning)
+            s.defaults.synchronize()
+            // The values are stored in the suite's own temp folder, not ~/Library/Preferences.
+            let named = NSHomeDirectory() + "/Library/Preferences/\((defaults.suite as NSString).lastPathComponent).plist"
+            #expect(!FileManager.default.fileExists(atPath: named))
+            #expect(!plist.hasPrefix(NSHomeDirectory() + "/Library/Preferences"))
+            let saved = try #require(NSDictionary(contentsOfFile: plist))
+            #expect(saved.count > 0)
+        }
+        #expect(!FileManager.default.fileExists(atPath: (plist as NSString).deletingLastPathComponent))
     }
 
     @Test func aFixedModeOverridesRandomization() {
