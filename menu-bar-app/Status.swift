@@ -26,6 +26,8 @@ struct AppStatus: Equatable {
     var trialCount = 0
     /// Chats the server refused (parked in the archive ledger).
     var archiveParked = 0
+    /// The CLI-session uploader's menu line; nil when learner-server runs on this Mac.
+    var cliSessions: String?
     /// Lasting problems from jobs, helpers and the trial database.
     var problems: [Problem] = []
 
@@ -149,7 +151,8 @@ enum StatusProbe {
     static let audioDevices = ["MacBook Pro Microphone (input)", "System Audio (output)"]
 
     /// Blocking; run by the Status job.
-    static func collect(previous: AppStatus, helpers: [ManagedHelper], appAgentPlist: String) -> AppStatus {
+    static func collect(previous: AppStatus, helpers: [ManagedHelper], appAgentPlist: String,
+                        uploaderActive: Bool = false) -> AppStatus {
         var s = AppStatus()
         s.capture = screenpipe()
         let server = HTTPProbe.get(serverHealthURL)
@@ -163,6 +166,11 @@ enum StatusProbe {
         s.problems = Job.all.compactMap { j in j.problem.map { Problem(source: j.name, text: $0) } }
             + helpers.compactMap { h in h.problem.map { Problem(source: "Helper:\(h.name)", text: $0) } }
             + (HabitEventLogger.shared.problem.map { [Problem(source: "Trials", text: $0)] } ?? [])
+        if uploaderActive {
+            let cli = CLISessions.readStatus()
+            s.cliSessions = CLISessions.summary(cli)
+            if let p = CLISessions.problem(cli) { s.problems.append(Problem(source: "CLI sessions", text: p)) }
+        }
         logChanges(from: previous, to: s, serverError: server.error)
         return s
     }

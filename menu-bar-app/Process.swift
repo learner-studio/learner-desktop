@@ -29,8 +29,23 @@ final class ManagedHelper {
     private var backoff = Backoff(base: 1, max: 60, jitter: 0)
     static let healthyAfter: TimeInterval = 60
 
+    /// Extra environment, read at each launch (so a key is fetched fresh and never stored).
+    private let environment: () -> [String: String]
+    /// What particular exit codes mean for this helper: a wait before the next start, and
+    /// whether to show it as a problem (a config error) or not (another copy is running).
+    struct ExitRule { let note: String; let wait: TimeInterval; let isProblem: Bool }
+    private let exitRules: [Int32: ExitRule]
+    /// The shortest wait before a restart (the uploader expects about 30 s, like launchd's
+    /// ThrottleInterval).
+    private let minRestart: TimeInterval
+    private var lastExit: (code: Int32, rule: ExitRule)?
+
     init(name: String, executable: String, arguments: [String], marker: String,
-         runtimeDir: String = Paths.data) {
+         runtimeDir: String = Paths.data, environment: @escaping () -> [String: String] = { [:] },
+         minRestart: TimeInterval = 1, exitRules: [Int32: ExitRule] = [:]) {
+        self.environment = environment
+        self.minRestart = minRestart
+        self.exitRules = exitRules
         self.name = name
         self.executable = executable
         self.arguments = arguments
@@ -46,6 +61,7 @@ final class ManagedHelper {
     /// For the tray: down, or restarting again and again.
     var problem: String? {
         if stopping { return nil }
+        if let last = lastExit, !isRunning { return last.rule.isProblem ? "\(name): \(last.rule.note)" : nil }
         if !isRunning { return "\(name) is not running" }
         return backoff.failures >= 3 ? "\(name) keeps exiting (\(backoff.failures) restarts)" : nil
     }
@@ -72,7 +88,7 @@ final class ManagedHelper {
         p.executableURL = URL(fileURLWithPath: executable)
         p.arguments = arguments
         p.currentDirectoryURL = URL(fileURLWithPath: (pidPath as NSString).deletingLastPathComponent)
-        p.environment = ChildProcess.toolEnvironment
+        p.environment = ChildProcess.toolEnvironment.merging(environment()) { _, extra in extra }
         if let out = out {
             p.standardOutput = out
             p.standardError = out
@@ -93,6 +109,7 @@ final class ManagedHelper {
         process = p
         logHandle = out
         startedAt = Date()
+        lastExit = nil
         do { try String(p.processIdentifier).write(toFile: pidPath, atomically: true, encoding: .utf8) }
         catch { log.warn("cannot write \(pidPath): \(error.localizedDescription); a crash would leave it orphaned") }
         log.info("started (pid \(p.processIdentifier))")
@@ -108,8 +125,19 @@ final class ManagedHelper {
         // One that stayed up a minute was healthy, so bring it back promptly; one that dies
         // straight away (no network, port already held) backs off instead of spinning.
         if Date().timeIntervalSince(startedAt) > ManagedHelper.healthyAfter { backoff.succeeded() }
-        let wait = backoff.failed()
-        log.warn("exited (status \(proc.terminationStatus)) after \(Job.describe(Date().timeIntervalSince(startedAt))); restarting in \(Job.describe(wait))")
+        let code = proc.terminationStatus
+        let ran = Job.describe(Date().timeIntervalSince(startedAt))
+        let wait: TimeInterval
+        if let rule = exitRules[code] {
+            lastExit = (code, rule)
+            wait = rule.wait
+            if rule.isProblem { log.warn("exited \(code) (\(rule.note)) after \(ran); trying again in \(Job.describe(wait))") }
+            else { log.info("exited \(code) (\(rule.note)) after \(ran); checking again in \(Job.describe(wait))") }
+        } else {
+            lastExit = nil
+            wait = max(minRestart, backoff.failed())
+            log.warn("exited (status \(code)) after \(ran); restarting in \(Job.describe(wait))")
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in self?.launch() }
     }
 

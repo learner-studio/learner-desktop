@@ -22,7 +22,8 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private lazy var statusJob = Job("Status", period: 8, backoff: Backoff(base: 8, max: 60), quiet: true) { [weak self] _ in
         guard let self = self else { return .idle }
         let previous = DispatchQueue.main.sync { self.status }
-        let next = StatusProbe.collect(previous: previous, helpers: [self.tunnel], appAgentPlist: self.appAgentPlist)
+        let next = StatusProbe.collect(previous: previous, helpers: [self.tunnel] + (self.uploader.map { [$0] } ?? []),
+                                         appAgentPlist: self.appAgentPlist, uploaderActive: self.uploader != nil)
         self.ensureScreenpipeSkipsSignIn()
         if let appVersion = ScreenpipeUpdateCheck.installedAppVersion() {
             CaptureEnvironment.screenpipeAppVersion = appVersion
@@ -41,6 +42,9 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         name: "tunnel", executable: "/bin/bash",
         arguments: [URL(fileURLWithPath: Bundle.main.resourcePath ?? "").appendingPathComponent("tunnel.sh").path],
         marker: "3200:127.0.0.1:3200")
+
+    /// Uploads Codex and Claude Code sessions when learner-server runs on another machine.
+    lazy var uploader: ManagedHelper? = CLISessions.helper(key: { LearnerRPC.shared.key() })
 
     /// launchctl bootout / kickstart -k and stop-capture.sh deliver SIGTERM. Route it
     /// through NSApplication.terminate so it takes the same clean path as menu Quit
@@ -84,6 +88,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // Only GrowthBook's UI still needs the tunnel; everything else is HTTPS.
         tunnel.start()
+        uploader?.start()
 
         VaultExport.shared.onFinished = { [weak self] in self?.statusJob.kick("export finished") }
         rebuildMenu()
@@ -158,6 +163,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         add("   └─ 📤 \(status.outboxDepth) queued | last: \(outbox.lastStatus)"
             + " | Tunnel \(tunnel.isRunning ? "🟢" : "🔴")")
         if status.archiveParked > 0 { add("   ⚠️ \(status.archiveParked) chat(s) refused by the server (see menubar.log)") }
+        add(status.cliSessions.map { "💻 CLI sessions (uploader): \($0)" } ?? "💻 CLI sessions: read by learner-server on this Mac")
         for p in status.problems { add("   ⚠️ \(p.source): \(p.text)") }
         add("   ⚡ Send Queued Trials Now", #selector(triggerHabitSync))
         if status.loginItemBlocked {
@@ -184,6 +190,8 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
             add("\(ChromiumBrowser.selected.id == browser.id ? "✓ " : "   ")\(browser.name)", #selector(selectVaultBrowser(_:)), to: browserMenu).representedObject = browser.id
         }
         add("Sign AI Vault In From", to: settings).submenu = browserMenu
+        add(CLISessions.serverOnThisMac ? "✓ learner-server runs on this Mac (no uploader)" : "○ learner-server runs on another machine (uploader on)",
+            #selector(toggleServerOnThisMac), to: settings)
         let settingsParent = NSMenuItem(title: "Settings", action: nil, keyEquivalent: "")
         settingsParent.submenu = settings
         statusMenu.addItem(settingsParent)
@@ -321,6 +329,19 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rebuildMenu()
     }
 
+    @objc func toggleServerOnThisMac() {
+        CLISessions.serverOnThisMac.toggle()
+        if CLISessions.serverOnThisMac {
+            let running = uploader
+            uploader = nil
+            DispatchQueue.global(qos: .userInitiated).async { running?.stop(grace: 5) }
+        } else {
+            uploader = CLISessions.helper(key: { LearnerRPC.shared.key() })
+            uploader?.start()
+        }
+        statusJob.kick("uploader setting changed")
+    }
+
     @objc func signInToVault(_ sender: NSMenuItem) {
         guard let provider = sender.representedObject as? String else { return }
         VaultSignIn.start(provider)
@@ -388,7 +409,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Shutdown.run(TrayAppManager.shutdownSteps(
             finishTurn: { self.talkMonitor.resetStreak() }, logger: HabitEventLogger.shared,
             drain: { OutboxSender.shared.drain(until: $0) }, stopJobs: { ChatAndOutboxJobs.stopForQuit() },
-            stopTunnel: { self.tunnel.stop(grace: 0.5) }), total: 18)
+            stopTunnel: { self.tunnel.stop(grace: 0.5); self.uploader?.stop(grace: 1.5) }), total: 18)
         return .terminateNow
     }
 
@@ -403,7 +424,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
             .init(name: "send queued trials", budget: 10) { deadline in "\(drain(deadline)) left for next launch" },
             .init(name: "close the trial database", budget: 2) { _ in logger.close(); return nil },
             .init(name: "stop the export and update check", budget: 1) { _ in stopJobs(); return nil },
-            .init(name: "stop the tunnel", budget: 2) { _ in stopTunnel(); return nil },
+            .init(name: "stop the helpers", budget: 3) { _ in stopTunnel(); return nil },
         ]
     }
 
