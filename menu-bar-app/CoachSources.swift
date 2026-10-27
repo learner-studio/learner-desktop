@@ -8,7 +8,7 @@ import Foundation
 // MARK: - Protocols
 
 /// A stretch of confirmed speech.
-struct SpeechSpan {
+struct SpeechSpan: Sendable {
     enum Speaker: String { case me, other }
 
     let speaker: Speaker
@@ -28,16 +28,17 @@ struct SpeechSpan {
 
 /// Something that hears speech. The coach asks once a second (main thread); a detector
 /// that pushes can deliver whenever it likes, as long as it does so on the main thread.
+@MainActor
 protocol SpeechSource: AnyObject {
-    func poll(now: Date, deliver: @escaping ([SpeechSpan]) -> Void)
+    func poll(now: Date, deliver: @escaping @MainActor ([SpeechSpan]) -> Void)
 }
 
-struct CallState: Equatable {
+struct CallState: Equatable, Sendable {
     let app: String
     let title: String?
 }
 
-enum CallPoll {
+enum CallPoll: Sendable {
     /// The call in progress, or nil for none.
     case answered(CallState?)
     /// The poll failed; it says nothing about the call.
@@ -45,8 +46,9 @@ enum CallPoll {
 }
 
 /// Something that knows whether a call is on. Asked once a second; delivers on main.
+@MainActor
 protocol CallSource: AnyObject {
-    func poll(deliver: @escaping (CallPoll) -> Void)
+    func poll(deliver: @escaping @MainActor (CallPoll) -> Void)
 }
 
 // MARK: - screenpipe HTTP
@@ -55,8 +57,9 @@ protocol CallSource: AnyObject {
 /// time (a slow screenpipe is not hammered with overlapping polls), bounded by `timeout`,
 /// every failure counted and logged (the first one as a warning, repeats collapsed, the
 /// recovery as info), and every answer delivered on the main thread.
+@MainActor
 final class ScreenpipeAPI {
-    typealias Fetch = (URLRequest, @escaping (Data?, URLResponse?, Error?) -> Void) -> Void
+    typealias Fetch = @MainActor (URLRequest, @escaping @Sendable (Data?, URLResponse?, Error?) -> Void) -> Void
 
     static let shared = ScreenpipeAPI(base: URL(string: "http://localhost:3030")!)
 
@@ -75,14 +78,15 @@ final class ScreenpipeAPI {
     }
 
     /// GET `path`; `done` gets the decoded JSON on success, `failed` the reason otherwise.
-    func get(_ name: String, _ path: String, failed: ((String) -> Void)? = nil, done: @escaping (Any) -> Void) {
+    func get(_ name: String, _ path: String, failed: (@MainActor (String) -> Void)? = nil, done: @escaping @MainActor (Any) -> Void) {
         var req = URLRequest(url: base.appendingPathComponent(path))
         req.timeoutInterval = timeout
         send(name, req, failed) { json in done(json); return (true, "") }
     }
 
     /// POST /raw_sql; `done` gets the rows on success (an SQL error is a failure).
-    func sql(_ name: String, _ query: String, failed: ((String) -> Void)? = nil, done: @escaping ([[String: Any]]) -> Void) {
+    func sql(_ name: String, _ query: String, failed: (@MainActor (String) -> Void)? = nil,
+             done: @escaping @MainActor ([[String: Any]]) -> Void) {
         var req = URLRequest(url: base.appendingPathComponent("raw_sql"))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -98,7 +102,8 @@ final class ScreenpipeAPI {
     }
 
     /// `accept` returns false (and why) when the JSON is not what was asked for.
-    private func send(_ name: String, _ req: URLRequest, _ failed: ((String) -> Void)?, _ accept: @escaping (Any) -> (Bool, String)) {
+    private func send(_ name: String, _ req: URLRequest, _ failed: (@MainActor (String) -> Void)?,
+                      _ accept: @escaping @MainActor (Any) -> (Bool, String)) {
         guard !inFlight.contains(name) else {
             log.noisy("screenpipe \(name): previous poll still running; skipped")
             return
@@ -106,17 +111,18 @@ final class ScreenpipeAPI {
         inFlight.insert(name)
         requests[name, default: 0] += 1
         fetch(req) { data, response, error in
-            var json: Any?
+            var body: Data?
             var why = "no JSON in the response"
             if let error = error {
                 why = error.localizedDescription
             } else if let status = (response as? HTTPURLResponse)?.statusCode, status != 200 {
                 why = "HTTP \(status)"
-            } else if let data = data {
-                json = try? JSONSerialization.jsonObject(with: data)
+            } else {
+                body = data
             }
             DispatchQueue.main.async {
                 self.inFlight.remove(name)
+                let json = body.flatMap { try? JSONSerialization.jsonObject(with: $0) }
                 if let json = json {
                     let (ok, problem) = accept(json)
                     if ok {
@@ -193,7 +199,7 @@ final class ScreenpipeSpeechSource: SpeechSource {
 
     init(api: ScreenpipeAPI) { self.api = api }
 
-    func poll(now: Date, deliver: @escaping ([SpeechSpan]) -> Void) {
+    func poll(now: Date, deliver: @escaping @MainActor ([SpeechSpan]) -> Void) {
         api.sql(live.name, live.query) { [self] rows in
             deliver(live.accept(rows, log: log).compactMap { liveSpan($0, now: now) })
         }
@@ -236,13 +242,13 @@ final class ScreenpipeSpeechSource: SpeechSource {
 
     // MARK: Parsing
 
-    static func int(_ v: Any?) -> Int64? { (v as? NSNumber)?.int64Value }
+    nonisolated static func int(_ v: Any?) -> Int64? { (v as? NSNumber)?.int64Value }
 
-    static func words(_ text: String) -> Int { text.split { $0.isWhitespace }.count }
+    nonisolated static func words(_ text: String) -> Int { text.split { $0.isWhitespace }.count }
 
     /// Whisper hallucinates subtitle credits on silence, and bracketed noise tags are not
     /// speech; anything under two words is a grunt.
-    static func isSpeech(_ raw: String) -> Bool {
+    nonisolated static func isSpeech(_ raw: String) -> Bool {
         let text = raw.replacingOccurrences(of: "\\[.*?\\]", with: "", options: .regularExpression)
             .replacingOccurrences(of: "\\(.*?\\)", with: "", options: .regularExpression)
         let lower = text.lowercased()
@@ -251,19 +257,20 @@ final class ScreenpipeSpeechSource: SpeechSource {
     }
 
     // screenpipe writes both "…T16:10:12-04:00" and "…T15:12:11.241-04:00"; one formatter
-    // handles only one of them.
-    private static let plain: ISO8601DateFormatter = {
+    // handles only one of them. nonisolated(unsafe): ISO8601DateFormatter is thread-safe and
+    // these two are never changed after setup.
+    nonisolated(unsafe) private static let plain: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime]
         return f
     }()
-    private static let fractional: ISO8601DateFormatter = {
+    nonisolated(unsafe) private static let fractional: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return f
     }()
 
-    static func parseDate(_ value: String) -> Date? { fractional.date(from: value) ?? plain.date(from: value) }
+    nonisolated static func parseDate(_ value: String) -> Date? { fractional.date(from: value) ?? plain.date(from: value) }
 }
 
 // MARK: - screenpipe calls
@@ -274,7 +281,7 @@ final class ScreenpipeCallSource: CallSource {
 
     init(api: ScreenpipeAPI) { self.api = api }
 
-    func poll(deliver: @escaping (CallPoll) -> Void) {
+    func poll(deliver: @escaping @MainActor (CallPoll) -> Void) {
         api.get("meetings", "meetings", failed: { deliver(.failed($0)) }) { json in
             guard let meetings = json as? [[String: Any]] else { deliver(.failed("meetings: not a list")); return }
             let active = meetings.first { !($0["meeting_end"] is String) }

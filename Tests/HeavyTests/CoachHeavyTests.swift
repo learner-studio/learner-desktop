@@ -25,12 +25,14 @@ private func defaultsValue(_ key: String) -> String? {
     return r.ok ? r.output.trimmingCharacters(in: .whitespacesAndNewlines) : nil
 }
 
+@MainActor
 final class SilentWearable: Wearable {
     var isEnabled = false
     func send(_ m: Modality, intensity: Int, reason: String, context: StimulusContext,
-              completion: @escaping (StimulusResult) -> Void) { completion(.notSent("heavy test")) }
+              completion: @escaping @MainActor (StimulusResult) -> Void) { completion(.notSent("heavy test")) }
 }
 
+@MainActor
 final class TimedToast: CoachToast {
     var firstShown: Date?
     func show(streak: TimeInterval, callApp: String?) { firstShown = firstShown ?? Date() }
@@ -51,7 +53,7 @@ private func waitFor(_ seconds: Double, until condition: () -> Bool = { false })
     while !condition() && Date() < deadline { try? await Task.sleep(nanoseconds: 50_000_000) }
 }
 
-@Suite("Coach, heavy: live screenpipe and wristband", .quietLog, .enabled(if: heavy, "heavy lane: set LEARNER_HEAVY=1 (scripts/test.sh heavy)"))
+@Suite("Coach, heavy: live screenpipe and wristband", .tags(.heavy, .coach), .timeLimit(.minutes(2)), .quietLog, .enabled(if: heavy, "heavy lane: set LEARNER_HEAVY=1 (scripts/test.sh heavy)"))
 struct CoachHeavyTests {
     /// Every query the coach makes is answered by the installed screenpipe, every timestamp
     /// parses, and the first poll only sets the watermark -- history is never replayed.

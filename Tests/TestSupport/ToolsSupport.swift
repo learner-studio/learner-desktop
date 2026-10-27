@@ -1,6 +1,7 @@
 import Foundation
 
 /// Lines a tool printed, for assertions.
+// @unchecked: both buffers are only touched under `lock`.
 public final class Printed: @unchecked Sendable {
     private let lock = NSLock()
     private var _out: [String] = []

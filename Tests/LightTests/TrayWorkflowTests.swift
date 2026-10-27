@@ -5,33 +5,34 @@ import TestSupport
 
 // The tray's own workflows: the quit sequence, the heartbeat it sends, and which problem
 // the tray shows when several are true at once.
-@Suite("Tray workflows", .quietLog, .timeLimit(.minutes(1))) struct TrayWorkflowTests {
+@Suite("Tray workflows", .tags(.light, .shutdown, .status), .quietLog, .timeLimit(.minutes(1))) struct TrayWorkflowTests {
 
-    @Test func quitSendsEveryQueuedTrialBeforeClosingTheDatabase() {
+    @Test func quitSendsEveryQueuedTrialBeforeClosingTheDatabase() throws {
         let dir = TempDir("quit")
         let logger = HabitEventLogger(path: dir.file("trials.sqlite"))
-        func turn(_ i: Int) {
+        @Sendable func turn(_ i: Int) {
             logger.logTurn(sessionId: "s-\(i)", callApp: "Solo Mic", treatmentArm: "baseline", turnDurationSec: 12,
                            wordsSpoken: 30, warningFiredAt: nil, shockFiredAt: nil, latencyToYieldSec: nil,
                            breached30s: false, breached60s: false, wasRewarded: false)
         }
         for i in 0..<3 { turn(i) }
-        var order: [String] = []
-        var seenBySend = -1
-        let lock = NSLock()
+        let order = Locked<[String]>([])
+        let seenBySend = Locked(-1)
         let steps = TrayAppManager.shutdownSteps(
-            finishTurn: { lock.withLock { order.append("turn") }; turn(3) },   // the in-flight turn
+            finishTurn: { order.withLock { $0.append("turn") }; turn(3) },   // the in-flight turn
             logger: logger,
-            drain: { _ in lock.withLock { order.append("send"); seenBySend = logger.getUnsyncedCount() }; return 0 },
-            stopJobs: { lock.withLock { order.append("jobs") } },
-            stopTunnel: { lock.withLock { order.append("tunnel") } })
+            drain: { _ in order.withLock { $0.append("send") }; seenBySend.value = logger.getUnsyncedCount(); return 0 },
+            stopJobs: { order.withLock { $0.append("jobs") } },
+            stopTunnel: { order.withLock { $0.append("tunnel") } })
         _ = capturingLog { Shutdown.run(steps, total: 10) }
-        #expect(lock.withLock { order } == ["turn", "send", "jobs", "tunnel"])
-        #expect(seenBySend == 4)   // all four rows, read from an open database
-        #expect(steps.map(\.name).firstIndex(of: "send queued trials")! < steps.map(\.name).firstIndex(of: "close the trial database")!)
+        #expect(order.value == ["turn", "send", "jobs", "tunnel"])
+        #expect(seenBySend.value == 4)   // all four rows, read from an open database
+        let send = try #require(steps.map(\.name).firstIndex(of: "send queued trials"))
+        let close = try #require(steps.map(\.name).firstIndex(of: "close the trial database"))
+        #expect(send < close)
     }
 
-    @Test func theHeartbeatMatchesTheContractInEveryCaptureState() {
+    @Test func theHeartbeatMatchesTheContractInEveryCaptureState() throws {
         let schema = Schema.input("recordAppHeartbeat")
         for capture: AppStatus.Capture in [.unknown, .recording, .degraded("audio stalled"), .stopped("port 3030 closed")] {
             var s = AppStatus(capture: capture, outboxDepth: 3)
@@ -39,7 +40,7 @@ import TestSupport
             for (sent, version) in [(Date?.none, String?.none), (Date(), "0.3.0")] {
                 let body = TrayAppManager.heartbeat(s, appVersion: "1.0.0", screenpipeVersion: version, capturePhase: nil,
                                                     lastSentAt: sent, lastExport: sent, outboxStatus: "sent 3")
-                let json = try! JSONSerialization.jsonObject(with: JSONSerialization.data(withJSONObject: body))
+                let json = try JSONSerialization.jsonObject(with: JSONSerialization.data(withJSONObject: body))
                 #expect(Schema.validate(json, schema).isEmpty, "\(capture): \(Schema.validate(json, schema))")
             }
         }

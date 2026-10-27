@@ -27,7 +27,7 @@ enum Live {
     static func sql(_ query: String) -> Any? { json(api + "/raw_sql", body: ["query": query]) }
 }
 
-@Suite("Live screenpipe (read-only)", .quietLog, .enabled(if: Live.heavy, "heavy lane: set LEARNER_HEAVY=1"),
+@Suite("Live screenpipe (read-only)", .tags(.heavy, .status), .timeLimit(.minutes(2)), .quietLog, .enabled(if: Live.heavy, "heavy lane: set LEARNER_HEAVY=1"),
        .enabled(if: Live.screenpipeUp, "screenpipe is not answering on :3030"))
 struct CaptureLiveTests {
     let health = Live.health ?? [:]

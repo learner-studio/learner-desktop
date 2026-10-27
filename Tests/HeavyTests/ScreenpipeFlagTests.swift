@@ -6,7 +6,7 @@ import TestSupport
 
 // Live, read-only: the running screenpipe will not sit waiting on a sign-in. Either it was
 // launched with SCREENPIPE_SKIP_ONBOARDING=1, or its server answers (it is recording).
-@Suite("screenpipe sign-in flag (live)", .quietLog, .enabled(if: ProcessInfo.processInfo.environment["LEARNER_HEAVY"] == "1"))
+@Suite("screenpipe sign-in flag (live)", .tags(.heavy, .status), .timeLimit(.minutes(2)), .quietLog, .enabled(if: ProcessInfo.processInfo.environment["LEARNER_HEAVY"] == "1"))
 struct ScreenpipeFlagTests {
     @Test func theRunningScreenpipeCanRecordWithoutASignIn() throws {
         let running = try #require(NSRunningApplication.runningApplications(withBundleIdentifier: "screenpi.pe").first,
@@ -23,7 +23,7 @@ struct ScreenpipeFlagTests {
 }
 
 // Live, read-only: the status workflow against the real machine.
-@Suite("Status (live)", .quietLog, .enabled(if: ProcessInfo.processInfo.environment["LEARNER_HEAVY"] == "1"))
+@Suite("Status (live)", .tags(.heavy, .status), .timeLimit(.minutes(2)), .quietLog, .enabled(if: ProcessInfo.processInfo.environment["LEARNER_HEAVY"] == "1"))
 struct LiveStatusTests {
     @Test func screenpipeAndTheServerAnswerAndProblemsAreNamed() {
         #expect(StatusProbe.screenpipe() != .stopped("port 3030 closed"))

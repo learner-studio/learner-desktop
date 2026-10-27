@@ -5,7 +5,7 @@ import TestSupport
 
 // ChildProcess and ManagedHelper against real child processes: stalls, programs that
 // ignore SIGTERM, process trees, orphans from a crashed launch, crash loops.
-@Suite("Child processes and helpers", .quietLog, .serialized) struct ProcessTests {
+@Suite("Child processes and helpers", .tags(.medium, .helpers, .core), .timeLimit(.minutes(1)), .quietLog, .serialized) struct ProcessTests {
 
     private func alive(_ pid: pid_t) -> Bool { kill(pid, 0) == 0 }
 
@@ -97,12 +97,12 @@ import TestSupport
         let script = dir.write("crashy.sh", "#!/bin/bash\necho x >> \"\(launches)\"\nexit 1\n", executable: true)
         let helper = ManagedHelper(name: "crashy", executable: script, arguments: [], marker: "crashy.sh", runtimeDir: dir.path)
         DispatchQueue.main.sync { helper.start() }
-        // Launches at 0 s, then after 1 s, 2 s, 4 s: three in the first 4.5 s, not dozens.
-        // A fixed wait, so a helper restarting with no backoff cannot pass early.
+        // Launches at 0 s, 1 s and 3 s (waits of 1, 2, 4 s): exactly three in the first 4.5 s. A
+        // fixed 1 s wait (no backoff) would launch at 0, 1, 2, 3 and 4 s; a fixed wait here, so it cannot pass early.
         let count = { ((try? String(contentsOfFile: launches, encoding: .utf8)) ?? "").split(separator: "\n").count }
         Thread.sleep(forTimeInterval: 4.5)
         let seen = count()
-        #expect((3...4).contains(seen), "launched \(seen) times in 4.5 s")
+        #expect(seen == 3, "launched \(seen) times in 4.5 s")
         // The third exit is counted a moment after the third launch.
         #expect(eventually(3) { helper.problem != nil })
         helper.stop(grace: 0.5)

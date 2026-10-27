@@ -5,7 +5,7 @@ import TestSupport
 
 // The status workflow: what the tray shows for each state, worst first, and that every
 // change is logged.
-@Suite("Tray status", .quietLog, .serialized) struct StatusTests {
+@Suite("Tray status", .tags(.light, .status), .timeLimit(.minutes(1)), .quietLog, .serialized) struct StatusTests {
     let healthy = AppStatus(capture: .recording, serverReachable: true, chatgptChats: 600, claudeChats: 33)
 
     @Test func healthyShowsTheChatCount() {

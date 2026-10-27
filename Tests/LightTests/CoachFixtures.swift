@@ -7,20 +7,23 @@ import TestSupport
 // the clock. The settings store and the trial logger are the real ones, pointed at a
 // throwaway UserDefaults suite and a throwaway SQLite file.
 
+@MainActor
 final class FakeSpeech: SpeechSource {
     var queued: [SpeechSpan] = []
-    func poll(now: Date, deliver: @escaping ([SpeechSpan]) -> Void) {
+    func poll(now: Date, deliver: @escaping @MainActor ([SpeechSpan]) -> Void) {
         let spans = queued
         queued = []
         deliver(spans)
     }
 }
 
+@MainActor
 final class FakeCalls: CallSource {
     var next: CallPoll = .answered(nil)
-    func poll(deliver: @escaping (CallPoll) -> Void) { deliver(next) }
+    func poll(deliver: @escaping @MainActor (CallPoll) -> Void) { deliver(next) }
 }
 
+@MainActor
 final class FakeWearable: Wearable {
     struct Sent: Equatable {
         let modality: Modality
@@ -34,13 +37,14 @@ final class FakeWearable: Wearable {
     var answers: [Modality: StimulusResult] = [:]
 
     func send(_ modality: Modality, intensity: Int, reason: String, context: StimulusContext,
-              completion: @escaping (StimulusResult) -> Void) {
+              completion: @escaping @MainActor (StimulusResult) -> Void) {
         sent.append(Sent(modality: modality, intensity: intensity, arm: context.arm))
         reasons.append(reason)
         completion(answers[modality] ?? StimulusResult(delivered: true, transport: .ble, detail: "BLE acknowledged by wristband"))
     }
 }
 
+@MainActor
 final class FakeToast: CoachToast {
     var visible = false
     var shows = 0
@@ -100,6 +104,7 @@ func trialRows(_ path: String, type: String = "monologue_streak") -> [[String: A
 }
 
 /// The coach wired to stand-ins, on a clock the test moves.
+@MainActor
 final class CoachRig {
     let speech = FakeSpeech()
     let calls = FakeCalls()

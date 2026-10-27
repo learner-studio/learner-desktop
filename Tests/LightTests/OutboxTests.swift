@@ -11,16 +11,15 @@ final class OutboxFixture {
     let logger: HabitEventLogger
     let stub: StubTransport
     let sender: OutboxSender
-    private final class KeySource {
-        let lock = NSLock()
-        var reads = 0
+    private final class KeySource: Sendable {
+        let reads = Locked(0)
         let key: String?
         init(_ key: String?) { self.key = key }
-        func read() -> String? { lock.withLock { reads += 1; return key } }
+        func read() -> String? { reads.withLock { $0 += 1 }; return key }
     }
     private let keys: KeySource
 
-    var keyReadCount: Int { keys.lock.withLock { keys.reads } }
+    var keyReadCount: Int { keys.reads.value }
 
     init(turns: Int, key: String? = "test-key", handler: @escaping (StubTransport.Seen) -> HTTPReply) {
         let keys = KeySource(key)
@@ -50,7 +49,7 @@ func accepted(_ s: StubTransport.Seen) -> HTTPReply {
     StubTransport.json(200, ["data": ["accepted": s.eventIds.count, "duplicates": 0]])
 }
 
-@Suite("Trial outbox", .quietLog, .timeLimit(.minutes(1))) struct OutboxTests {
+@Suite("Trial outbox", .tags(.light, .outbox), .quietLog, .timeLimit(.minutes(1))) struct OutboxTests {
     @Test func sendsEverythingAndMarksItSent() throws {
         let f = OutboxFixture(turns: 3, handler: accepted)
         #expect(describe(f.sender.runOnce()) == "ok: sent 3")
@@ -151,11 +150,11 @@ func accepted(_ s: StubTransport.Seen) -> HTTPReply {
     @Test func theHeartbeatIsBuiltOnlyWhenItIsSent() {
         let f = OutboxFixture(turns: 0) { _ in StubTransport.json(200, ["data": ["serverTime": "2026-10-27T12:00:00Z"]]) }
         #expect(describe(f.sender.sendHeartbeat()) == "idle") // no input provider yet
-        var built = 0
-        f.sender.setHeartbeatInput { built += 1; return ["clientId": "ben-mbp", "outboxDepth": 0] }
-        #expect(built == 0)
+        let built = Locked(0)
+        f.sender.setHeartbeatInput { built.withLock { $0 += 1 }; return ["clientId": "ben-mbp", "outboxDepth": 0] }
+        #expect(built.value == 0)
         #expect(describe(f.sender.sendHeartbeat()) == "ok: sent")
-        #expect(built == 1)
+        #expect(built.value == 1)
         #expect(f.stub.seen.first?.path == "/rpc/recordAppHeartbeat")
         #expect((f.stub.seen.first?.body?["data"] as? [String: Any])?["outboxDepth"] as? Int == 0)
         f.stub.handler = { _ in StubTransport.status(401) }
@@ -196,9 +195,9 @@ func accepted(_ s: StubTransport.Seen) -> HTTPReply {
         reopened.waitUntilIdle()
     }
 
-    @Test func anUnreadableDatabaseIsAFailureNotAnEmptyOutbox() {
+    @Test func anUnreadableDatabaseIsAFailureNotAnEmptyOutbox() throws {
         let dir = TempDir("baddb")
-        try! FileManager.default.createDirectory(atPath: dir.file("trials.sqlite"), withIntermediateDirectories: true) // a directory: will not open
+        try FileManager.default.createDirectory(atPath: dir.file("trials.sqlite"), withIntermediateDirectories: true) // a directory: will not open
         let logger = HabitEventLogger(path: dir.file("trials.sqlite"))
         let job = JobName("baddb"), hb = JobName("baddb-hb")
         var c = OutboxSender.Config()
@@ -214,12 +213,11 @@ func accepted(_ s: StubTransport.Seen) -> HTTPReply {
 
 /// Answers nothing, after waiting out each call's timeout; records the timeouts it was given.
 final class SlowTransport: HTTPTransport {
-    private let lock = NSLock()
-    private var given: [TimeInterval] = []
-    var timeouts: [TimeInterval] { lock.withLock { given } }
+    private let given = Locked<[TimeInterval]>([])
+    var timeouts: [TimeInterval] { given.value }
 
     func send(_ request: URLRequest, timeout: TimeInterval) -> HTTPReply {
-        lock.withLock { given.append(timeout) }
+        given.withLock { $0.append(timeout) }
         Thread.sleep(forTimeInterval: timeout)
         return HTTPReply(status: 0, body: nil, error: "no answer in \(Int(timeout)) s")
     }

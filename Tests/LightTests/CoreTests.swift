@@ -5,7 +5,7 @@ import TestSupport
 
 // The shared workflow primitives every workflow runs through (Core.swift).
 // Serialized within the suite; log capture is locked and each test has its own job folder.
-@Suite("Core primitives", .quietLog, .serialized) struct CoreTests {
+@Suite("Core primitives", .tags(.light, .core), .timeLimit(.minutes(1)), .quietLog, .serialized) struct CoreTests {
 
     @Test func backoffDoublesFromTheBaseUpToTheCapAndResets() {
         var b = Backoff(base: 10, max: 60, jitter: 0)
@@ -124,9 +124,9 @@ import TestSupport
 
     @Test func blockedWaitsForAKickAndIsAProblemAtOnce() {
         withJobDir { dir in
-            var blocked = true
+            let blocked = Locked(true)
             let job = Job("blk-\(UUID().uuidString.prefix(6))", period: 1, backoff: Backoff(base: 1, max: 1),
-                          problemGrace: 3600, stateDir: dir.path) { _ in blocked ? .blocked("login expired") : .ok("fine") }
+                          problemGrace: 3600, stateDir: dir.path) { _ in blocked.value ? .blocked("login expired") : .ok("fine") }
             job.kick("test")
             #expect(waitForRun(job, after: nil))
             #expect(job.problem == "login expired")
@@ -135,7 +135,7 @@ import TestSupport
             job.tick()   // due by period, but blocked: must not run
             usleep(200_000)
             #expect(job.snapshot.lastRun == first)
-            blocked = false
+            blocked.value = false
             job.kick("signed in")
             #expect(waitForRun(job, after: first))
             #expect(job.problem == nil && job.snapshot.summary == "fine")
@@ -144,22 +144,22 @@ import TestSupport
 
     @Test func aBlockedJobChecksAgainOnItsOwnAndAtTheNextLaunch() {
         withJobDir { dir in
-            var blocked = true
+            let blocked = Locked(true)
             let name = "recheck-\(UUID().uuidString.prefix(6))"
             let job = Job(name, period: 3600, backoff: Backoff(base: 1, max: 1), stateDir: dir.path,
-                          blockedRecheck: 0.3) { _ in blocked ? .blocked("login expired") : .ok("fine") }
+                          blockedRecheck: 0.3) { _ in blocked.value ? .blocked("login expired") : .ok("fine") }
             job.kick("test")
             #expect(waitForRun(job, after: nil))
             #expect(job.snapshot.blocked)
             let first = job.snapshot.lastRun
-            blocked = false
-            usleep(400_000)
+            blocked.value = false
+            #expect(waitFor(2) { job.snapshot.nextRun <= Date() })   // the 0.3 s recheck is due
             job.tick()
             #expect(waitForRun(job, after: first))
             #expect(!job.snapshot.blocked && job.problem == nil)
 
             // Saved blocked, then a new launch: it is checked at once, not left blocked.
-            blocked = true
+            blocked.value = true
             job.kick("block again")
             _ = eventually(2) { job.snapshot.blocked }
             let relaunched = Job(name, period: 3600, firstRun: 0, backoff: Backoff(base: 1, max: 1), stateDir: dir.path) { _ in .ok("fine") }
@@ -171,20 +171,18 @@ import TestSupport
     @Test func aKickWhileRunningQueuesExactlyOneRerun() {
         withJobDir { dir in
             let gate = DispatchSemaphore(value: 0)
-            var runs = 0
-            let lock = NSLock()
+            let runs = Locked(0)
             let job = Job("single-\(UUID().uuidString.prefix(6))", period: 3600, backoff: Backoff(base: 1, max: 1), stateDir: dir.path) { _ in
-                lock.withLock { runs += 1 }
-                if lock.withLock({ runs }) == 1 { gate.wait() }
+                if runs.withLock({ $0 += 1; return $0 }) == 1 { gate.wait() }
                 return .ok("run")
             }
             job.kick("first")
-            #expect(eventually(2) { lock.withLock { runs } == 1 })
+            #expect(eventually(2) { runs.value == 1 })
             job.kick("second"); job.kick("third"); job.kick("fourth")
             gate.signal()
-            #expect(eventually(3) { lock.withLock { runs } == 2 })
+            #expect(eventually(3) { runs.value == 2 })
             usleep(300_000)
-            #expect(lock.withLock { runs } == 2)
+            #expect(runs.value == 2)
         }
     }
 
@@ -199,16 +197,22 @@ import TestSupport
             #expect(b.snapshot.failures == 1)
             #expect(b.snapshot.summary == "down")
             #expect(b.snapshot.nextRun.timeIntervalSinceNow > 500)
+            // And the backoff carries on from there: the next failure is attempt 2 (2 × base).
+            let c = Job(name, period: 3600, backoff: Backoff(base: 600, max: 6000, jitter: 0), stateDir: dir.path) { _ in .failed("still down") }
+            let before = c.snapshot.lastRun
+            c.kick("test")
+            #expect(waitForRun(c, after: before))
+            #expect(c.snapshot.failures == 2)
+            #expect(c.snapshot.nextRun.timeIntervalSinceNow > 1100)
         }
     }
 }
 
 // Shutdown: ordered, each step logged, bounded overall, a hung step skipped not waited on.
-@Suite("Shutdown", .quietLog) struct ShutdownTests {
+@Suite("Shutdown", .tags(.light, .shutdown, .core), .timeLimit(.minutes(1)), .quietLog) struct ShutdownTests {
     @Test func stepsRunInOrderAndAHungStepIsLeftBehind() {
-        var order: [String] = []
-        let lock = NSLock()
-        let mark = { (n: String) in lock.withLock { order.append(n) } }
+        let order = Locked<[String]>([])
+        let mark: @Sendable (String) -> Void = { n in order.withLock { $0.append(n) } }
         let started = Date()
         var finished: [String] = []
         let lines = capturingLog {
@@ -219,7 +223,7 @@ import TestSupport
                 .init(name: "close", budget: 1) { _ in mark("close"); return nil },
             ], total: 3)
         }
-        #expect(lock.withLock { order } == ["turn", "flush", "close"])
+        #expect(order.value == ["turn", "flush", "close"])
         #expect(finished == ["turn", "flush", "close"])
         #expect(Date().timeIntervalSince(started) < 2.5)
         #expect(lines.contains { $0.contains("flush: done in") && $0.contains("(3 rows)") })

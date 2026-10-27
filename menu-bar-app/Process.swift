@@ -1,9 +1,5 @@
 import AppKit
 import Foundation
-import ServiceManagement
-import SQLite3
-import CoreBluetooth
-import CommonCrypto
 
 // MARK: - Bundled Helpers (SSH tunnel, transcript watcher)
 
@@ -12,7 +8,10 @@ import CommonCrypto
 /// as "bash" from an unknown developer; once switched off there, launchd silently stopped
 /// starting them at login (ten days down after the 2026-10-11 reboot). As children of the
 /// app they share its one Login Items entry and start, stop and restart with it.
-final class ManagedHelper {
+///
+/// Started, restarted and reaped on the main thread; stopped from any thread; read by the
+/// Status job off the main thread. Its state is behind one lock.
+final class ManagedHelper: Sendable {
     let name: String
     private let executable: String
     private let arguments: [String]
@@ -21,27 +20,30 @@ final class ManagedHelper {
     private let logPath: String
     private let pidPath: String
     private let log: Log
-    private var process: Process?
-    private var logHandle: FileHandle?
-    private var stopping = false
-    private(set) var startedAt = Date.distantPast
-    /// Restarts back off 1 s doubling to 60 s; a run that stayed up a minute resets it.
-    private var backoff = Backoff(base: 1, max: 60, jitter: 0)
+    private struct State {
+        var process: Process?
+        var logHandle: FileHandle?
+        var stopping = false
+        var startedAt = Date.distantPast
+        /// Restarts back off 1 s doubling to 60 s; a run that stayed up a minute resets it.
+        var backoff = Backoff(base: 1, max: 60, jitter: 0)
+        var lastExit: (code: Int32, rule: ExitRule)?
+    }
+    private let state = Locked(State())
     static let healthyAfter: TimeInterval = 60
 
     /// Extra environment, read at each launch (so a key is fetched fresh and never stored).
-    private let environment: () -> [String: String]
+    private let environment: @Sendable () -> [String: String]
     /// What particular exit codes mean for this helper: a wait before the next start, and
     /// whether to show it as a problem (a config error) or not (another copy is running).
-    struct ExitRule { let note: String; let wait: TimeInterval; let isProblem: Bool }
+    struct ExitRule: Sendable { let note: String; let wait: TimeInterval; let isProblem: Bool }
     private let exitRules: [Int32: ExitRule]
     /// The shortest wait before a restart (the uploader expects about 30 s, like launchd's
     /// ThrottleInterval).
     private let minRestart: TimeInterval
-    private var lastExit: (code: Int32, rule: ExitRule)?
 
     init(name: String, executable: String, arguments: [String], marker: String,
-         runtimeDir: String = Paths.data, environment: @escaping () -> [String: String] = { [:] },
+         runtimeDir: String = Paths.data, environment: @escaping @Sendable () -> [String: String] = { [:] },
          minRestart: TimeInterval = 1, exitRules: [Int32: ExitRule] = [:]) {
         self.environment = environment
         self.minRestart = minRestart
@@ -56,18 +58,20 @@ final class ManagedHelper {
         try? FileManager.default.createDirectory(atPath: runtimeDir + "/logs", withIntermediateDirectories: true)
     }
 
-    var isRunning: Bool { process?.isRunning ?? false }
+    var isRunning: Bool { state.value.process?.isRunning ?? false }
 
     /// For the tray: down, or restarting again and again.
     var problem: String? {
-        if stopping { return nil }
-        if let last = lastExit, !isRunning { return last.rule.isProblem ? "\(name): \(last.rule.note)" : nil }
-        if !isRunning { return "\(name) is not running" }
-        return backoff.failures >= 3 ? "\(name) keeps exiting (\(backoff.failures) restarts)" : nil
+        let s = state.value
+        if s.stopping { return nil }
+        let running = s.process?.isRunning ?? false
+        if let last = s.lastExit, !running { return last.rule.isProblem ? "\(name): \(last.rule.note)" : nil }
+        if !running { return "\(name) is not running" }
+        return s.backoff.failures >= 3 ? "\(name) keeps exiting (\(s.backoff.failures) restarts)" : nil
     }
 
     func start() {
-        stopping = false
+        state.withLock { $0.stopping = false }
         reapOrphan()
         launch()
     }
@@ -82,7 +86,7 @@ final class ManagedHelper {
     }
 
     private func launch() {
-        guard !stopping, !isRunning else { return }
+        guard !state.value.stopping, !isRunning else { return }
         let out = LogFile.open(logPath)
         let p = Process()
         p.executableURL = URL(fileURLWithPath: executable)
@@ -101,41 +105,46 @@ final class ManagedHelper {
         } catch {
             // A missing binary, or one being replaced: keep trying, backing off.
             try? out?.close()
-            let wait = backoff.failed()
+            let wait = state.withLock { $0.backoff.failed() }
             log.error("could not start: \(error.localizedDescription); retrying in \(Job.describe(wait))")
             DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in self?.launch() }
             return
         }
-        process = p
-        logHandle = out
-        startedAt = Date()
-        lastExit = nil
+        state.withLock {
+            $0.process = p
+            $0.logHandle = out
+            $0.startedAt = Date()
+            $0.lastExit = nil
+        }
         do { try String(p.processIdentifier).write(toFile: pidPath, atomically: true, encoding: .utf8) }
         catch { log.warn("cannot write \(pidPath): \(error.localizedDescription); a crash would leave it orphaned") }
         log.info("started (pid \(p.processIdentifier))")
     }
 
     private func exited(_ proc: Process) {
-        guard proc === process else { return }
-        process = nil
-        try? logHandle?.close()
-        logHandle = nil
+        let (current, handle, stopping, startedAt) = state.withLock { s -> (Bool, FileHandle?, Bool, Date) in
+            guard proc === s.process else { return (false, nil, s.stopping, s.startedAt) }
+            defer { s.process = nil; s.logHandle = nil }
+            return (true, s.logHandle, s.stopping, s.startedAt)
+        }
+        guard current else { return }
+        try? handle?.close()
         try? FileManager.default.removeItem(atPath: pidPath)
         if stopping { return }
-        // One that stayed up a minute was healthy, so bring it back promptly; one that dies
-        // straight away (no network, port already held) backs off instead of spinning.
-        if Date().timeIntervalSince(startedAt) > ManagedHelper.healthyAfter { backoff.succeeded() }
         let code = proc.terminationStatus
         let ran = Job.describe(Date().timeIntervalSince(startedAt))
-        let wait: TimeInterval
-        if let rule = exitRules[code] {
-            lastExit = (code, rule)
-            wait = rule.wait
+        let rule = exitRules[code]
+        let wait: TimeInterval = state.withLock { s in
+            // One that stayed up a minute was healthy, so bring it back promptly; one that dies
+            // straight away (no network, port already held) backs off instead of spinning.
+            if Date().timeIntervalSince(startedAt) > ManagedHelper.healthyAfter { s.backoff.succeeded() }
+            s.lastExit = rule.map { (code, $0) }
+            return rule?.wait ?? max(minRestart, s.backoff.failed())
+        }
+        if let rule = rule {
             if rule.isProblem { log.warn("exited \(code) (\(rule.note)) after \(ran); trying again in \(Job.describe(wait))") }
             else { log.info("exited \(code) (\(rule.note)) after \(ran); checking again in \(Job.describe(wait))") }
         } else {
-            lastExit = nil
-            wait = max(minRestart, backoff.failed())
             log.warn("exited (status \(code)) after \(ran); restarting in \(Job.describe(wait))")
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in self?.launch() }
@@ -144,15 +153,17 @@ final class ManagedHelper {
     /// SIGTERM, then SIGKILL for it and its children (autossh's ssh) after `grace`. Blocks
     /// the caller, so call it off the main thread except at quit.
     func stop(grace: TimeInterval = 5) {
-        stopping = true
-        guard let p = process else { return }
+        let p: Process? = state.withLock { $0.stopping = true; return $0.process }
+        guard let p = p else { return }
         if p.isRunning {
             ChildProcess.stop(p, grace: grace)
             log.info("stopped")
         }
-        process = nil
-        try? logHandle?.close()
-        logHandle = nil
+        let handle: FileHandle? = state.withLock { s in
+            defer { s.process = nil; s.logHandle = nil }
+            return s.logHandle
+        }
+        try? handle?.close()
         try? FileManager.default.removeItem(atPath: pidPath)
     }
 

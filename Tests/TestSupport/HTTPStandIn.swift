@@ -5,10 +5,11 @@ import Network
 /// standing in for learner-server, chatgpt.com or screenpipe. `handler` answers each
 /// request (a Response can be delayed); `mode` can instead drop every connection (a server
 /// restarting) or hold every request forever (a stuck one).
+// @unchecked: mutable state is behind `lock`; the listener calls back on its own queue.
 public final class HTTPStandIn: @unchecked Sendable {
     public enum Mode { case answer, refuse, hang }
 
-    public struct Request {
+    public struct Request: Sendable {
         public let method: String
         public let path: String
         public let headers: [String: String]
@@ -19,7 +20,7 @@ public final class HTTPStandIn: @unchecked Sendable {
         public var data: [String: Any]? { json?["data"] as? [String: Any] }
     }
 
-    public struct Response {
+    public struct Response: Sendable {
         public var status: Int
         public var body: Data
         /// Holds the answer back (a slow server).

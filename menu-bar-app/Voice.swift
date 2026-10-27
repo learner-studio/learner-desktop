@@ -11,8 +11,8 @@ import Foundation
 /// Sections are matched to API messages by timestamp: ai-vault writes each message's
 /// `create_time` as an ISO instant, so the two agree to the millisecond.
 /// (Ported from the TypeScript watcher, src/voice-transcripts.ts.)
-final class VoiceTranscripts {
-    struct Config {
+final class VoiceTranscripts: Sendable {
+    struct Config: Sendable {
         var root = Paths.vault
         var baseURL = "https://chatgpt.com"
         var aiVaultConfig = Paths.aiVaultConfig

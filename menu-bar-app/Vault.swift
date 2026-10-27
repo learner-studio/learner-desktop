@@ -1,6 +1,5 @@
 import AppKit
 import Foundation
-import ServiceManagement
 import SQLite3
 import CoreBluetooth
 import CommonCrypto
@@ -19,13 +18,13 @@ import CommonCrypto
 ///   stuck, crashed browser,  failed, retried after 15 min doubling to 2 h
 ///   "✗ Failed:", "Errors: N" (--only-new resumes where a run stopped, so nothing is lost)
 ///   ai-vault not installed   failed, said so
-final class VaultExport {
-    struct Config {
+final class VaultExport: Sendable {
+    struct Config: Sendable {
         var jobName = "Export"
         /// How often logins marked expired are tried again on their own.
         var blockedRecheck: TimeInterval = 6 * 3600
         var providers = ["claude", "chatgpt"]
-        var cliPath: () -> String? = VaultExport.installedCLI
+        var cliPath: @Sendable () -> String? = VaultExport.installedCLI
         /// nil: ChildProcess.toolEnvironment (ai-vault's node under nvm on PATH).
         var env: [String: String]?
         var logPath = Paths.logs + "/vault-export.log"
@@ -48,7 +47,7 @@ final class VaultExport {
         /// nil: no voice step.
         var voice: VoiceTranscripts? = VoiceTranscripts()
         /// After every run, finished or not: the archive sends what arrived.
-        var afterRun: (() -> Void)? = { Archive.shared.job.kick("after export") }
+        var afterRun: (@Sendable () -> Void)? = { Archive.shared.job.kick("after export") }
     }
 
     /// One provider's backup, read from ai-vault's output.
@@ -69,22 +68,29 @@ final class VaultExport {
     static let shared = VaultExport()
 
     let config: Config
-    private(set) var job: Job!
+    // nonisolated(unsafe): assigned once at the end of init (its body needs `self`); only read after.
+    nonisolated(unsafe) private(set) var job: Job!
     private let log = Log("Export")
-    private let lock = NSLock()
-    private var current: Process?
-    private var quitting = false
-    /// provider -> modification time of ai-vault's config when the login was found expired.
-    private var expired: [String: Double] = [:]
-    private var lastRunAt: Date?
-    private var summary = "not run yet"
+    private struct State {
+        var current: Process?
+        var quitting = false
+        /// provider -> modification time of ai-vault's config when the login was found expired.
+        var expired: [String: Double] = [:]
+        var lastRunAt: Date?
+        var summary = "not run yet"
+        var onFinished: (@MainActor () -> Void)?
+    }
+    private let state: Locked<State>
 
     /// Main thread, after each run, so the tray refreshes without waiting for its poll.
-    var onFinished: (() -> Void)?
+    var onFinished: (@MainActor () -> Void)? {
+        get { state.value.onFinished }
+        set { state.withLock { $0.onFinished = newValue } }
+    }
 
     init(config: Config = Config()) {
         self.config = config
-        expired = VaultExport.loadLogins(config.loginsPath, log: log)
+        state = Locked(State(expired: VaultExport.loadLogins(config.loginsPath, log: log)))
         job = Job(config.jobName, period: config.period, firstRun: config.firstRun, backoff: config.failureBackoff,
                   problemGrace: config.problemGrace, blockedRecheck: config.blockedRecheck) { [weak self] _ in self?.runOnce() ?? .idle }
     }
@@ -92,27 +98,20 @@ final class VaultExport {
     // MARK: Status for the menu
 
     /// Providers whose ai-vault login expired: the menu offers Sign In Again for each.
-    var expiredLogins: Set<String> { lock.withLock { Set(expired.keys) } }
-    var lastRun: Date? { lock.withLock { lastRunAt } }
+    var expiredLogins: Set<String> { Set(state.value.expired.keys) }
+    var lastRun: Date? { state.value.lastRunAt }
     /// e.g. "claude: ok (3 new), chatgpt: login expired, voice: 2 updated (5 messages)".
-    var lastSummary: String { lock.withLock { summary } }
-    var isRunning: Bool { lock.withLock { current != nil } }
+    var lastSummary: String { state.value.summary }
+    var isRunning: Bool { state.value.current != nil }
 
     // MARK: Triggers
-
-    /// Older callers tick from the status poll; the Scheduler ticks the job too. Also ticks
-    /// the Archive job, which the export feeds.
-    func tick() {
-        job.tick()
-        Archive.shared.job.tick()
-    }
 
     /// "Pull Latest Chats".
     func runNow() { job.kick("pull latest chats") }
 
     /// A fresh sign-in clears its error at once, rather than when the next export ends.
     func signedIn(_ provider: String) {
-        lock.withLock { _ = expired.removeValue(forKey: provider) }
+        state.withLock { _ = $0.expired.removeValue(forKey: provider) }
         saveLogins()
         notify()
         job.kick("signed in to \(provider)")
@@ -120,9 +119,9 @@ final class VaultExport {
 
     /// On quit: an export left running would outlive the app and race the next launch's.
     func stopForQuit() {
-        let p: Process? = lock.withLock {
-            quitting = true
-            return current
+        let p: Process? = state.withLock {
+            $0.quitting = true
+            return $0.current
         }
         // Shutdown has seconds, not a grace period.
         if let p = p, p.isRunning {
@@ -135,7 +134,7 @@ final class VaultExport {
 
     /// The job body.
     func runOnce() -> Job.Outcome {
-        lock.withLock { quitting = false }
+        state.withLock { $0.quitting = false }
         for marker in config.orphanMarkers { ChildProcess.killOrphans(matching: marker, log: log) }
         defer { config.afterRun?() }
         guard let cli = config.cliPath() else {
@@ -152,18 +151,18 @@ final class VaultExport {
         let recheck = job.snapshot.blocked
         if recheck { log.info("re-checking logins marked expired: \(expiredLogins.sorted().joined(separator: ", "))") }
         for provider in config.providers {
-            if lock.withLock({ quitting }) { break }
-            if !recheck, let stamp = lock.withLock({ expired[provider] }), stamp == configStamp {
+            if state.value.quitting { break }
+            if !recheck, let stamp = state.value.expired[provider], stamp == configStamp {
                 notes.append("\(provider): login expired")
                 continue
             }
             ran += 1
             switch backup(cli, provider) {
             case let .ok(archived):
-                lock.withLock { _ = expired.removeValue(forKey: provider) }
+                state.withLock { _ = $0.expired.removeValue(forKey: provider) }
                 notes.append("\(provider): ok" + (archived.map { $0 > 0 ? " (\($0) new)" : "" } ?? ""))
             case .loginExpired:
-                lock.withLock { expired[provider] = configStamp }
+                state.withLock { $0.expired[provider] = configStamp }
                 notes.append("\(provider): login expired")
             case .rateLimited:
                 rateLimited = true
@@ -176,12 +175,12 @@ final class VaultExport {
         saveLogins()
 
         // ai-vault drops ChatGPT voice transcripts; write them back in.
-        if let voice = config.voice, !lock.withLock({ quitting || expired["chatgpt"] != nil }) {
-            let v = voice.run(cancelled: { [weak self] in self?.lock.withLock { self?.quitting ?? true } ?? true })
+        if let voice = config.voice, !state.withLock({ $0.quitting || $0.expired["chatgpt"] != nil }) {
+            let v = voice.run(cancelled: { [state] in state.value.quitting })
             switch v.stopped {
             case .rateLimited?: rateLimited = true
             case .loginExpired?:
-                lock.withLock { expired["chatgpt"] = configStamp }
+                state.withLock { $0.expired["chatgpt"] = configStamp }
                 saveLogins()
             case .unreachable?: failed.append("voice")
             case nil: break
@@ -191,11 +190,12 @@ final class VaultExport {
 
         // Interrupted by quit: not a failure. Leave the saved schedule alone, so the next
         // launch resumes within minutes instead of waiting out a backoff.
-        if lock.withLock({ quitting }) {
+        if state.value.quitting {
             log.info("export interrupted by quit; it resumes at the next launch")
             return finish(notes + ["stopped for quit"], .idle)
         }
-        let allExpired = lock.withLock { config.providers.allSatisfy { expired[$0] != nil } }
+        let expired = state.value.expired
+        let allExpired = config.providers.allSatisfy { expired[$0] != nil }
         if allExpired {
             return finish(notes, .blocked("ai-vault login expired (\(config.providers.joined(separator: ", "))): Sign In Again"))
         }
@@ -209,9 +209,9 @@ final class VaultExport {
 
     private func finish(_ notes: [String], _ outcome: Job.Outcome) -> Job.Outcome {
         let text = notes.joined(separator: ", ")
-        lock.withLock {
-            summary = text
-            lastRunAt = Date()
+        state.withLock {
+            $0.summary = text
+            $0.lastRunAt = Date()
         }
         notify()
         return outcome
@@ -230,8 +230,8 @@ final class VaultExport {
         let r = ChildProcess.run(cli, args, timeout: config.maxRunTime, stallTimeout: config.stallTimeout,
                                  env: config.env ?? ChildProcess.toolEnvironment, stderr: true, logFile: config.logPath,
                                  grace: config.killGrace,
-                                 onStart: { [weak self] p in self?.lock.withLock { self?.current = p } })
-        lock.withLock { current = nil }
+                                 onStart: { [state] p in state.withLock { $0.current = p } })
+        state.withLock { $0.current = nil }
         let result = VaultExport.classify(status: r.status, stopped: r.stopped, output: r.output)
         switch result {
         case .ok: break
@@ -286,7 +286,7 @@ final class VaultExport {
     }
 
     private func saveLogins() {
-        let snapshot = lock.withLock { expired }
+        let snapshot = state.value.expired
         do {
             let data = try JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys])
             try data.write(to: URL(fileURLWithPath: config.loginsPath), options: .atomic)
@@ -304,10 +304,11 @@ final class VaultExport {
 /// `ai-vault setup <provider> --cookies-file` (a 0600 file, deleted straight after).
 /// If the browser already holds a new session, nothing opens. Otherwise the sign-in page
 /// opens there and the cookie store is watched until a new session appears.
+@MainActor
 final class VaultSignIn {
     struct Site { let url: String; let domain: String; let session: [String] }
 
-    static let sites: [String: Site] = [
+    nonisolated static let sites: [String: Site] = [
         "chatgpt": Site(url: "https://chatgpt.com/auth/login", domain: "chatgpt.com",
                         session: ["__Secure-next-auth.session-token", "__Secure-next-auth.session-token.0"]),
         "claude": Site(url: "https://claude.ai/login", domain: "claude.ai", session: ["sessionKey"]),
@@ -315,7 +316,7 @@ final class VaultSignIn {
     static let pollInterval: TimeInterval = 3
     static let waitLimit: TimeInterval = 10 * 60
     private static var active: [String: VaultSignIn] = [:]
-    private static let log = Log("SignIn")
+    nonisolated private static let log = Log("SignIn")
 
     static func isWaiting(_ provider: String) -> Bool { active[provider]?.openedBrowser == true }
 
@@ -389,7 +390,9 @@ final class VaultSignIn {
         openedBrowser = true
         browser.open(site.url)
         VaultSignIn.log.info("\(provider): opened the sign-in page in \(browser.name)")
-        timer = Timer.scheduledTimer(withTimeInterval: VaultSignIn.pollInterval, repeats: true) { [weak self] _ in self?.check() }
+        timer = Timer.scheduledTimer(withTimeInterval: VaultSignIn.pollInterval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.check() }
+        }
     }
 
     private func stop() {
@@ -399,7 +402,7 @@ final class VaultSignIn {
     }
 
     /// `ai-vault setup <provider> --cookies-file <0600 file>`; the file is removed afterwards.
-    static func runSetup(_ provider: String, cookies: [String: String]) -> (ok: Bool, detail: String) {
+    nonisolated static func runSetup(_ provider: String, cookies: [String: String]) -> (ok: Bool, detail: String) {
         guard sites[provider] != nil, let cli = VaultExport.cliPath() else { return (false, "ai-vault CLI not found") }
         let path = Paths.data + "/ai-vault-cookies-\(provider).json"
         guard let data = try? JSONSerialization.data(withJSONObject: cookies),
@@ -460,7 +463,7 @@ struct ChromiumBrowser {
 /// plaintext with a 32-byte SHA-256 of the host. Of all profiles, the one whose cookies
 /// were used last wins.
 enum BrowserCookies {
-    private static var keys: [String: [UInt8]] = [:]
+    private static let keys = Locked<[String: [UInt8]]>([:])
 
     static func read(_ browser: ChromiumBrowser, domain: String) -> [String: String] {
         let root = NSHomeDirectory() + "/Library/Application Support/" + browser.dataDir
@@ -530,7 +533,7 @@ enum BrowserCookies {
 
     /// Asked through /usr/bin/security so an Always Allow survives rebuilds of this app.
     private static func safeStorageKey(_ browser: ChromiumBrowser) -> [UInt8]? {
-        if let key = keys[browser.id] { return key }
+        if let key = keys.value[browser.id] { return key }
         // Long enough to answer the Keychain prompt, but never forever.
         let r = ChildProcess.run("/usr/bin/security", ["find-generic-password", "-w", "-s", browser.keychainService, "-a", browser.keychainAccount], timeout: 120)
         let password = r.output.trimmingCharacters(in: .newlines)
@@ -545,7 +548,7 @@ enum BrowserCookies {
             Log("SignIn").error("could not derive the \(browser.name) cookie key")
             return nil
         }
-        keys[browser.id] = derived
+        keys.withLock { $0[browser.id] = derived }
         return derived
     }
 }

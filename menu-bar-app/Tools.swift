@@ -106,16 +106,15 @@ enum Tools {
             req.setValue("application/json", forHTTPHeaderField: "content-type")
         }
         for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
-        let lock = NSLock()
-        var result: (Int, Data?) = (0, nil)
+        let result = Locked<(Int, Data?)>((0, nil))
         let done = DispatchSemaphore(value: 0)
         let task = URLSession.shared.dataTask(with: req) { data, response, _ in
-            lock.withLock { result = ((response as? HTTPURLResponse)?.statusCode ?? 0, data) }
+            result.value = ((response as? HTTPURLResponse)?.statusCode ?? 0, data)
             done.signal()
         }
         task.resume()
         if done.wait(timeout: .now() + timeout + 2) == .timedOut { task.cancel() }
-        return lock.withLock { result }
+        return result.value
     }
 }
 

@@ -38,6 +38,7 @@ struct Jail: Hashable {
     var healthBody = ""
 
     private static let lock = NSLock()
+    // nonisolated(unsafe): only touched under `lock`.
     nonisolated(unsafe) private static var built: [Jail: (bin: String, home: String)] = [:]
     static let root = NSTemporaryDirectory() + "capture-jail-\(getpid())"
 
@@ -96,7 +97,7 @@ private func indexes(_ calls: [String], _ needle: String) -> [Int] {
     calls.indices.filter { calls[$0].contains(needle) }
 }
 
-@Suite("Capture scripts (stubbed)", .quietLog) struct ScriptsCaptureTests {
+@Suite("Capture scripts (stubbed)", .tags(.medium, .scripts), .timeLimit(.minutes(1)), .quietLog) struct ScriptsCaptureTests {
     static let plists = ["com.benpollack.learner-desktop.plist", "screenpipe.plist"]
 
     func startJail(launchctlLoaded: Bool = false, screenpipeRunning: Bool = false, healthBody: String = "",

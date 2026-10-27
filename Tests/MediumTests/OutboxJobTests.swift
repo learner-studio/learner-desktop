@@ -38,7 +38,7 @@ private func eventIds(_ req: HTTPStandIn.Request) -> [String] {
     (req.data?["events"] as? [[String: Any]] ?? []).compactMap { $0["eventId"] as? String }
 }
 
-@Suite("Outbox job (real TCP stand-in)", .quietLog, .serialized, .timeLimit(.minutes(1))) struct OutboxJobTests {
+@Suite("Outbox job (real TCP stand-in)", .tags(.medium, .outbox), .quietLog, .serialized, .timeLimit(.minutes(1))) struct OutboxJobTests {
     @Test func theJobSendsTheQueueOverHTTP() throws {
         let f = try OutboxFixture(turns: 3, handler: accepted)
         // Wait for the job's recorded outcome: rows are marked sent a moment before the
@@ -119,7 +119,7 @@ private func eventIds(_ req: HTTPStandIn.Request) -> [String] {
     }
 }
 
-@Suite("Job state survives a restart", .quietLog, .timeLimit(.minutes(1))) struct JobPersistenceTests {
+@Suite("Job state survives a restart", .tags(.medium, .core, .outbox), .quietLog, .timeLimit(.minutes(1))) struct JobPersistenceTests {
     @Test func aFailureKeepsItsBackoffAndABlockIsReCheckedAtTheNextLaunch() {
         let name = JobName("persist")
         let first = Job(name.name, period: 3600, backoff: Backoff(base: 600, max: 3600)) { _ in .failed("boom") }
@@ -135,12 +135,12 @@ private func eventIds(_ req: HTTPStandIn.Request) -> [String] {
         run(b)
         // The block survives the restart (still shown), and is checked once at launch: a key
         // fixed while the app was down unblocks it with no click.
-        var ran = false
-        let b2 = Job(blockedName.name, period: 1, backoff: Backoff(base: 1, max: 1)) { _ in ran = true; return .ok("x") }
+        let ran = Locked(false)
+        let b2 = Job(blockedName.name, period: 1, backoff: Backoff(base: 1, max: 1)) { _ in ran.value = true; return .ok("x") }
         #expect(b2.snapshot.blocked)
         #expect(b2.problem == "needs the user")
         b2.tick()
         #expect(waitFor(3) { !b2.snapshot.blocked })
-        #expect(ran && b2.problem == nil)
+        #expect(ran.value && b2.problem == nil)
     }
 }

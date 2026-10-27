@@ -10,7 +10,7 @@ struct HTTPReply {
 }
 
 /// How the app talks HTTP. Tests swap in a stand-in.
-protocol HTTPTransport {
+protocol HTTPTransport: Sendable {
     /// Never waits longer than `timeout`.
     func send(_ request: URLRequest, timeout: TimeInterval) -> HTTPReply
 }
@@ -35,8 +35,7 @@ struct URLSessionTransport: HTTPTransport {
     func send(_ request: URLRequest, timeout: TimeInterval) -> HTTPReply {
         var req = request
         req.timeoutInterval = max(1, timeout)
-        let lock = NSLock()
-        var reply = HTTPReply(status: 0, body: nil, error: "no answer in \(Int(timeout)) s")
+        let reply = Locked(HTTPReply(status: 0, body: nil, error: "no answer in \(Int(timeout)) s"))
         let done = DispatchSemaphore(value: 0)
         let task = session.dataTask(with: req) { data, response, error in
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
@@ -44,7 +43,7 @@ struct URLSessionTransport: HTTPTransport {
                 let ns = e as NSError
                 return "\(ns.localizedDescription) (\(ns.domain) \(ns.code))"
             }
-            lock.withLock { reply = HTTPReply(status: status, body: data, error: status == 0 ? (why ?? "no response") : nil) }
+            reply.value = HTTPReply(status: status, body: data, error: status == 0 ? (why ?? "no response") : nil)
             done.signal()
         }
         task.resume()
@@ -52,7 +51,7 @@ struct URLSessionTransport: HTTPTransport {
             task.cancel()
             return HTTPReply(status: 0, body: nil, error: "no answer in \(String(format: "%.0f", timeout)) s")
         }
-        return lock.withLock { reply }
+        return reply.value
     }
 }
 
@@ -61,7 +60,7 @@ struct URLSessionTransport: HTTPTransport {
 /// The one learner-server client the outbox, the heartbeat and the chat archive share:
 /// POST `{"data": input}` to `<baseURL>/rpc/<name>` with the device key in `x-api-key`
 /// (spec: learner-server docs/learner-desktop-api.md; wire shapes in contract/).
-final class LearnerRPC {
+final class LearnerRPC: Sendable {
     /// What a reply means for the caller, as the TypeScript client classified it.
     enum Kind: Equatable {
         case ok
@@ -103,14 +102,13 @@ final class LearnerRPC {
     let baseURL: String
     let clientId: String
     private let transport: HTTPTransport
-    private let keySource: (TimeInterval) -> String?
+    private let keySource: @Sendable (TimeInterval) -> String?
     private let log = Log("RPC")
-    private let lock = NSLock()
-    private var cachedKey: String?
+    private let cachedKey = Locked<String?>(nil)
 
     init(baseURL: String = ProcessInfo.processInfo.environment["LEARNER_API_URL"] ?? LearnerRPC.defaultBaseURL,
          clientId: String = "ben-mbp", transport: HTTPTransport = URLSessionTransport(),
-         key: ((TimeInterval) -> String?)? = nil) {
+         key: (@Sendable (TimeInterval) -> String?)? = nil) {
         self.baseURL = baseURL.replacingOccurrences(of: "/+$", with: "", options: .regularExpression)
         self.clientId = clientId
         self.transport = transport
@@ -144,14 +142,14 @@ final class LearnerRPC {
 
     /// The cached key, read once (and again after `forgetKey`).
     func key(timeout: TimeInterval = 10) -> String? {
-        if let k = lock.withLock({ cachedKey }) { return k }
+        if let k = cachedKey.value { return k }
         let k = keySource(timeout)
-        lock.withLock { cachedKey = k }
+        cachedKey.value = k
         return k
     }
 
     /// After a 401/403, or when the user asks to retry: read the Keychain again.
-    func forgetKey() { lock.withLock { cachedKey = nil } }
+    func forgetKey() { cachedKey.value = nil }
 
     /// One call, bounded by `timeout` (the key lookup included). Never throws.
     func call(_ name: String, _ input: [String: Any], timeout: TimeInterval = 20) -> Reply {
@@ -203,7 +201,7 @@ enum LearnerAPI {
 enum ChatAndOutboxJobs {
     /// Export (hourly), Archive (launch, after each export, hourly), Outbox (8 s), Heartbeat
     /// (5 min, `heartbeat` builds its input only when one is due), UpdateCheck (1 min).
-    static func install(heartbeat: @escaping () -> [String: Any]) {
+    static func install(heartbeat: @escaping @Sendable () -> [String: Any]) {
         _ = VaultExport.shared
         _ = Archive.shared
         OutboxSender.shared.setHeartbeatInput(heartbeat)

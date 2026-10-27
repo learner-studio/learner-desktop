@@ -4,7 +4,7 @@ import Testing
 import TestSupport
 
 // The status workflow against stand-ins for screenpipe and learner-server over real HTTP.
-@Suite("Status probe", .quietLog, .serialized) struct StatusProbeTests {
+@Suite("Status probe", .tags(.medium, .status), .timeLimit(.minutes(1)), .quietLog, .serialized) struct StatusProbeTests {
 
     @Test func recordingDegradedAndStoppedScreenpipe() throws {
         var health: [String: Any] = ["status": "healthy", "frame_status": "ok", "audio_status": "ok", "version": "9.9.9"]

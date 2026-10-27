@@ -43,7 +43,8 @@ enum Fixture {
         "## User", "*\(t1)*", "", "**Attachments:**", "- [audio: file_aaa](https://chatgpt.com/backend-api/files/download/file_aaa)", "", "---", "",
         "## Assistant", "*\(t2)*", "", "**Attachments:**", "- [audio: file_bbb](https://chatgpt.com/backend-api/files/download/file_bbb)", "", "---", "",
     ].joined(separator: "\n")
-    static let voiceApi: [String: Any] = ["mapping": [
+    // nonisolated(unsafe): a constant fixture, never mutated.
+    nonisolated(unsafe) static let voiceApi: [String: Any] = ["mapping": [
         "a": ["message": ["create_time": 1_740_819_600.125, "content": ["parts": [["content_type": "audio_transcription", "text": "What should I do first today?"]]]]],
         "b": ["message": ["create_time": 1_740_819_604.5, "content": ["parts": [["content_type": "audio_transcription", "text": "Start with the walk."]]]]],
     ]]

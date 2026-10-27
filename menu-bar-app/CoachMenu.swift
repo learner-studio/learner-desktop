@@ -87,7 +87,8 @@ final class CueSubmenuView: NSView {
 }
 
 // MARK: - Cute Dog Stick Figure Bluetooth Connection Icon
-class PavlokDogIcon {
+@MainActor
+enum PavlokDogIcon {
     private static let connectedImage: NSImage = {
         let img = buildImage(connected: true, isScanning: false)
         img.isTemplate = false

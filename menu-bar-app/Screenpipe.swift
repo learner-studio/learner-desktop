@@ -1,27 +1,22 @@
 import AppKit
 import Foundation
-import ServiceManagement
-import SQLite3
-import CoreBluetooth
-import CommonCrypto
 
 /// Version of the screenpipe capture engine currently feeding transcriptions.
 ///
 /// Stamped onto every turn so a change of measuring instrument shows up in the analysis
 /// instead of silently shifting turn counts and durations mid-experiment.
 enum CaptureEnvironment {
-    private static let lock = NSLock()
-    private static var storedVersion: String?
-    private static var storedAppVersion: String?
+    private static let storedVersion = Locked<String?>(nil)
+    private static let storedAppVersion = Locked<String?>(nil)
 
     static var screenpipeVersion: String? {
-        get { lock.lock(); defer { lock.unlock() }; return storedVersion }
-        set { lock.lock(); storedVersion = newValue; lock.unlock() }
+        get { storedVersion.value }
+        set { storedVersion.value = newValue }
     }
 
     static var screenpipeAppVersion: String? {
-        get { lock.lock(); defer { lock.unlock() }; return storedAppVersion }
-        set { lock.lock(); storedAppVersion = newValue; lock.unlock() }
+        get { storedAppVersion.value }
+        set { storedAppVersion.value = newValue }
     }
 
     /// The experiment phase a turn belongs to: each screenpipe version is its own phase,
@@ -42,8 +37,8 @@ enum CaptureEnvironment {
 /// docs/screenpipe-update-runbook.md under the permissions in
 /// config/screenpipe-update-agent.json, bounded by ChildProcess (30 min, then SIGTERM and
 /// SIGKILL), and logs the run: a transcript, a report and a line in index.log.
-final class ScreenpipeUpdateCheck {
-    struct Config {
+final class ScreenpipeUpdateCheck: Sendable {
+    struct Config: Sendable {
         var jobName = "UpdateCheck"
         /// How often the installed version is read.
         var period: TimeInterval = 60
@@ -63,7 +58,7 @@ final class ScreenpipeUpdateCheck {
         var logDir = Paths.logs + "/screenpipe-update-checks"
         /// Transcripts and reports kept (oldest removed first).
         var keepRuns = 30
-        var installedVersion: () -> String? = ScreenpipeUpdateCheck.installedAppVersion
+        var installedVersion: @Sendable () -> String? = ScreenpipeUpdateCheck.installedAppVersion
         /// In every run's command line: finds a run orphaned by a crash of this app.
         var orphanMarker = "docs/screenpipe-update-runbook.md"
     }
@@ -80,13 +75,16 @@ final class ScreenpipeUpdateCheck {
     static let shared = ScreenpipeUpdateCheck()
 
     let config: Config
-    private(set) var job: Job!
+    // nonisolated(unsafe): assigned once at the end of init (its body needs `self`); only read after.
+    nonisolated(unsafe) private(set) var job: Job!
     private let log = Log("UpdateCheck")
-    private let lock = NSLock()
-    private var pending: (version: String, since: Date)?
-    private var manualReason: String?
-    private var current: Process?
-    private var orphansChecked = false
+    private struct State {
+        var pending: (version: String, since: Date)?
+        var manualReason: String?
+        var current: Process?
+        var orphansChecked = false
+    }
+    private let state = Locked(State())
 
     init(config: Config = Config()) {
         self.config = config
@@ -95,7 +93,7 @@ final class ScreenpipeUpdateCheck {
     }
 
     var logDir: String { config.logDir }
-    var isRunning: Bool { lock.withLock { current != nil || manualReason != nil } }
+    var isRunning: Bool { state.withLock { $0.current != nil || $0.manualReason != nil } }
     private var indexPath: String { config.logDir + "/index.log" }
 
     static func installedAppVersion() -> String? {
@@ -114,19 +112,15 @@ final class ScreenpipeUpdateCheck {
         return nil
     }
 
-    /// The tray's poll used to drive this; the job reads the version itself now. A tick
-    /// that is not due does nothing.
-    func observe(appVersion: String) { job.tick() }
-
     /// "Run screenpipe Update Check Now".
     func start(reason: String) {
-        lock.withLock { manualReason = reason }
+        state.withLock { $0.manualReason = reason }
         job.kick("requested from the menu")
     }
 
     /// On quit: a session left running would outlive the app.
     func stopForQuit() {
-        if let p = lock.withLock({ current }), p.isRunning {
+        if let p = state.value.current, p.isRunning {
             log.info("stopping the running check for quit")
             ChildProcess.stop(p, grace: 0)
         }
@@ -141,31 +135,31 @@ final class ScreenpipeUpdateCheck {
             return .baseline(version)
         }
         guard version != handled else {
-            lock.withLock { pending = nil }
+            state.withLock { $0.pending = nil }
             return .nothing
         }
-        let since: Date = lock.withLock {
-            if pending?.version != version {
-                pending = (version, now)
+        let since: Date = state.withLock { s in
+            if s.pending?.version != version {
+                s.pending = (version, now)
                 log.info("screenpipe \(handled) -> \(version); checking once it has settled")
             }
-            return pending?.since ?? now
+            return s.pending?.since ?? now
         }
         guard now.timeIntervalSince(since) >= config.settleSeconds else { return .waiting(version) }
-        lock.withLock { pending = nil }
+        state.withLock { $0.pending = nil }
         saveHandled(version)
         return .run(reason: "screenpipe updated from \(handled) to \(version)")
     }
 
     /// The job body.
     func runOnce() -> Job.Outcome {
-        if !lock.withLock({ orphansChecked }) {
+        if !state.value.orphansChecked {
             ChildProcess.killOrphans(matching: config.orphanMarker, log: log)
-            lock.withLock { orphansChecked = true }
+            state.withLock { $0.orphansChecked = true }
         }
-        let manual: String? = lock.withLock {
-            defer { manualReason = nil }
-            return manualReason
+        let manual: String? = state.withLock { s in
+            defer { s.manualReason = nil }
+            return s.manualReason
         }
         if let reason = manual { return run(reason: reason) }
         switch decide(version: config.installedVersion()) {
@@ -214,8 +208,8 @@ final class ScreenpipeUpdateCheck {
         // ChildProcess has no working directory: sh changes into the project and execs claude.
         let r = ChildProcess.run("/bin/sh", ["-c", "cd \"$0\" && exec \"$@\"", config.projectDir, config.claudePath] + args,
                                  timeout: config.timeout, env: env, stderr: true, logFile: transcript, grace: config.killGrace,
-                                 onStart: { [weak self] p in self?.lock.withLock { self?.current = p } })
-        lock.withLock { current = nil }
+                                 onStart: { [state] p in state.withLock { $0.current = p } })
+        state.withLock { $0.current = nil }
         let outcome = finished(r, stamp: stamp, reason: reason)
         prune()
         return outcome

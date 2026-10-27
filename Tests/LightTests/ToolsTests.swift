@@ -10,7 +10,7 @@ func toolIO(_ p: Printed, env: [String: String] = [:], cwd: String = NSTemporary
     ToolIO(out: p.out, err: p.err, env: env, cwd: cwd)
 }
 
-@Suite("Tools: shared helpers", .quietLog) struct ToolsHelperTests {
+@Suite("Tools: shared helpers", .tags(.light, .tools), .timeLimit(.minutes(1)), .quietLog) struct ToolsHelperTests {
     @Test func shellQuoteMatchesShlex() {
         #expect(Tools.shellQuote("plain-word") == "plain-word")
         #expect(Tools.shellQuote(#"it's "x""#) == #"'it'"'"'s "x"'"#)
@@ -34,7 +34,7 @@ func toolIO(_ p: Printed, env: [String: String] = [:], cwd: String = NSTemporary
     }
 }
 
-@Suite("Tools: GrowthBook design", .quietLog) struct GrowthBookDesignTests {
+@Suite("Tools: GrowthBook design", .tags(.light, .tools), .timeLimit(.minutes(1)), .quietLog) struct GrowthBookDesignTests {
     @Test func factSQLSelectsEveryDimensionFromTheTreatmentSettings() {
         for d in GrowthBookDesign.dimensions { #expect(GrowthBookDesign.sql.contains(" cfg->>'\(d)' AS \(d)")) }
         #expect(GrowthBookDesign.sql.hasPrefix("WITH tagged AS (\n SELECT *, metadata->'treatment_settings' AS cfg FROM habit_events\n"))
@@ -84,7 +84,7 @@ func toolIO(_ p: Printed, env: [String: String] = [:], cwd: String = NSTemporary
     }
 }
 
-@Suite("Tools: start-capture-phase", .quietLog) struct CapturePhaseTests {
+@Suite("Tools: start-capture-phase", .tags(.light, .tools), .timeLimit(.minutes(1)), .quietLog) struct CapturePhaseTests {
     static let config = """
         {
           "_comment": "fixture",
@@ -146,7 +146,7 @@ func toolIO(_ p: Printed, env: [String: String] = [:], cwd: String = NSTemporary
 
 // MARK: - Vault report
 
-@Suite("Tools: vault-report", .quietLog) struct VaultReportTests {
+@Suite("Tools: vault-report", .tags(.light, .tools, .chats), .timeLimit(.minutes(1)), .quietLog) struct VaultReportTests {
     static let secret = "SECRET-CONVERSATION-TEXT"
 
     static func conversation(messages: Int, created: Bool = true) -> String {
@@ -191,7 +191,7 @@ func toolIO(_ p: Printed, env: [String: String] = [:], cwd: String = NSTemporary
 
 // MARK: - Policy
 
-@Suite("Tools: retired routes", .quietLog) struct ToolsPolicyTests {
+@Suite("Tools: retired routes", .tags(.light, .tools), .timeLimit(.minutes(1)), .quietLog) struct ToolsPolicyTests {
     /// The app used to write habit rows straight into Postgres over an SSH tunnel
     /// (:15432, a habits_writer role) and conversations into Hindsight (:18925). Since
     /// 2026-10-22 everything goes through learner-server's HTTPS RPC API.
@@ -209,7 +209,7 @@ func toolIO(_ p: Printed, env: [String: String] = [:], cwd: String = NSTemporary
     }
 }
 
-@Suite("Preflight comparison", .quietLog) struct PreflightCompareTests {
+@Suite("Preflight comparison", .tags(.light, .tools, .scripts), .timeLimit(.minutes(1)), .quietLog) struct PreflightCompareTests {
     @Test func aRedactedArrayEntryMatchesAnyOneLiveEntry() {
         let want: [Any] = [Preflight.redacted, "MacBook Pro Microphone (input)", "System Audio (output)"]
         #expect(Preflight.equal(["Someone’s AirPods (input)", "MacBook Pro Microphone (input)", "System Audio (output)"], want))

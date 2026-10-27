@@ -1,14 +1,29 @@
 import AppKit
 import Foundation
-import ServiceManagement
-import SQLite3
-import CoreBluetooth
-import CommonCrypto
+import Synchronization
 
 // The app runs a handful of workflows -- the speaking coach, the trial outbox, the chat
 // export, the helper processes and the status probe -- and they all share what is here:
 // one log format (Log), one retry policy (Backoff), one way to run another program
 // (ChildProcess), one way to run recurring work (Job) and one clock (Scheduler).
+
+// MARK: - Shared state
+
+/// A value several threads read and write: a `Mutex` in a class, so it can be a `static let`
+/// or be captured by an escaping closure (a bare `Mutex` is non-copyable and can be neither).
+final class Locked<Value: Sendable>: Sendable {
+    private let mutex: Mutex<Value>
+    init(_ value: Value) { mutex = Mutex(value) }
+
+    var value: Value {
+        get { mutex.withLock { $0 } }
+        set { mutex.withLock { $0 = newValue } }
+    }
+
+    func withLock<R: Sendable>(_ body: (inout Value) throws -> R) rethrows -> R {
+        try mutex.withLock { try body(&$0) }
+    }
+}
 
 // MARK: - Paths
 
@@ -57,16 +72,24 @@ enum AppLog {
     static let maxBytes: UInt64 = 10_000_000
     static let repeatWindow: TimeInterval = 600
 
+    private struct State {
+        /// Tests capture lines here instead of stdout.
+        var sink: (@Sendable (String) -> Void)?
+        var lastSeen: [String: (at: Date, held: Int)] = [:]
+        var writes = 0
+        let stamp: DateFormatter = {
+            let f = DateFormatter()
+            f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+            return f
+        }()
+    }
+    private static let state = Mutex(State())
+
     /// Tests capture lines here instead of stdout.
-    static var sink: ((String) -> Void)?
-    private static let lock = NSLock()
-    private static var lastSeen: [String: (at: Date, held: Int)] = [:]
-    private static var writes = 0
-    private static let stamp: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        return f
-    }()
+    static var sink: (@Sendable (String) -> Void)? {
+        get { state.withLock { $0.sink } }
+        set { state.withLock { $0.sink = newValue } }
+    }
 
     /// Send stdout/stderr to the log file (launchd points them there too; this lets the app
     /// rotate it). Not used by the one-shot CLI modes, which print to the terminal.
@@ -77,27 +100,27 @@ enum AppLog {
     }
 
     static func write(_ line: String, collapse: Bool) {
-        lock.lock()
-        defer { lock.unlock() }
-        let now = Date()
-        var text = line
-        if collapse {
-            let key = line.replacingOccurrences(of: "[0-9]+", with: "#", options: .regularExpression)
-            if let seen = lastSeen[key], now.timeIntervalSince(seen.at) < repeatWindow {
-                lastSeen[key] = (seen.at, seen.held + 1)
-                return
-            } else if let seen = lastSeen[key], seen.held > 0 {
-                text += "  [repeated \(seen.held)x in the previous \(Int(repeatWindow / 60)) min]"
+        state.withLock { s in
+            let now = Date()
+            var text = line
+            if collapse {
+                let key = line.replacingOccurrences(of: "[0-9]+", with: "#", options: .regularExpression)
+                if let seen = s.lastSeen[key], now.timeIntervalSince(seen.at) < repeatWindow {
+                    s.lastSeen[key] = (seen.at, seen.held + 1)
+                    return
+                } else if let seen = s.lastSeen[key], seen.held > 0 {
+                    text += "  [repeated \(seen.held)x in the previous \(Int(repeatWindow / 60)) min]"
+                }
+                if s.lastSeen.count > 2000 { s.lastSeen.removeAll() }
+                s.lastSeen[key] = (now, 0)
             }
-            if lastSeen.count > 2000 { lastSeen.removeAll() }
-            lastSeen[key] = (now, 0)
+            let stamped = "\(s.stamp.string(from: now)) \(text)"
+            if let sink = s.sink { sink(stamped); return }
+            Swift.print(stamped)
+            fflush(stdout)
+            s.writes += 1
+            if s.writes % 500 == 0 { rotate() }
         }
-        let stamped = "\(stamp.string(from: now)) \(text)"
-        if let sink = sink { sink(stamped); return }
-        Swift.print(stamped)
-        fflush(stdout)
-        writes += 1
-        if writes % 500 == 0 { rotate() }
     }
 
     /// Keep one previous file: menubar.log -> menubar.1.log once it passes maxBytes.
@@ -218,22 +241,20 @@ enum ChildProcess {
         defer { try? log?.close() }
         log?.write(Data("=== \(Date()) \(([executable] + args).map { ($0 as NSString).lastPathComponent }.prefix(3).joined(separator: " "))\n".utf8))
 
-        let lock = NSLock()
-        var data = Data()
-        var eof = false
-        var lastOutput = Date()
+        struct Reading { var data = Data(), eof = false, lastOutput = Date() }
+        let reading = Locked(Reading())
         out.fileHandleForReading.readabilityHandler = { h in
             let chunk = h.availableData
-            lock.lock()
-            if chunk.isEmpty {
-                eof = true
-                h.readabilityHandler = nil
-            } else {
-                data.append(chunk)
-                lastOutput = Date()
-                log?.write(chunk)
+            reading.withLock { r in
+                if chunk.isEmpty {
+                    r.eof = true
+                    h.readabilityHandler = nil
+                } else {
+                    r.data.append(chunk)
+                    r.lastOutput = Date()
+                    log?.write(chunk)
+                }
             }
-            lock.unlock()
         }
         do {
             try p.run()
@@ -249,7 +270,7 @@ enum ChildProcess {
             let now = Date()
             if now.timeIntervalSince(started) > timeout {
                 stopped = "ran over \(Int(timeout)) s"
-            } else if let stall = stallTimeout, now.timeIntervalSince(lock.withLock { lastOutput }) > stall {
+            } else if let stall = stallTimeout, now.timeIntervalSince(reading.value.lastOutput) > stall {
                 stopped = "no output for \(Int(stall / 60)) min"
             }
             if stopped != nil {
@@ -260,10 +281,10 @@ enum ChildProcess {
         p.waitUntilExit()
         // Output held open by a grandchild is abandoned after a second.
         let drained = Date().addingTimeInterval(1)
-        while Date() < drained && !(lock.withLock { eof }) { usleep(10_000) }
+        while Date() < drained && !reading.value.eof { usleep(10_000) }
         out.fileHandleForReading.readabilityHandler = nil
         if let why = stopped { log?.write(Data("\n=== stopped: \(why)\n".utf8)) }
-        let text = lock.withLock { String(data: data, encoding: .utf8) ?? "" }
+        let text = String(data: reading.value.data, encoding: .utf8) ?? ""
         return Result(status: stopped == nil ? p.terminationStatus : nil, output: text, stopped: stopped)
     }
 
@@ -316,8 +337,11 @@ enum ChildProcess {
 /// and retries a failure with `backoff`. Its schedule and last outcome are kept in
 /// ~/.ai-aggregator/jobs/<name>.json, so a restart neither skips a backoff nor forgets a
 /// failure. Every run and outcome is logged under its name, and `problem` feeds the tray.
-final class Job {
-    enum Outcome {
+///
+/// The body is synchronous and runs on the job's own serial queue, so it may block on a
+/// child process, SQLite or HTTP. Everything mutable sits in one Mutex.
+final class Job: Sendable {
+    enum Outcome: Sendable {
         /// Done; next run after `period` (or `next`, when given).
         case ok(String, next: TimeInterval? = nil)
         /// Failed; retried after the backoff (or `retryAfter`, e.g. a rate limit's).
@@ -328,7 +352,7 @@ final class Job {
         case idle
     }
 
-    struct State: Codable {
+    struct State: Codable, Sendable {
         var nextRun: Date
         var failures = 0
         var lastRun: Date?
@@ -337,9 +361,15 @@ final class Job {
         var blocked = false
     }
 
-    static private(set) var all: [Job] = []
+    private static let registry = Locked<[Job]>([])
+    private static let sharedStateDir = Locked(Paths.data + "/jobs")
+    /// Every job made so far, in the order they were made.
+    static var all: [Job] { registry.value }
     /// Where job state is kept; tests point it at a temp directory.
-    static var stateDir = Paths.data + "/jobs"
+    static var stateDir: String {
+        get { sharedStateDir.value }
+        set { sharedStateDir.value = newValue }
+    }
 
     let name: String
     let log: Log
@@ -351,22 +381,24 @@ final class Job {
     /// A blocked job is checked again once at launch and then this often, so a block that
     /// was wrong, or that the user fixed elsewhere, clears itself.
     let blockedRecheck: TimeInterval
-    private var backoff: Backoff
-    private let body: (Job) -> Outcome
+    private let body: @Sendable (Job) -> Outcome
     private let queue: DispatchQueue
-    private let lock = NSLock()
-    private var state: State
-    private var running = false
-    private var rerun = false
     private let statePath: String
+    /// The persisted state, plus what only lives while the app runs.
+    private struct Live {
+        var state: State
+        var backoff: Backoff
+        var running = false
+        var rerun = false
+    }
+    private let live: Mutex<Live>
 
     init(_ name: String, period: TimeInterval, firstRun: TimeInterval = 0, backoff: Backoff,
          problemGrace: TimeInterval = 0, quiet: Bool = false, stateDir: String = Job.stateDir,
-         blockedRecheck: TimeInterval = 6 * 3600, body: @escaping (Job) -> Outcome) {
+         blockedRecheck: TimeInterval = 6 * 3600, body: @escaping @Sendable (Job) -> Outcome) {
         self.name = name
         self.log = Log(name)
         self.period = period
-        self.backoff = backoff
         self.problemGrace = problemGrace
         self.quiet = quiet
         self.blockedRecheck = blockedRecheck
@@ -375,6 +407,8 @@ final class Job {
         try? FileManager.default.createDirectory(atPath: stateDir, withIntermediateDirectories: true)
         statePath = "\(stateDir)/\(name).json"
         let fresh = State(nextRun: Date().addingTimeInterval(firstRun))
+        var restored = backoff
+        var state = fresh
         if let data = FileManager.default.contents(atPath: statePath),
            var saved = try? JSONDecoder().decode(State.self, from: data) {
             // A saved schedule is kept (a backoff survives restarts), but never later than
@@ -383,14 +417,13 @@ final class Job {
             // Blocked at the last launch: check once now that the app has started again.
             if saved.blocked { saved.nextRun = fresh.nextRun }
             state = saved
-            self.backoff.restore(failures: saved.failures)
-        } else {
-            state = fresh
+            restored.restore(failures: saved.failures)
         }
-        Job.all.append(self)
+        live = Mutex(Live(state: state, backoff: restored))
+        Job.registry.withLock { $0.append(self) }
     }
 
-    var snapshot: State { lock.withLock { state } }
+    var snapshot: State { live.withLock { $0.state } }
 
     /// What the tray shows: blocked, or failing for longer than `problemGrace`.
     var problem: String? {
@@ -402,21 +435,21 @@ final class Job {
 
     /// Called by the Scheduler; runs the job when it is due.
     func tick() {
-        let due = lock.withLock { !running && Date() >= state.nextRun }
+        let due = live.withLock { !$0.running && Date() >= $0.state.nextRun }
         if due { start(reason: nil) }
     }
 
     /// Runs now (or right after the current run), clearing a block: after a sign-in, a
     /// menu click, a restored key.
     func kick(_ reason: String) {
-        lock.withLock { state.blocked = false }
+        live.withLock { $0.state.blocked = false }
         start(reason: reason)
     }
 
     private func start(reason: String?) {
-        let go: Bool = lock.withLock {
-            if running { rerun = true; return false }
-            running = true
+        let go: Bool = live.withLock {
+            if $0.running { $0.rerun = true; return false }
+            $0.running = true
             return true
         }
         guard go else { return }
@@ -428,50 +461,50 @@ final class Job {
         let started = Date()
         let outcome = body(self)
         let took = String(format: "%.1f s", Date().timeIntervalSince(started))
-        var again = false
-        lock.withLock {
-            running = false
-            again = rerun
-            rerun = false
+        let again: Bool = live.withLock { l in
+            defer { l.running = false; l.rerun = false }
+            let again = l.rerun
             let now = Date()
             switch outcome {
             case .idle:
                 if !quiet { log.info("nothing to do (\(took))") }
-                state.nextRun = now.addingTimeInterval(period)
-                return
+                l.state.nextRun = now.addingTimeInterval(period)
+                return again
             case let .ok(summary, next):
-                if state.problemSince != nil { log.info("recovered: \(summary)") }
+                if l.state.problemSince != nil { log.info("recovered: \(summary)") }
                 else if !quiet { log.info("ok in \(took): \(summary)") }
-                backoff.succeeded()
-                state.failures = 0
-                state.problemSince = nil
-                state.blocked = false
-                state.summary = summary
-                state.nextRun = now.addingTimeInterval(next ?? period)
+                l.backoff.succeeded()
+                l.state.failures = 0
+                l.state.problemSince = nil
+                l.state.blocked = false
+                l.state.summary = summary
+                l.state.nextRun = now.addingTimeInterval(next ?? period)
             case let .failed(summary, retryAfter):
                 // A fixed retry (a rate limit's) still counts as an attempt.
-                let backedOff = backoff.failed()
+                let backedOff = l.backoff.failed()
                 let wait = retryAfter ?? backedOff
-                state.failures = backoff.failures
-                state.problemSince = state.problemSince ?? now
-                state.summary = summary
-                state.nextRun = now.addingTimeInterval(wait)
-                log.warn("failed in \(took) (attempt \(state.failures)): \(summary); retrying in \(Job.describe(wait))")
+                l.state.failures = l.backoff.failures
+                l.state.problemSince = l.state.problemSince ?? now
+                l.state.summary = summary
+                l.state.nextRun = now.addingTimeInterval(wait)
+                log.warn("failed in \(took) (attempt \(l.state.failures)): \(summary); retrying in \(Job.describe(wait))")
             case let .blocked(summary):
-                if !state.blocked || state.summary != summary { log.warn("blocked: \(summary); waiting for the user (checking again in \(Job.describe(blockedRecheck)))") }
-                state.blocked = true
-                state.nextRun = now.addingTimeInterval(blockedRecheck)
-                state.problemSince = state.problemSince ?? now
-                state.summary = summary
+                if !l.state.blocked || l.state.summary != summary { log.warn("blocked: \(summary); waiting for the user (checking again in \(Job.describe(blockedRecheck)))") }
+                l.state.blocked = true
+                l.state.nextRun = now.addingTimeInterval(blockedRecheck)
+                l.state.problemSince = l.state.problemSince ?? now
+                l.state.summary = summary
             }
-            let routine = quiet && state.failures == 0 && state.problemSince == nil && !state.blocked
-            state.lastRun = now
-            if !routine { save() }
+            let routine = quiet && l.state.failures == 0 && l.state.problemSince == nil && !l.state.blocked
+            l.state.lastRun = now
+            // Under the lock, so two saves can never land out of order.
+            if !routine { save(l.state) }
+            return again
         }
         if again { start(reason: "queued while running") }
     }
 
-    private func save() {
+    private func save(_ state: State) {
         guard let data = try? JSONEncoder().encode(state) else { return }
         do { try data.write(to: URL(fileURLWithPath: statePath), options: .atomic) }
         catch { log.warn("cannot save job state: \(error.localizedDescription)") }
@@ -487,19 +520,29 @@ final class Job {
 /// The app's one clock: a 1 s main-thread timer in .common mode (it keeps running while
 /// a menu is open). Each registered task runs every `every` seconds; every Job is ticked
 /// each second and decides for itself whether it is due.
+///
+/// Why not NSBackgroundActivityScheduler for the hourly jobs (Export, Archive): due-ness
+/// is the job's persisted nextRun, which a backoff, a rate limit's fixed retry, a block's
+/// recheck or a kick moves at any time. An OS activity would have to be torn down and
+/// rescheduled after every outcome, may defer the work by far more than a 15 min backoff
+/// asks for, and would be a second clock the tests cannot drive. A 1 s tick that compares
+/// two dates costs nothing measurable; the timer's tolerance lets macOS coalesce it.
+@MainActor
 enum Scheduler {
-    private struct Task { let name: String; let every: TimeInterval; var last: Date; let run: () -> Void }
+    private struct Task { let name: String; let every: TimeInterval; var last: Date; let run: @MainActor () -> Void }
     private static var tasks: [Task] = []
     private static var timer: Timer?
 
     /// Main-thread work on a fixed period (the coach's 1 s tick, the tray refresh).
-    static func every(_ seconds: TimeInterval, _ name: String, _ run: @escaping () -> Void) {
+    static func every(_ seconds: TimeInterval, _ name: String, _ run: @escaping @MainActor () -> Void) {
         tasks.append(Task(name: name, every: seconds, last: .distantPast, run: run))
     }
 
     static func start() {
         guard timer == nil else { return }
-        let t = Timer(timeInterval: 1, repeats: true) { _ in fire() }
+        // On the main run loop, so it always fires on the main thread.
+        let t = Timer(timeInterval: 1, repeats: true) { _ in MainActor.assumeIsolated { fire() } }
+        t.tolerance = 0.1
         RunLoop.main.add(t, forMode: .common)
         timer = t
         Log("Scheduler").info("started: \(tasks.map { "\($0.name) every \(Job.describe($0.every))" }.joined(separator: ", ")); jobs: \(Job.all.map(\.name).joined(separator: ", "))")
@@ -528,13 +571,13 @@ enum Scheduler {
 /// a warning so the rest still run, and the whole sequence stays inside `total` (launchd
 /// SIGKILLs 20 s after SIGTERM).
 enum Shutdown {
-    struct Step {
+    struct Step: Sendable {
         let name: String
         let budget: TimeInterval
         /// Runs on the calling (main) thread: must be quick, as it cannot be timed out.
         var onCallingThread = false
         /// Gets its deadline; returns a short note for the log (or nil).
-        let run: (Date) -> String?
+        let run: @Sendable (Date) -> String?
     }
 
     /// Returns the names of the steps that finished in time.
@@ -551,27 +594,25 @@ enum Shutdown {
             }
             let deadline = Date().addingTimeInterval(min(step.budget, left))
             let started = Date()
-            let done = DispatchSemaphore(value: 0)
-            var note: String?
-            if !step.onCallingThread {
+            let took = { String(format: "%.1f s", Date().timeIntervalSince(started)) }
+            let note: String?
+            if step.onCallingThread {
+                note = step.run(deadline)
+            } else {
+                let done = DispatchSemaphore(value: 0)
+                let result = Locked<String?>(nil)
                 DispatchQueue.global(qos: .userInitiated).async {
-                    note = step.run(deadline)
+                    result.value = step.run(deadline)
                     done.signal()
                 }
+                if done.wait(timeout: .now() + deadline.timeIntervalSinceNow + 0.5) == .timedOut {
+                    log.warn("\(step.name): still running after \(took()); moving on")
+                    continue
+                }
+                note = result.value
             }
-            let took = { String(format: "%.1f s", Date().timeIntervalSince(started)) }
-            if step.onCallingThread {
-                let note = step.run(deadline)
-                log.info("\(step.name): done in \(took())\(note.map { " (\($0))" } ?? "")")
-                finished.append(step.name)
-                continue
-            }
-            if done.wait(timeout: .now() + deadline.timeIntervalSinceNow + 0.5) == .timedOut {
-                log.warn("\(step.name): still running after \(took()); moving on")
-            } else {
-                log.info("\(step.name): done in \(took())\(note.map { " (\($0))" } ?? "")")
-                finished.append(step.name)
-            }
+            log.info("\(step.name): done in \(took())\(note.map { " (\($0))" } ?? "")")
+            finished.append(step.name)
         }
         log.info("shutdown complete")
         return finished

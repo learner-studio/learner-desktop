@@ -1,16 +1,14 @@
 import AppKit
 import Foundation
 import ServiceManagement
-import SQLite3
-import CoreBluetooth
-import CommonCrypto
 
 // MARK: - Main Application & Status Bar Manager
-class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
+@MainActor
+final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
     var statusMenu: NSMenu!
     private var isShuttingDown = false
-    let log = Log("Tray")
+    nonisolated let log = Log("Tray")
     private var signalSources: [DispatchSourceSignal] = []
 
     let homeDir = NSHomeDirectory()
@@ -21,14 +19,18 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var trayKind = ""
     private lazy var statusJob = Job("Status", period: 8, backoff: Backoff(base: 8, max: 60), quiet: true) { [weak self] _ in
         guard let self = self else { return .idle }
-        let previous = DispatchQueue.main.sync { self.status }
-        let next = StatusProbe.collect(previous: previous, helpers: [self.tunnel] + (self.uploader.map { [$0] } ?? []),
-                                         appAgentPlist: self.appAgentPlist, uploaderActive: self.uploader != nil)
-        self.ensureScreenpipeSkipsSignIn()
+        let (previous, helpers, uploaderActive) = DispatchQueue.main.sync {
+            (self.status, [self.tunnel] + (self.uploader.map { [$0] } ?? []), self.uploader != nil)
+        }
+        let next = StatusProbe.collect(previous: previous, helpers: helpers, appAgentPlist: self.appAgentPlist,
+                                       uploaderActive: uploaderActive)
         if let appVersion = ScreenpipeUpdateCheck.installedAppVersion() {
             CaptureEnvironment.screenpipeAppVersion = appVersion
         }
-        DispatchQueue.main.async { self.apply(next) }
+        DispatchQueue.main.async {
+            self.ensureScreenpipeSkipsSignIn()
+            self.apply(next)
+        }
         return .ok("collected")
     }
 
@@ -222,7 +224,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// recordAppHeartbeat input (contract/desktop.ts, RecordAppHeartbeatInput).
-    func heartbeatInput() -> [String: Any] {
+    nonisolated func heartbeatInput() -> [String: Any] {
         let current = DispatchQueue.main.sync { status }
         return TrayAppManager.heartbeat(
             current, appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev",
@@ -233,7 +235,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// recordAppHeartbeat input (contract/desktop.ts, RecordAppHeartbeatInput), from a status
     /// snapshot. Pure, so the light lane checks it against the contract.
-    static func heartbeat(_ s: AppStatus, appVersion: String, screenpipeVersion: String?, capturePhase: String?,
+    nonisolated static func heartbeat(_ s: AppStatus, appVersion: String, screenpipeVersion: String?, capturePhase: String?,
                           lastSentAt: Date?, lastExport: Date?, outboxStatus: String) -> [String: Any] {
         let captureState: String
         switch s.capture {
@@ -277,13 +279,14 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
               screenpipe.processIdentifier != screenpipeFlagCheckedPid else { return }
         let pid = screenpipe.processIdentifier
         screenpipeFlagCheckedPid = pid
-        DispatchQueue.global(qos: .utility).async { [weak self] in
+        let log = self.log
+        DispatchQueue.global(qos: .utility).async {
             guard let started = ChildProcess.commandLine(pid, includeEnvironment: true),
                   !started.contains("SCREENPIPE_SKIP_ONBOARDING=1"),
                   // Signed out, screenpipe never starts its server. One that answers is (or
                   // can be) recording, and quitting it would only drop it to search-only.
                   HTTPProbe.get(StatusProbe.screenpipeURL + "/health").status == 0 else { return }
-            self?.log.warn("screenpipe started without SCREENPIPE_SKIP_ONBOARDING, so it is waiting for a sign-in; relaunching it with the flag")
+            log.warn("screenpipe started without SCREENPIPE_SKIP_ONBOARDING, so it is waiting for a sign-in; relaunching it with the flag")
             // A normal quit: screenpipe handles no termination signals, so a signal could
             // leave its database mid-write.
             _ = screenpipe.terminate()
@@ -292,15 +295,15 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if kill(pid, 0) == 0 {
                 // Still there: it went to search-only instead of exiting. Reopening is
                 // screenpipe's own way back, and resumes recording.
-                self?.log.warn("screenpipe did not quit within 30 s; reopening it instead")
+                log.warn("screenpipe did not quit within 30 s; reopening it instead")
             }
             let config = NSWorkspace.OpenConfiguration()
             config.activates = false
             config.environment = ["SCREENPIPE_SKIP_ONBOARDING": "1"]
             NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: "/Applications/screenpipe.app"),
                                                configuration: config) { _, error in
-                if let error = error { self?.log.error("screenpipe relaunch failed: \(error.localizedDescription)") }
-                else { self?.log.info("screenpipe relaunched with SCREENPIPE_SKIP_ONBOARDING") }
+                if let error = error { log.error("screenpipe relaunch failed: \(error.localizedDescription)") }
+                else { log.info("screenpipe relaunched with SCREENPIPE_SKIP_ONBOARDING") }
             }
         }
     }
@@ -406,18 +409,20 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // avoids the .terminateLater/reply handshake, which was seen to finish the work and
         // then never exit. What is left unsent stays in SQLite for the next launch.
         Scheduler.stop()
+        let (coach, tunnel, uploader) = (talkMonitor, self.tunnel, self.uploader)
         Shutdown.run(TrayAppManager.shutdownSteps(
-            finishTurn: { self.talkMonitor.resetStreak() }, logger: HabitEventLogger.shared,
+            // Runs on the calling thread, which is main.
+            finishTurn: { MainActor.assumeIsolated { coach.resetStreak() } }, logger: HabitEventLogger.shared,
             drain: { OutboxSender.shared.drain(until: $0) }, stopJobs: { ChatAndOutboxJobs.stopForQuit() },
-            stopTunnel: { self.tunnel.stop(grace: 0.5); self.uploader?.stop(grace: 1.5) }), total: 18)
+            stopTunnel: { tunnel.stop(grace: 0.5); uploader?.stop(grace: 1.5) }), total: 18)
         return .terminateNow
     }
 
     /// The quit sequence. Order matters: queued trials are written, then sent, and only then
     /// is the database closed (closing first strands them until the next launch).
-    static func shutdownSteps(finishTurn: @escaping () -> Void, logger: HabitEventLogger,
-                              drain: @escaping (Date) -> Int, stopJobs: @escaping () -> Void,
-                              stopTunnel: @escaping () -> Void) -> [Shutdown.Step] {
+    nonisolated static func shutdownSteps(finishTurn: @escaping @Sendable () -> Void, logger: HabitEventLogger,
+                                          drain: @escaping @Sendable (Date) -> Int, stopJobs: @escaping @Sendable () -> Void,
+                                          stopTunnel: @escaping @Sendable () -> Void) -> [Shutdown.Step] {
         [
             .init(name: "finish the current turn", budget: 2, onCallingThread: true) { _ in finishTurn(); return nil },
             .init(name: "write queued trials", budget: 3) { _ in logger.waitUntilIdle(); return nil },

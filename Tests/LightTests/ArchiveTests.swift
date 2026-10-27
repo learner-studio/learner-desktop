@@ -38,7 +38,7 @@ private func ok(_ s: StubTransport.Seen) -> HTTPReply {
     StubTransport.json(200, ["data": ["accepted": s.documentIds.count, "updated": 0, "unchanged": 0]])
 }
 
-@Suite("Archive sweep", .quietLog, .timeLimit(.minutes(1))) struct ArchiveTests {
+@Suite("Archive sweep", .tags(.light, .chats), .quietLog, .timeLimit(.minutes(1))) struct ArchiveTests {
     @Test func postsTheDataEnvelopeWithTheDeviceKey() throws {
         let f = ArchiveFixture(count: 1, handler: ok)
         _ = f.sweep()

@@ -7,6 +7,7 @@ import Foundation
 /// so every test run used to leave one behind. A suite whose name is an absolute path is
 /// kept at that path instead: here, in a temp folder of its own, removed when the value
 /// goes away or, for any still alive, when the test process exits.
+// @unchecked: UserDefaults is thread-safe; the added fields are immutable.
 public final class ScratchDefaults: UserDefaults, @unchecked Sendable {
     /// The suite name: an absolute path (CFPreferences adds ".plist").
     public let suite: String
@@ -27,6 +28,7 @@ public final class ScratchDefaults: UserDefaults, @unchecked Sendable {
     public var plistPath: String { suite + ".plist" }
 
     private static let lock = NSLock()
+    // nonisolated(unsafe): both only touched under `lock`.
     nonisolated(unsafe) private static var live: Set<String> = []
     nonisolated(unsafe) private static var exitHook = false
 

@@ -4,7 +4,7 @@ import Testing
 import TestSupport
 
 // CLI sessions: the uploader's status.json read with learner-server's health rules.
-@Suite("CLI sessions status", .quietLog) struct SessionsTests {
+@Suite("CLI sessions status", .tags(.light, .sessions), .timeLimit(.minutes(1)), .quietLog) struct SessionsTests {
     func write(_ dir: TempDir, _ json: [String: Any]) -> String {
         let path = dir.file("status.json")
         FileManager.default.createFile(atPath: path, contents: try! JSONSerialization.data(withJSONObject: json))

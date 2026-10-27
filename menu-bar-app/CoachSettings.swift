@@ -160,6 +160,7 @@ enum AssignmentMode: String, CaseIterable {
 }
 
 /// Resolves a session's arm from the assignment mode.
+@MainActor
 final class HabitExperimentManager {
     static let shared = HabitExperimentManager(settings: .shared)
     let settings: CoachSettings
@@ -180,6 +181,7 @@ final class HabitExperimentManager {
 
 /// The coach's and the wristband's settings, in UserDefaults. Every change is logged and
 /// announced to observers (the wristband reconnects, the tray redraws).
+@MainActor
 final class CoachSettings {
     static let shared = CoachSettings(defaults: .standard)
 

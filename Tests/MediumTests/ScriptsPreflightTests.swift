@@ -10,11 +10,12 @@ import TestSupport
 // SCREENPIPE_API at a local HTTPStandIn and SCREENPIPE_APP at a bundle that does not
 // exist (or, for the app-version checks, a fake bundle holding only an Info.plist). The live run is HeavyTests/CaptureLiveTests.
 
-private let baseline: [String: Any] = ["transcriptionMode": "realtime", "audioChunkDuration": 5,
+// nonisolated(unsafe): a constant fixture, never mutated.
+nonisolated(unsafe) private let baseline: [String: Any] = ["transcriptionMode": "realtime", "audioChunkDuration": 5,
                                        "audioTranscriptionEngine": "whisper-large-v3-turbo-quantized", "autoUpdate": false]
 private let rowOK = #"[{"id":1,"audio_chunk_id":2,"timestamp":"2026-09-09T00:00:00-04:00","start_time":0.5,"end_time":1.5,"file_path":"/x.mp4"}]"#
 
-@Suite("Preflight (stand-in screenpipe)", .quietLog) struct ScriptsPreflightTests {
+@Suite("Preflight (stand-in screenpipe)", .tags(.medium, .scripts, .tools), .timeLimit(.minutes(1)), .quietLog) struct ScriptsPreflightTests {
 
     func run(settings: [String: Any], expected: [String: Any] = baseline, pins: [String: Any] = [:],
              health: String? = #"{"status":"healthy","version":"0.4.50"}"#, rows: String = rowOK,

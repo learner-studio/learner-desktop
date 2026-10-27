@@ -11,7 +11,8 @@ final class JobName {
 }
 
 /// An in-process stand-in for an HTTP server: records each request, answers with `handler`.
-final class StubTransport: HTTPTransport {
+// @unchecked: `seenRequests` is behind `lock`; `handler` is swapped only between calls.
+final class StubTransport: HTTPTransport, @unchecked Sendable {
     struct Seen {
         let url: URL
         let headers: [String: String]

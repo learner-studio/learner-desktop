@@ -8,21 +8,21 @@ import PackageDescription
 
 let package = Package(
     name: "LearnerDesktop",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v15)],
     targets: [
         .executableTarget(
             name: "LearnerDesktop",
             path: "menu-bar-app",
             exclude: ["com.benpollack.learner-desktop.plist", "learner-desktop", "Learner Desktop.app"],
-            swiftSettings: [.swiftLanguageMode(.v5)],
+            swiftSettings: [.swiftLanguageMode(.v6)],
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
-        .target(name: "TestSupport", path: "Tests/TestSupport", swiftSettings: [.swiftLanguageMode(.v5)]),
+        .target(name: "TestSupport", path: "Tests/TestSupport", swiftSettings: [.swiftLanguageMode(.v6)]),
         .testTarget(name: "LightTests", dependencies: ["LearnerDesktop", "TestSupport"], path: "Tests/LightTests",
-                    swiftSettings: [.swiftLanguageMode(.v5)]),
+                    swiftSettings: [.swiftLanguageMode(.v6)]),
         .testTarget(name: "MediumTests", dependencies: ["LearnerDesktop", "TestSupport"], path: "Tests/MediumTests",
-                    swiftSettings: [.swiftLanguageMode(.v5)]),
+                    swiftSettings: [.swiftLanguageMode(.v6)]),
         .testTarget(name: "HeavyTests", dependencies: ["LearnerDesktop", "TestSupport"], path: "Tests/HeavyTests",
-                    swiftSettings: [.swiftLanguageMode(.v5)]),
+                    swiftSettings: [.swiftLanguageMode(.v6)]),
     ]
 )
