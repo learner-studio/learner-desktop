@@ -60,7 +60,10 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for sig in [SIGTERM, SIGINT] {
             signal(sig, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
-            source.setEventHandler { NSApplication.shared.terminate(nil) }
+            source.setEventHandler { [weak self] in
+                self?.log.info("received \(sig == SIGTERM ? "SIGTERM" : "SIGINT"); quitting")
+                NSApplication.shared.terminate(nil)
+            }
             source.resume()
             signalSources.append(source)
         }
@@ -392,35 +395,28 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if isShuttingDown { return .terminateNow }
         isShuttingDown = true
 
-        // Stop generating new work first.
+        // Done on the main thread: the app is quitting, so blocking its UI is fine, and it
+        // avoids the .terminateLater/reply handshake, which was seen to finish the work and
+        // then never exit. What is left unsent stays in SQLite for the next launch.
         Scheduler.stop()
-
-        // Done synchronously on the main thread and bounded to ~90s. The app is quitting,
-        // so blocking its UI is fine, and this avoids the .terminateLater/reply handshake,
-        // which was observed to complete the work and then never actually exit.
-        print("[Shutdown] Finalising in-flight turn...")
-        fflush(stdout)
-        talkMonitor.resetStreak()
-
         let logger = HabitEventLogger.shared
-        logger.waitUntilIdle()
-
-        // Send what's queued while we can; whatever fails stays in SQLite for next launch.
-        // Bounded so Quit cannot hang (launchd SIGKILLs after 20s anyway).
-        print("[Shutdown] Sending \(logger.getUnsyncedCount()) queued turn(s) to learner-server...")
-        fflush(stdout)
-        let remaining = OutboxSender.shared.drain(until: Date().addingTimeInterval(15))
-        print("[Shutdown] Unsynced turns remaining: \(remaining)")
-
-        logger.close()
-
-        print("[Shutdown] Stopping watcher and tunnel...")
-        fflush(stdout)
-        watcher.stop()
-        tunnel.stop()
-        VaultExport.shared.stopForQuit()
-        print("[Shutdown] Clean shutdown complete.")
-        fflush(stdout)
+        Shutdown.run([
+            .init(name: "finish the current turn", budget: 2, onCallingThread: true) { _ in
+                self.talkMonitor.resetStreak()
+                return nil
+            },
+            .init(name: "write queued trials", budget: 3) { _ in logger.waitUntilIdle(); return nil },
+            .init(name: "send queued trials", budget: 10) { deadline in
+                "\(OutboxSender.shared.drain(until: deadline)) left for next launch"
+            },
+            .init(name: "close the trial database", budget: 2) { _ in logger.close(); return nil },
+            .init(name: "stop the chat export", budget: 1) { _ in VaultExport.shared.stopForQuit(); return nil },
+            .init(name: "stop the helpers", budget: 2) { _ in
+                self.watcher.stop(grace: 0.5)
+                self.tunnel.stop(grace: 0.5)
+                return nil
+            },
+        ], total: 18)
         return .terminateNow
     }
 

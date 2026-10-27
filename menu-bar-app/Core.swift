@@ -490,3 +490,60 @@ enum Scheduler {
         for job in Job.all { job.tick() }
     }
 }
+
+// MARK: - Shutdown
+
+/// Quit, SIGTERM (launchctl) and Cmd-Q all end here. Steps run in order, each with its
+/// own budget and logged with how long it took; a step that overruns is left behind with
+/// a warning so the rest still run, and the whole sequence stays inside `total` (launchd
+/// SIGKILLs 20 s after SIGTERM).
+enum Shutdown {
+    struct Step {
+        let name: String
+        let budget: TimeInterval
+        /// Runs on the calling (main) thread: must be quick, as it cannot be timed out.
+        var onCallingThread = false
+        /// Gets its deadline; returns a short note for the log (or nil).
+        let run: (Date) -> String?
+    }
+
+    /// Returns the names of the steps that finished in time.
+    @discardableResult
+    static func run(_ steps: [Step], total: TimeInterval, log: Log = Log("Shutdown")) -> [String] {
+        let end = Date().addingTimeInterval(total)
+        var finished: [String] = []
+        log.info("shutting down: \(steps.map(\.name).joined(separator: ", "))")
+        for step in steps {
+            let left = end.timeIntervalSinceNow
+            guard left > 0.2 else {
+                log.warn("\(step.name): skipped, out of time")
+                continue
+            }
+            let deadline = Date().addingTimeInterval(min(step.budget, left))
+            let started = Date()
+            let done = DispatchSemaphore(value: 0)
+            var note: String?
+            if !step.onCallingThread {
+                DispatchQueue.global(qos: .userInitiated).async {
+                    note = step.run(deadline)
+                    done.signal()
+                }
+            }
+            let took = { String(format: "%.1f s", Date().timeIntervalSince(started)) }
+            if step.onCallingThread {
+                let note = step.run(deadline)
+                log.info("\(step.name): done in \(took())\(note.map { " (\($0))" } ?? "")")
+                finished.append(step.name)
+                continue
+            }
+            if done.wait(timeout: .now() + deadline.timeIntervalSinceNow + 0.5) == .timedOut {
+                log.warn("\(step.name): still running after \(took()); moving on")
+            } else {
+                log.info("\(step.name): done in \(took())\(note.map { " (\($0))" } ?? "")")
+                finished.append(step.name)
+            }
+        }
+        log.info("shutdown complete")
+        return finished
+    }
+}

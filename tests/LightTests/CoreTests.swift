@@ -165,3 +165,39 @@ import TestSupport
         }
     }
 }
+
+// Shutdown: ordered, each step logged, bounded overall, a hung step skipped not waited on.
+@Suite("Shutdown") struct ShutdownTests {
+    @Test func stepsRunInOrderAndAHungStepIsLeftBehind() {
+        var order: [String] = []
+        let lock = NSLock()
+        let mark = { (n: String) in lock.withLock { order.append(n) } }
+        let started = Date()
+        var finished: [String] = []
+        let lines = capturingLog {
+            finished = Shutdown.run([
+                .init(name: "turn", budget: 1, onCallingThread: true) { _ in mark("turn"); return nil },
+                .init(name: "flush", budget: 1) { _ in mark("flush"); return "3 rows" },
+                .init(name: "hangs", budget: 0.3) { _ in usleep(5_000_000); return nil },
+                .init(name: "close", budget: 1) { _ in mark("close"); return nil },
+            ], total: 3)
+        }
+        #expect(lock.withLock { order } == ["turn", "flush", "close"])
+        #expect(finished == ["turn", "flush", "close"])
+        #expect(Date().timeIntervalSince(started) < 2.5)
+        #expect(lines.contains { $0.contains("flush: done in") && $0.contains("(3 rows)") })
+        #expect(lines.contains { $0.contains("WARN") && $0.contains("hangs: still running") })
+    }
+
+    @Test func stepsPastTheTotalAreSkippedWithAWarning() {
+        var finished: [String] = []
+        let lines = capturingLog {
+            finished = Shutdown.run([
+                .init(name: "slow", budget: 1) { _ in usleep(900_000); return nil },
+                .init(name: "late", budget: 1) { _ in nil },
+            ], total: 1)
+        }
+        #expect(finished == ["slow"])
+        #expect(lines.contains { $0.contains("late: skipped, out of time") })
+    }
+}
