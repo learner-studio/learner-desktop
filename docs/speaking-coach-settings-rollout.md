@@ -66,12 +66,11 @@ already; the new experiment starts collecting the revised installed telemetry.
 
 ## Repeatable tests
 
-Live reward test (explicitly sends one physical vibration):
+Live wristband test (explicitly sends one physical vibration; the reward path itself is
+covered per arm by the light lane's coach workflow tests):
 
 ```sh
-AIAGG_HEAVY=1 AIAGG_REWARD_DEVICE_E2E=1 \
-AIAGG_COACH_E2E_DIR="$PWD/data/verification/reward-$(date +%s)" \
-python3 -m unittest discover -s tests/heavy -p test_speaking_coach_reward_device.py -v
+LEARNER_HEAVY=1 LEARNER_HEAVY_PAVLOK=1 scripts/test.sh heavy --filter "Coach, heavy"
 ```
 
 Read-only server configuration/SQL test (`Tests/HeavyTests/GrowthBookRemoteTests.swift`;

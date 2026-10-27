@@ -8,28 +8,20 @@ lives on learner-server.
 
 ## Architecture
 
-```
-screenpipe (localhost:3030)                          ai-vault export
-  audio_transcriptions                               (~/ai-vault-data)
-       │ /raw_sql poll                                      │
-       ▼                                                    │
- Learner Desktop (Swift)                                    │
-  TalkTimeMonitor                                           │ learner-watcher.js
-       │ logTurn()                                          │ (src/cli.ts watch)
-       ▼                                                    │
- behavior_experiments.sqlite                                │
-       │ recordHabitEvents                                  │ archiveConversation-
-       ▼                                                    ▼ Documents
-          learner-server RPC: POST $LEARNER_API_URL/rpc/<name>, header x-api-key
-```
+One Swift app (`menu-bar-app/*.swift`, built with SwiftPM) running a few workflows, all on
+the shared primitives in `Core.swift` — `Log` (levels and a prefix per workflow), `Job`
+(recurring work: one run at a time, backoff, schedule and outcome kept across restarts,
+problems shown in the tray), `ChildProcess` (every program the app runs has a deadline and
+a SIGKILL fallback), `Scheduler` (one 1 s clock) and `Shutdown` (bounded, logged quit):
 
-Every write goes to learner-server over HTTPS as `POST ${LEARNER_API_URL}/rpc/<name>`
-with body `{"data": <input>}` and the device key in `x-api-key`; the wire shapes are
-pinned in `contract/desktop.ts` (zod) and `contract/contract.json` (see
-`contract/PINNED_COMMIT`). `LEARNER_API_URL` defaults to
-`https://dev.biztoolz.app/learner-api`; the key comes from `LEARNER_API_KEY`, else the
-Keychain (`security find-generic-password -s learner-server -a ben-mbp -w`). The client
-id is `ben-mbp`.
+```
+screenpipe :3030 ──poll──▶ Speaking coach (Coach*.swift) ──▶ Pavlok / sound / toast
+                                   │ trial rows
+                                   ▼
+                     behavior_experiments.sqlite ──Outbox job (8 s)──▶ recordHabitEvents
+ai-vault CLI ──Export job (hourly)──▶ ~/ai-vault-data ──Voice──▶ ──Archive job──▶ archiveConversationDocuments
+Status job (8 s) ──▶ one AppStatus ──▶ tray + menu          Heartbeat job (5 min) ──▶ recordAppHeartbeat
+```
 
 Two paths write `habit_events` and they measure different things, recorded in
 `metadata.measurement`:
@@ -46,34 +38,33 @@ comparable on the same basis.
 ## Setup
 
 ```bash
-bun install
 security add-generic-password -s learner-server -a ben-mbp -w   # store the device key (prompts)
-./scripts/build-app.sh # build and install Learner Desktop
+scripts/install-hooks.sh                                        # test lanes on commit and push
+scripts/build-app.sh                                            # build and install Learner Desktop
 ```
 
-`build-app.sh` installs `~/Applications/Learner Desktop.app` and its LaunchAgent
-(`com.benpollack.learner-desktop`), then restarts it. Run it again after any change.
+`build-app.sh` builds with `swift build -c release`, installs `~/Applications/Learner
+Desktop.app` and its LaunchAgent (`com.benpollack.learner-desktop`), then restarts it.
+`BUNDLE_ONLY=1 OUT_DIR=<dir>` builds and signs the bundle without installing it.
 
 ### One app, one login item
 
-Learner Desktop runs the transcript watcher (`src/cli.ts watch`, compiled to one file,
-`learner-watcher.js watch`) as a child process from its own bundle. It
-restarts it if it exits and stops it on quit. Its output goes to
-`~/.ai-aggregator/logs/watcher.log`; the app's own to `menubar.log`.
+Everything runs inside the app; the only helper process is the SSH tunnel for GrowthBook's
+UI (supervised by `ManagedHelper`: restarted with backoff, stopped with its children at
+quit, an orphan from a crash reaped on the next launch).
 
-The watcher parses each changed `conversation.md` into messages
-(`src/parsers/ai-vault-messages.ts`) and sends it with `archiveConversationDocuments`,
-≤50 per call. A local ledger (`~/.ai-aggregator/sync-ledger.sqlite`, table
-`archive_ledger`) resends a conversation only when its content hash changes. A 422 parks
-that one document; 401/403 stops with "key problem"; 413 halves the batch; 429/5xx back
-off 2 s → 5 min with jitter; with no key it logs once and retries later. Conversations
-with no text messages (empty, or voice-mode audio only) are not sent. `bun src/cli.ts
-sync` sweeps the whole export once; `bun src/cli.ts status` shows the endpoint, whether
-a key is available and the ledger counts.
+Chats: the Export job runs `ai-vault backup` hourly (and on demand), stopping a run that
+prints nothing for 10 minutes; ChatGPT voice transcripts that ai-vault leaves out are
+filled in (`Voice.swift`); the Archive job sends every changed `conversation.md` with
+`archiveConversationDocuments`, ≤50 per call. A local ledger
+(`~/.ai-aggregator/sync-ledger.sqlite`, table `archive_ledger`) resends a conversation only
+when its content hash changes. A 422 parks that one document; 401/403 blocks until the key
+is fixed; 413 halves the batch; 429/5xx back off. The parser matches the earlier TypeScript
+parser byte for byte (`Tests/Fixtures/parity`), so the server's deduplication keys stay stable.
 
-They used to be two separate `/bin/bash` LaunchAgents. macOS lists those in System
+Helpers used to be separate `/bin/bash` LaunchAgents. macOS lists those in System
 Settings → Login Items as "bash" from an unknown developer, and once they were switched
-off there, launchd silently stopped starting them at login: both stayed down for ten days
+off there, launchd silently stopped starting them at login: they stayed down for ten days
 after the 2026-10-11 reboot. Now the app's single entry is all that has to be allowed,
 and the tray shows `🧠 🔴 LOGIN` if it is not.
 
@@ -96,31 +87,32 @@ The installed app answers the same (`".../Learner Desktop.app/Contents/MacOS/lea
 
 ## Tests
 
-Two lanes, stdlib `unittest` only — no pytest, no dependencies — plus `bun test tests/ts`
-in the fast lane when bun is installed.
+Everything is Swift (Swift Testing, `swift test`). Every workflow — the speaking coach,
+the trial outbox, the chat export → voice transcripts → archive, the helpers, status and
+shutdown, the owner tools — has end-to-end tests in three lanes:
 
 ```bash
-./scripts/test.sh          # fast lane (default), ~11s
-./scripts/test.sh heavy    # heavy lane, opt-in
-./scripts/test.sh all
+scripts/test.sh light     # fixtures and stand-ins only; under 60 s (pre-commit hook)
+scripts/test.sh medium    # real child processes, the built binary, local HTTP stand-ins; 60-180 s
+scripts/test.sh heavy     # the live machine (screenpipe, ai-vault, learner-server); read-only
+scripts/test.sh all
+scripts/install-hooks.sh  # pre-commit runs light (+ gitleaks); pre-push runs medium + heavy
 ```
 
-**Fast lane** (`tests/*.py`) is pure and hermetic: no network, no database, no
-launchd, no Swift compile. The capture scripts are covered by the Swift medium lane
-(`Tests/MediumTests/ScriptsCaptureTests.swift`), which runs the real
-`stop-capture.sh` / `start-capture.sh` inside a sandbox where every
-state-changing command (`launchctl`, `pkill`, `curl`, `osascript`, `open`, `nc`,
-`sqlite3`, `bun`) is a recording stub on `PATH` and `HOME` points at a throwaway
-directory — they assert the ordering and flag handling without touching the real
-capture stack; `ScriptsPreflightTests.swift` runs `tool preflight` against a
-stand-in screenpipe. `tests/ts/` covers the ai-vault message parser (and, read-only, every
-file in `~/ai-vault-data` when it exists), the RPC client against a local mock server
-(2xx, 422, 401, 413, 429). Run this on every change.
-
-**Heavy lane** (`Tests/HeavyTests`, `LEARNER_HEAVY=1`) needs the real world: screenpipe
-on `:3030` (read-only queries), and with `LEARNER_REMOTE_E2E=1` the deployed GrowthBook
-design over `ssh ovh` (read-only). Each suite skips, with the reason, when its
-dependency is missing.
+- **Light** (`Tests/LightTests`) runs in parallel against fixtures, injected clocks and
+  in-process fakes. No network, no real processes beyond `/bin` helpers.
+- **Medium** (`Tests/MediumTests`) runs one test at a time: fake `ai-vault` and `claude`
+  scripts (including ones that hang and ignore SIGTERM), the real capture scripts in a
+  stubbed sandbox, `tool preflight` and the coach poller against `HTTPStandIn` servers.
+- Light and medium point the app's data folders at a throwaway directory
+  (`LEARNER_DATA_DIR`, `AI_VAULT_DATA`), so they never touch `~/.ai-aggregator` or
+  `~/ai-vault-data`. No test waits on a real schedule; each finishes within 2 minutes.
+- **Heavy** (`Tests/HeavyTests`, `LEARNER_HEAVY=1`) needs the real world: screenpipe on
+  `:3030` (read-only queries), the real export and ledger, one ChatGPT read, learner-server
+  health, and with `LEARNER_REMOTE_E2E=1` the deployed GrowthBook design over `ssh ovh`
+  (read-only). Each suite skips, with the reason, when its dependency is missing. The live
+  wristband test needs `LEARNER_HEAVY_PAVLOK=1`; the audio-latency test (which feeds speech
+  to screenpipe) needs `LEARNER_HEAVY_AUDIO=1`.
 
 Two heavy suites really do stop and restart the capture stack and the installed app,
 and stay skipped even in the heavy lane unless you opt in a second time:
@@ -276,9 +268,9 @@ If Bluetooth is not ready, charge/wake the band and choose **Scan & Connect via
 Bluetooth**. For Pavlok 3, USB-C power turns it on automatically. Temporarily
 disconnecting its phone Bluetooth connection can help isolate connection issues.
 
-Validation: `python3 -m unittest discover -s tests -p 'test_pavlok*.py'` checks
+Validation: `scripts/test.sh light` (the Pavlok suites) checks
 menu wiring and executes the production packet encoders. The opt-in live test
-in `tests/heavy/test_pavlok_test_fire_live.py` sends one 25% vibration and requires
+in `Tests/HeavyTests` (Pavlok live suite) sends one 25% vibration and requires
 a Bluetooth acknowledgement; it never tests zap automatically.
 
 Pavlok requests and results are also persisted in the existing `habit_events`

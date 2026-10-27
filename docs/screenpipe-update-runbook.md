@@ -17,7 +17,7 @@ text; ids, timestamps, versions and statuses are all you need.
 Record each as ✓ or ✗ with the evidence.
 
 1. **Learner Desktop and its helpers.** `launchctl list | grep learner-desktop` shows a pid;
-   `pgrep -fl learner-watcher.js` and `pgrep -fl autossh` each find one process.
+   `pgrep -fl autossh` finds one process (the GrowthBook tunnel).
 2. **learner-server.** `curl -s -m 5 https://dev.biztoolz.app/learner-api/api/health` answers;
    `nc -z 127.0.0.1 3200` (GrowthBook, the tunnel's only forward) succeeds; and
    `grep '^\[Outbox\]' ~/.ai-aggregator/logs/menubar.log | tail -3` shows sends succeeding,

@@ -81,9 +81,7 @@ and included once in each of the saved GrowthBook fact and exposure queries.
 ## Rerun and evidence
 
 ```sh
-AIAGG_HEAVY=1 AIAGG_AUDIO_E2E=1 \
-AIAGG_AUDIO_E2E_DIR="$PWD/data/verification/audio-$(date +%Y%m%d-%H%M%S)" \
-python3 tests/heavy/test_speaking_coach_audio_latency.py -v
+LEARNER_HEAVY=1 LEARNER_HEAVY_AUDIO=1 scripts/test.sh heavy --filter "audio to warning latency"
 ```
 
 Requires the running configured Screenpipe engine, `say`, `ffmpeg`, and `swiftc`.

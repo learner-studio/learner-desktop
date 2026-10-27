@@ -8,9 +8,7 @@ that boundary and was only a panel preview, not a meeting-pipeline test.)
 ## Local integration suite
 
 ```sh
-AIAGG_HEAVY=1 \
-AIAGG_COACH_E2E_DIR="$PWD/data/verification/coach-$(date +%Y%m%d-%H%M%S)" \
-python3 tests/heavy/test_speaking_coach_meeting_e2e.py -v
+LEARNER_HEAVY=1 scripts/test.sh heavy --filter "Coach, heavy"
 ```
 
 The four cases use the production Swift monitor, panel and logger:
@@ -39,7 +37,7 @@ Build failures, child-process failures, missing panels, missing rows, wrong flag
 wrong thresholds, missing backfill traffic and duplicate turns fail the test.
 Only missing explicit opt-in or missing Swift skips it.
 
-For human visibility confirmation, add `AIAGG_COACH_E2E_INTERACTIVE=1`. The test
+(Not yet ported to the Swift suite:) for human visibility confirmation, the old Python suite took `AIAGG_COACH_E2E_INTERACTIVE=1`. The test
 holds the visible warning until `<evidence>/live-warning/release` exists, with a
 three-minute maximum. Confirm the text on the actual display, then create that
 file. `panel.json` records AppKit visibility and opacity; it is not a substitute
