@@ -42,9 +42,9 @@ private func builtApp() throws -> String {
     @Test func thePollerFollowsACallThroughAnOutage() async throws {
         let data = FakeScreenpipeData()
         data.meetings = [["meeting_app": "Zoom", "title": "Planning", "meeting_end": NSNull()]]
-        let server = try StandInServer { req in StandInServer.json(200, data.answer(req.path, req.body)) }
+        let server = try HTTPStandIn { req in HTTPStandIn.Response.json(200, data.answer(req.path, req.body)) }
         defer { server.stop() }
-        let api = ScreenpipeAPI(base: server.baseURL, timeout: 0.5)
+        let api = ScreenpipeAPI(base: server.url, timeout: 0.5)
         let (logger, db) = scratchLogger()
         let settings = CoachSettings(defaults: UserDefaults(suiteName: "coach-medium-\(UUID().uuidString)")!)
         let coach = SpeakingCoach(settings: settings, speech: ScreenpipeSpeechSource(api: api), calls: ScreenpipeCallSource(api: api),
@@ -83,10 +83,10 @@ private func builtApp() throws -> String {
     /// A screenpipe that accepts and never answers: each poll times out, and polls never stack.
     @MainActor
     @Test func aStuckScreenpipeTimesOutAndPollsDoNotPileUp() async throws {
-        let server = try StandInServer { _ in StandInServer.json(200, [Any]()) }
+        let server = try HTTPStandIn { _ in HTTPStandIn.Response.json(200, [Any]()) }
         defer { server.stop() }
         server.mode = .hang
-        let api = ScreenpipeAPI(base: server.baseURL, timeout: 0.6)
+        let api = ScreenpipeAPI(base: server.url, timeout: 0.6)
         let calls = ScreenpipeCallSource(api: api)
         var answers: [CallPoll] = []
         let began = Date()
@@ -103,8 +103,8 @@ private func builtApp() throws -> String {
     /// Nothing listening at all: every poll fails fast, is counted, and the coach carries on.
     @MainActor
     @Test func screenpipeDownIsCountedAndHarmless() async throws {
-        let gone = try StandInServer { _ in StandInServer.json(200, [Any]()) }
-        let url = gone.baseURL
+        let gone = try HTTPStandIn { _ in HTTPStandIn.Response.json(200, [Any]()) }
+        let url = gone.url
         gone.stop()
         try await Task.sleep(nanoseconds: 100_000_000)
         let api = ScreenpipeAPI(base: url, timeout: 0.5)

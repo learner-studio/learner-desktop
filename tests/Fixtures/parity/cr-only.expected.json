@@ -1,0 +1,51 @@
+{
+ "filePath": "/x/ai-vault-data/claude/conversations/conv-cr/conversation.md",
+ "documentId": "ai-vault:claude:conv-cr",
+ "conversationId": "conv-cr",
+ "provider": "claude",
+ "contentSha256": "2f0685ee60100c56db4555a42ee17a80c9fec77407e8a73d015d4a816bfcd15b",
+ "stats": {
+  "sections": 2,
+  "user": 1,
+  "assistant": 1,
+  "skipped": 0,
+  "skippedByReason": {},
+  "truncated": 0,
+  "attachments": 0
+ },
+ "problems": [],
+ "document": {
+  "documentId": "ai-vault:claude:conv-cr",
+  "source": "claude-ai",
+  "title": "A fictional chat",
+  "occurredAt": "2024-06-22T12:45:56.025Z",
+  "messages": [
+   {
+    "role": "user",
+    "text": "Old Mac endings",
+    "at": "2025-01-01T10:00:00Z"
+   },
+   {
+    "role": "assistant",
+    "text": "Reply"
+   }
+  ],
+  "metadata": {
+   "exporter": "ai-vault",
+   "provider": "claude",
+   "conversationId": "conv-cr",
+   "contentSha256": "2f0685ee60100c56db4555a42ee17a80c9fec77407e8a73d015d4a816bfcd15b",
+   "createdAt": "2024-06-22T12:45:56.025Z",
+   "updatedAt": "2024-06-22T12:46:03.820Z",
+   "headerMessageCount": 2,
+   "sectionCount": 2,
+   "messageCount": 2,
+   "userMessageCount": 1,
+   "assistantMessageCount": 1,
+   "skippedMessageCount": 0,
+   "skippedByReason": {},
+   "truncatedMessageCount": 0,
+   "attachmentCount": 0
+  }
+ }
+}

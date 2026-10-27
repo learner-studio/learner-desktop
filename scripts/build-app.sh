@@ -8,7 +8,6 @@ APP_NAME="Learner Desktop.app"
 OUT_DIR="${OUT_DIR:-${PROJECT_DIR}/menu-bar-app}"
 BUNDLE_DIR="${OUT_DIR}/${APP_NAME}"
 TARGET_APP="/Users/benpollack/Applications/${APP_NAME}"
-BUN_BIN="${HOME}/.bun/bin/bun"
 
 echo "Compiling Swift menu bar binary..."
 (cd "${PROJECT_DIR}" && swift build -c release --product LearnerDesktop)
@@ -22,15 +21,12 @@ mkdir -p "${BUNDLE_DIR}/Contents/Resources"
 cp "${PROJECT_DIR}/menu-bar-app/learner-desktop" "${BUNDLE_DIR}/Contents/MacOS/"
 chmod +x "${BUNDLE_DIR}/Contents/MacOS/learner-desktop"
 
-# The app runs the SSH tunnel and the transcript watcher itself, from its own bundle.
-# They used to be separate /bin/bash LaunchAgents, which Login Items lists as "bash"
-# from an unknown developer -- and once switched off there they silently stopped
-# starting at login. The watcher is compiled to one self-contained file so the app
-# never runs code out of ~/Documents.
-echo "Bundling the tunnel and transcript watcher..."
+# The app runs the SSH tunnel itself, from its own bundle: a separate /bin/bash
+# LaunchAgent shows in Login Items as "bash" from an unknown developer, and once switched
+# off there it silently stopped starting at login.
+echo "Bundling the tunnel script..."
 cp "${PROJECT_DIR}/scripts/tunnel.sh" "${BUNDLE_DIR}/Contents/Resources/tunnel.sh"
 chmod +x "${BUNDLE_DIR}/Contents/Resources/tunnel.sh"
-"${BUN_BIN}" build "${PROJECT_DIR}/src/cli.ts" --target=bun --outfile "${BUNDLE_DIR}/Contents/Resources/learner-watcher.js"
 
 # CFBundleIdentifier deliberately keeps its pre-rename value: TCC grants (Bluetooth) and
 # the saved Pavlok settings in UserDefaults are keyed to it.

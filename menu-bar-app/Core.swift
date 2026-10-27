@@ -10,6 +10,17 @@ import CommonCrypto
 // one log format (Log), one retry policy (Backoff), one way to run another program
 // (ChildProcess), one way to run recurring work (Job) and one clock (Scheduler).
 
+// MARK: - Paths
+
+/// Where the app keeps its data. One place, so the test lanes can move it all to a
+/// throwaway folder (LEARNER_DATA_DIR, AI_VAULT_DATA) and never touch the real files.
+enum Paths {
+    static let data = ProcessInfo.processInfo.environment["LEARNER_DATA_DIR"] ?? NSHomeDirectory() + "/.ai-aggregator"
+    static let logs = data + "/logs"
+    /// ai-vault's export (its own default location).
+    static let vault = ProcessInfo.processInfo.environment["AI_VAULT_DATA"] ?? NSHomeDirectory() + "/ai-vault-data"
+}
+
 // MARK: - Logging
 
 /// Every line in menubar.log: `2026-10-27 14:00:00 WARN  [Export] chatgpt: stuck, stopped`.
@@ -32,7 +43,7 @@ func print(_ items: Any..., separator: String = " ", terminator: String = "\n") 
 }
 
 enum AppLog {
-    static let path = NSHomeDirectory() + "/.ai-aggregator/logs/menubar.log"
+    static let path = Paths.logs + "/menubar.log"
     static let maxBytes: UInt64 = 10_000_000
     static let repeatWindow: TimeInterval = 600
 
@@ -318,7 +329,7 @@ final class Job {
 
     static private(set) var all: [Job] = []
     /// Where job state is kept; tests point it at a temp directory.
-    static var stateDir = NSHomeDirectory() + "/.ai-aggregator/jobs"
+    static var stateDir = Paths.data + "/jobs"
 
     let name: String
     let log: Log

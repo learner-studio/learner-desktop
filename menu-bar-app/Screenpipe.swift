@@ -37,30 +37,66 @@ enum CaptureEnvironment {
 /// screenpipe updates itself (the vendor forces auto-update on), and updates have broken
 /// this setup before: 2.7.34 added an account sign-in, and 2.7.116 converted the database
 /// and came back with capture off. Each version is also a new phase of the experiment.
-/// When the installed version changes, this starts a fresh headless Claude Code session
-/// that follows docs/screenpipe-update-runbook.md under the permissions in
-/// config/screenpipe-update-agent.json, and logs the run.
+/// When the installed version changes (and has held still for `settleSeconds`), the
+/// "UpdateCheck" job starts a fresh headless Claude Code session that follows
+/// docs/screenpipe-update-runbook.md under the permissions in
+/// config/screenpipe-update-agent.json, bounded by ChildProcess (30 min, then SIGTERM and
+/// SIGKILL), and logs the run: a transcript, a report and a line in index.log.
 final class ScreenpipeUpdateCheck {
+    struct Config {
+        var jobName = "UpdateCheck"
+        /// How often the installed version is read.
+        var period: TimeInterval = 60
+        var firstRun: TimeInterval = 30
+        /// An update swaps the app bundle first, the engine only after a relaunch, and may then
+        /// spend minutes converting storage. Act once the version has held still this long.
+        var settleSeconds: TimeInterval = 600
+        var timeout: TimeInterval = 1800
+        var killGrace: TimeInterval = 10
+        /// Ceiling on what one unattended run may spend.
+        var maxBudgetUSD = "5"
+        var projectDir = "/Users/benpollack/code/learner-desktop"
+        var claudePath = NSHomeDirectory() + "/.local/bin/claude"
+        var statePath = Paths.data + "/screenpipe-update-check.json"
+        /// Optional long-lived token from `claude setup-token`, saved by the owner (chmod 600).
+        var tokenPath = Paths.data + "/claude-oauth-token"
+        var logDir = Paths.logs + "/screenpipe-update-checks"
+        /// Transcripts and reports kept (oldest removed first).
+        var keepRuns = 30
+        var installedVersion: () -> String? = ScreenpipeUpdateCheck.installedAppVersion
+        /// In every run's command line: finds a run orphaned by a crash of this app.
+        var orphanMarker = "docs/screenpipe-update-runbook.md"
+    }
+
+    enum Decision: Equatable {
+        /// First sighting since this was installed: remembered, not a run.
+        case baseline(String)
+        /// Changed, waiting for it to settle.
+        case waiting(String)
+        case run(reason: String)
+        case nothing
+    }
+
     static let shared = ScreenpipeUpdateCheck()
 
-    /// An update swaps the app bundle first, the engine only after a relaunch, and may then
-    /// spend minutes converting storage. Act once the version has held still this long.
-    static let settleSeconds: TimeInterval = 600
-    static let timeoutSeconds: TimeInterval = 1800
-    /// Ceiling on what one unattended run may spend.
-    static let maxBudgetUSD = "5"
-
-    private let projectDir = "/Users/benpollack/code/learner-desktop"
-    private let statePath = NSHomeDirectory() + "/.ai-aggregator/screenpipe-update-check.json"
-    /// Optional long-lived token from `claude setup-token`, saved by the owner (chmod 600).
-    private let tokenPath = NSHomeDirectory() + "/.ai-aggregator/claude-oauth-token"
-    let logDir = NSHomeDirectory() + "/.ai-aggregator/logs/screenpipe-update-checks"
-    private var indexPath: String { logDir + "/index.log" }
+    let config: Config
+    private(set) var job: Job!
+    private let log = Log("UpdateCheck")
+    private let lock = NSLock()
     private var pending: (version: String, since: Date)?
-    private var running: Process?
-    private var transcriptHandle: FileHandle?
+    private var manualReason: String?
+    private var current: Process?
+    private var orphansChecked = false
 
-    var isRunning: Bool { running != nil }
+    init(config: Config = Config()) {
+        self.config = config
+        job = Job(config.jobName, period: config.period, firstRun: config.firstRun,
+                  backoff: Backoff(base: 600, max: 6 * 3600), quiet: true) { [weak self] _ in self?.runOnce() ?? .idle }
+    }
+
+    var logDir: String { config.logDir }
+    var isRunning: Bool { lock.withLock { current != nil || manualReason != nil } }
+    private var indexPath: String { config.logDir + "/index.log" }
 
     static func installedAppVersion() -> String? {
         let plist = URL(fileURLWithPath: "/Applications/screenpipe.app/Contents/Info.plist")
@@ -71,145 +107,185 @@ final class ScreenpipeUpdateCheck {
 
     /// The most recent line of the run index, for the menu.
     var lastRunSummary: String? {
-        guard let text = try? String(contentsOfFile: indexPath, encoding: .utf8) else { return nil }
-        return text.split(separator: "\n").last.map { String($0.prefix(60)) }
+        for path in [indexPath, indexPath.replacingOccurrences(of: ".log", with: ".1.log")] {
+            guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
+            if let last = text.split(separator: "\n").last { return String(last.prefix(60)) }
+        }
+        return nil
     }
 
-    /// Called with the installed screenpipe version on every status poll.
-    func observe(appVersion: String) {
-        guard running == nil else { return }
-        guard let handled = handledVersion() else {
-            // First sighting since this was installed: a baseline, not an update.
-            saveHandled(appVersion)
-            return
-        }
-        guard appVersion != handled else {
-            pending = nil
-            return
-        }
-        if pending?.version != appVersion {
-            pending = (appVersion, Date())
-            print("[UpdateCheck] screenpipe \(handled) -> \(appVersion); checking once it has settled")
-            fflush(stdout)
-            return
-        }
-        guard let since = pending?.since, Date().timeIntervalSince(since) >= Self.settleSeconds else { return }
-        pending = nil
-        // Once per version, even if the run fails: a rerun is one menu click away.
-        saveHandled(appVersion)
-        start(reason: "screenpipe updated from \(handled) to \(appVersion)")
-    }
+    /// The tray's poll used to drive this; the job reads the version itself now. A tick
+    /// that is not due does nothing.
+    func observe(appVersion: String) { job.tick() }
 
+    /// "Run screenpipe Update Check Now".
     func start(reason: String) {
-        guard running == nil else { return }
-        try? FileManager.default.createDirectory(atPath: logDir, withIntermediateDirectories: true)
+        lock.withLock { manualReason = reason }
+        job.kick("requested from the menu")
+    }
+
+    /// On quit: a session left running would outlive the app.
+    func stopForQuit() {
+        if let p = lock.withLock({ current }), p.isRunning {
+            log.info("stopping the running check for quit")
+            ChildProcess.stop(p, grace: 0)
+        }
+    }
+
+    /// Whether `version` calls for a run. Remembers the version it acts on (once per
+    /// version, even if the run fails: a rerun is one menu click away).
+    func decide(version: String?, now: Date = Date()) -> Decision {
+        guard let version = version else { return .nothing }
+        guard let handled = handledVersion() else {
+            saveHandled(version)
+            return .baseline(version)
+        }
+        guard version != handled else {
+            lock.withLock { pending = nil }
+            return .nothing
+        }
+        let since: Date = lock.withLock {
+            if pending?.version != version {
+                pending = (version, now)
+                log.info("screenpipe \(handled) -> \(version); checking once it has settled")
+            }
+            return pending?.since ?? now
+        }
+        guard now.timeIntervalSince(since) >= config.settleSeconds else { return .waiting(version) }
+        lock.withLock { pending = nil }
+        saveHandled(version)
+        return .run(reason: "screenpipe updated from \(handled) to \(version)")
+    }
+
+    /// The job body.
+    func runOnce() -> Job.Outcome {
+        if !lock.withLock({ orphansChecked }) {
+            ChildProcess.killOrphans(matching: config.orphanMarker, log: log)
+            lock.withLock { orphansChecked = true }
+        }
+        let manual: String? = lock.withLock {
+            defer { manualReason = nil }
+            return manualReason
+        }
+        if let reason = manual { return run(reason: reason) }
+        switch decide(version: config.installedVersion()) {
+        case let .run(reason): return run(reason: reason)
+        case let .baseline(v):
+            log.info("screenpipe \(v) noted as the baseline")
+            return .idle
+        case .waiting, .nothing: return .idle
+        }
+    }
+
+    /// One headless Claude Code session, bounded, logged.
+    func run(reason: String) -> Job.Outcome {
+        let fm = FileManager.default
+        do { try fm.createDirectory(atPath: config.logDir, withIntermediateDirectories: true) } catch {
+            log.error("cannot create \(config.logDir): \(error.localizedDescription)")
+            return .failed("cannot create the log folder")
+        }
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd'T'HHmmss"
         let stamp = formatter.string(from: Date())
-        let transcript = "\(logDir)/\(stamp).jsonl"
-        FileManager.default.createFile(atPath: transcript, contents: nil)
-        guard let out = FileHandle(forWritingAtPath: transcript) else { return }
+        let transcript = "\(config.logDir)/\(stamp).jsonl"
 
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: NSHomeDirectory() + "/.local/bin/claude")
-        p.currentDirectoryURL = URL(fileURLWithPath: projectDir)
-        p.arguments = [
+        var env = ChildProcess.toolEnvironment
+        // An interactive `claude auth login` sits in a keychain slot keyed by $USER (a shell
+        // without USER saves it elsewhere) and can expire between updates. A long-lived
+        // token, when saved, keeps unattended runs from depending on either. Tokens contain
+        // no whitespace; a copy across a terminal line wrap adds some.
+        if fm.fileExists(atPath: config.tokenPath) {
+            do {
+                let token = try String(contentsOfFile: config.tokenPath, encoding: .utf8)
+                    .components(separatedBy: .whitespacesAndNewlines).joined()
+                if !token.isEmpty { env["CLAUDE_CODE_OAUTH_TOKEN"] = token }
+            } catch {
+                log.warn("cannot read the saved Claude token file: \(error.localizedDescription)")
+            }
+        }
+        let args = [
             "-p", "\(reason) (detected by Learner Desktop). Follow docs/screenpipe-update-runbook.md "
                 + "in this repository exactly and end with the report it describes.",
             "--output-format", "stream-json", "--verbose",
-            "--settings", projectDir + "/config/screenpipe-update-agent.json",
-            "--max-budget-usd", Self.maxBudgetUSD,
+            "--settings", config.projectDir + "/config/screenpipe-update-agent.json",
+            "--max-budget-usd", config.maxBudgetUSD,
         ]
-        var env = ProcessInfo.processInfo.environment
-        let home = NSHomeDirectory()
-        env["PATH"] = "\(home)/.local/bin:\(home)/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-        // An interactive `claude auth login` sits in a keychain slot keyed by $USER (a shell
-        // without USER saves it elsewhere) and can expire between updates. A long-lived
-        // token, when saved, keeps unattended runs from depending on either.
-        // Tokens contain no whitespace; a copy across a terminal line wrap adds some.
-        if let saved = try? String(contentsOfFile: tokenPath, encoding: .utf8)
-            .components(separatedBy: .whitespacesAndNewlines).joined(), !saved.isEmpty {
-            env["CLAUDE_CODE_OAUTH_TOKEN"] = saved
-        }
-        p.environment = env
-        p.standardOutput = out
-        p.standardError = out
-        p.terminationHandler = { [weak self] proc in
-            DispatchQueue.main.async { self?.finished(proc, stamp: stamp, reason: reason) }
-        }
-        do {
-            try p.run()
-        } catch {
-            try? out.close()
-            print("[UpdateCheck] Could not start claude: \(error.localizedDescription)")
-            fflush(stdout)
-            appendIndex("\(stamp)  STATUS: NOT STARTED (\(error.localizedDescription))  \(reason)")
-            return
-        }
-        running = p
-        transcriptHandle = out
-        print("[UpdateCheck] Started a Claude Code session: \(reason). Transcript: \(transcript)")
-        fflush(stdout)
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.timeoutSeconds) { [weak self] in
-            guard let self = self, self.running === p else { return }
-            print("[UpdateCheck] Still running after \(Int(Self.timeoutSeconds / 60)) min; stopping it")
-            fflush(stdout)
-            p.terminate()
-            // Ignoring SIGTERM must not leave a check "running" forever.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
-                if p.isRunning { kill(p.processIdentifier, SIGKILL) }
-            }
-        }
+        log.info("starting a Claude Code session: \(reason). Transcript: \(transcript)")
+        // ChildProcess has no working directory: sh changes into the project and execs claude.
+        let r = ChildProcess.run("/bin/sh", ["-c", "cd \"$0\" && exec \"$@\"", config.projectDir, config.claudePath] + args,
+                                 timeout: config.timeout, env: env, stderr: true, logFile: transcript, grace: config.killGrace,
+                                 onStart: { [weak self] p in self?.lock.withLock { self?.current = p } })
+        lock.withLock { current = nil }
+        let outcome = finished(r, stamp: stamp, reason: reason)
+        prune()
+        return outcome
     }
 
-    private func finished(_ proc: Process, stamp: String, reason: String) {
-        running = nil
-        try? transcriptHandle?.close()
-        transcriptHandle = nil
+    private func finished(_ r: ChildProcess.Result, stamp: String, reason: String) -> Job.Outcome {
         // stream-json ends with one "result" event carrying the report, cost and session id.
-        let lines = (try? String(contentsOfFile: "\(logDir)/\(stamp).jsonl", encoding: .utf8))?
-            .split(separator: "\n") ?? []
-        let events = lines.compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+        let events = r.output.split(separator: "\n").compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
         let result = events.last { $0["type"] as? String == "result" }
         let session = (result?["session_id"] ?? events.first?["session_id"]) as? String ?? "unknown"
         let cost = (result?["total_cost_usd"] as? NSNumber).map { String(format: "$%.2f", $0.doubleValue) } ?? "$?"
-        let report = result?["result"] as? String ?? "No report: claude exited with status \(proc.terminationStatus)."
-        let reportPath = "\(logDir)/\(stamp).md"
-        try? "# \(reason)\n\nSession: \(session) (`claude --resume \(session)` from the project folder)\nCost: \(cost)\n\n\(report)\n"
-            .write(toFile: reportPath, atomically: true, encoding: .utf8)
+        let exit = r.stopped ?? "exit \(r.status.map(String.init) ?? "?")"
+        let report = result?["result"] as? String ?? "No report: claude \(exit)."
+        let reportPath = "\(config.logDir)/\(stamp).md"
+        do {
+            try "# \(reason)\n\nSession: \(session) (`claude --resume \(session)` from the project folder)\nCost: \(cost)\n\n\(report)\n"
+                .write(toFile: reportPath, atomically: true, encoding: .utf8)
+        } catch {
+            log.error("cannot write \(reportPath): \(error.localizedDescription)")
+        }
         let reportLines = report.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
         let status: String
-        if result?["is_error"] as? Bool == true {
+        if let stopped = r.stopped {
+            status = "STATUS: RUN FAILED (\(stopped))"
+        } else if result?["is_error"] as? Bool == true {
             // e.g. "Failed to authenticate: OAuth session expired and could not be refreshed"
             status = "STATUS: RUN FAILED (\((reportLines.first ?? "").prefix(100)))"
         } else {
             // Asked to lead with it, but a session may open with a one-line summary first.
             status = reportLines.first(where: { $0.hasPrefix("STATUS:") }) ?? "STATUS: NO REPORT"
         }
-        appendIndex("\(stamp)  \(status)  session \(session)  \(cost)  \(reason)")
-        print("[UpdateCheck] Finished (exit \(proc.terminationStatus)): \(status), session \(session), \(cost). Report: \(reportPath)")
-        fflush(stdout)
+        LogFile.append(indexPath, "\(stamp)  \(status)  session \(session)  \(cost)  \(reason)\n")
+        log.info("finished (\(exit)): \(status), session \(session), \(cost). Report: \(reportPath)")
+        if status.hasPrefix("STATUS: RUN FAILED") || status == "STATUS: NO REPORT" { return .failed(status) }
+        return .ok(status)
     }
 
-    private func appendIndex(_ line: String) {
+    /// Keeps the newest `keepRuns` transcripts and reports.
+    private func prune() {
         let fm = FileManager.default
-        if !fm.fileExists(atPath: indexPath) { fm.createFile(atPath: indexPath, contents: nil) }
-        guard let index = FileHandle(forWritingAtPath: indexPath) else { return }
-        index.seekToEndOfFile()
-        index.write(Data((line + "\n").utf8))
-        try? index.close()
+        let names: [String]
+        do { names = try fm.contentsOfDirectory(atPath: config.logDir) } catch {
+            log.warn("cannot list \(config.logDir): \(error.localizedDescription)")
+            return
+        }
+        let stamps = Set(names.filter { $0.hasSuffix(".jsonl") || $0.hasSuffix(".md") }
+            .map { ($0 as NSString).deletingPathExtension }).sorted()
+        for old in stamps.dropLast(config.keepRuns) {
+            for ext in ["jsonl", "md"] where fm.fileExists(atPath: "\(config.logDir)/\(old).\(ext)") {
+                do { try fm.removeItem(atPath: "\(config.logDir)/\(old).\(ext)") }
+                catch { log.warn("cannot remove the old run \(old).\(ext): \(error.localizedDescription)") }
+            }
+        }
     }
 
     private func handledVersion() -> String? {
-        guard let data = FileManager.default.contents(atPath: statePath),
-              let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        guard let data = FileManager.default.contents(atPath: config.statePath) else { return nil }
+        guard let state = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            log.warn("\(config.statePath) is unreadable; treating this version as the baseline")
+            return nil
+        }
         return state["handled_app_version"] as? String
     }
 
     private func saveHandled(_ version: String) {
-        let state = ["handled_app_version": version]
-        if let data = try? JSONSerialization.data(withJSONObject: state) {
-            FileManager.default.createFile(atPath: statePath, contents: data)
+        do {
+            let data = try JSONSerialization.data(withJSONObject: ["handled_app_version": version])
+            try data.write(to: URL(fileURLWithPath: config.statePath), options: .atomic)
+        } catch {
+            log.error("cannot save \(config.statePath): \(error.localizedDescription)")
         }
     }
 }

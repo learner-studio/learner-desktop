@@ -24,6 +24,8 @@ struct AppStatus: Equatable {
     var claudeChats = 0
     var outboxDepth = 0
     var trialCount = 0
+    /// Chats the server refused (parked in the archive ledger).
+    var archiveParked = 0
     /// Lasting problems from jobs, helpers and the trial database.
     var problems: [Problem] = []
 
@@ -140,7 +142,7 @@ enum StatusProbe {
     static let log = Log("Status")
     static var screenpipeURL = "http://localhost:3030"
     static var serverHealthURL = LearnerAPI.baseURL + "/api/health"
-    static var vaultRoot = NSHomeDirectory() + "/ai-vault-data"
+    static var vaultRoot = Paths.vault
     static let audioDevices = ["MacBook Pro Microphone (input)", "System Audio (output)"]
 
     /// Blocking; run by the Status job.
@@ -154,6 +156,7 @@ enum StatusProbe {
         s.claudeChats = count("\(vaultRoot)/claude/conversations")
         s.outboxDepth = HabitEventLogger.shared.getUnsyncedCount()
         s.trialCount = HabitEventLogger.shared.getTotalTrialCount()
+        s.archiveParked = Archive.shared.parkedCount
         s.problems = Job.all.compactMap { j in j.problem.map { Problem(source: j.name, text: $0) } }
             + helpers.compactMap { h in h.problem.map { Problem(source: "Helper:\(h.name)", text: $0) } }
             + (HabitEventLogger.shared.problem.map { [Problem(source: "Trials", text: $0)] } ?? [])

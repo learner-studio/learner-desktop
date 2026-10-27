@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import Testing
 @testable import LearnerDesktop
+import TestSupport
 
 // The coach against the live machine. Read-only towards screenpipe; the wristband only
 // with explicit consent. Each test skips, with its reason, when its dependency is missing.

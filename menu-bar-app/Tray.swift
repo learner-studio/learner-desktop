@@ -22,18 +22,17 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private lazy var statusJob = Job("Status", period: 8, backoff: Backoff(base: 8, max: 60), quiet: true) { [weak self] _ in
         guard let self = self else { return .idle }
         let previous = DispatchQueue.main.sync { self.status }
-        let next = StatusProbe.collect(previous: previous, helpers: [self.tunnel, self.watcher], appAgentPlist: self.appAgentPlist)
+        let next = StatusProbe.collect(previous: previous, helpers: [self.tunnel], appAgentPlist: self.appAgentPlist)
         self.ensureScreenpipeSkipsSignIn()
         if let appVersion = ScreenpipeUpdateCheck.installedAppVersion() {
             CaptureEnvironment.screenpipeAppVersion = appVersion
-            DispatchQueue.main.async { ScreenpipeUpdateCheck.shared.observe(appVersion: appVersion) }
         }
         DispatchQueue.main.async { self.apply(next) }
         return .ok("collected")
     }
 
     /// The app's own LaunchAgent. If it is switched off in System Settings -> Login Items,
-    /// launchd skips it at login -- and the tunnel and watcher with it -- so a manual start
+    /// launchd skips it at login -- and the tunnel with it -- so a manual start
     /// does not survive the next reboot. Only the owner can re-allow it there.
     let appAgentPlist = NSHomeDirectory() + "/Library/LaunchAgents/com.benpollack.learner-desktop.plist"
 
@@ -42,11 +41,6 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         name: "tunnel", executable: "/bin/bash",
         arguments: [URL(fileURLWithPath: Bundle.main.resourcePath ?? "").appendingPathComponent("tunnel.sh").path],
         marker: "3200:127.0.0.1:3200")
-    lazy var watcher = ManagedHelper(
-        name: "watcher", executable: "/Users/benpollack/.bun/bin/bun",
-        arguments: [URL(fileURLWithPath: Bundle.main.resourcePath ?? "").appendingPathComponent("learner-watcher.js").path,
-                    "watch"],
-        marker: "learner-watcher.js")
 
     /// launchctl bootout / kickstart -k and stop-capture.sh deliver SIGTERM. Route it
     /// through NSApplication.terminate so it takes the same clean path as menu Quit
@@ -88,9 +82,8 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         setScreenpipeSkipFlag()
 
-        // Tunnel first: the watcher's startup health check goes through it.
+        // Only GrowthBook's UI still needs the tunnel; everything else is HTTPS.
         tunnel.start()
-        watcher.start()
 
         VaultExport.shared.onFinished = { [weak self] in self?.statusJob.kick("export finished") }
         rebuildMenu()
@@ -109,10 +102,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         _ = statusJob
         talkMonitor.start()
-        Scheduler.every(8, "export+outbox") { [weak self] in
-            VaultExport.shared.tick()
-            OutboxSender.shared.tick(heartbeat: { self?.heartbeatInput() ?? [:] })
-        }
+        ChatAndOutboxJobs.install(heartbeat: { [weak self] in self?.heartbeatInput() ?? [:] })
         Scheduler.start()
     }
 
@@ -166,7 +156,8 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let serverState = !status.serverReachable ? "🔴 unreachable" : outbox.keyProblem ? "🔑 no working device key" : "🟢 reachable"
         add("☁️ learner-server: \(serverState)")
         add("   └─ 📤 \(status.outboxDepth) queued | last: \(outbox.lastStatus)"
-            + " | Tunnel \(tunnel.isRunning ? "🟢" : "🔴") | Watcher \(watcher.isRunning ? "🟢" : "🔴")")
+            + " | Tunnel \(tunnel.isRunning ? "🟢" : "🔴")")
+        if status.archiveParked > 0 { add("   ⚠️ \(status.archiveParked) chat(s) refused by the server (see menubar.log)") }
         for p in status.problems { add("   ⚠️ \(p.source): \(p.text)") }
         add("   ⚡ Send Queued Trials Now", #selector(triggerHabitSync))
         if status.loginItemBlocked {
@@ -202,7 +193,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         trouble.autoenablesItems = false
         _ = add("Open AI Vault Folder...", #selector(openVaultFolder), to: trouble)
         _ = add("Open Screenpipe Recordings...", #selector(openScreenpipeData), to: trouble)
-        _ = add("View Watcher Log...", #selector(openWatcherLogs), to: trouble)
+        _ = add("View App Log...", #selector(openAppLog), to: trouble)
         _ = add("View screenpipe Update Checks...", #selector(openUpdateCheckLogs), to: trouble)
         trouble.addItem(NSMenuItem.separator())
         let checking = ScreenpipeUpdateCheck.shared.isRunning
@@ -211,7 +202,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let last = ScreenpipeUpdateCheck.shared.lastRunSummary {
             _ = add("   └─ Last check: \(last)", to: trouble)
         }
-        _ = add("Restart Tunnel & Watcher", #selector(restartAggregatorServices), to: trouble)
+        _ = add("Restart Tunnel", #selector(restartAggregatorServices), to: trouble)
         let troubleParent = NSMenuItem(title: "Troubleshooting", action: nil, keyEquivalent: "")
         troubleParent.submenu = trouble
         statusMenu.addItem(troubleParent)
@@ -239,26 +230,11 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
             "captureState": captureState,
             "outboxDepth": current.outboxDepth,
             "lastSentAt": OutboxSender.shared.lastSentAt.map { iso.string(from: $0) } as Any? ?? NSNull(),
-            "lastVaultExportAt": lastVaultExport().map { iso.string(from: $0) } as Any? ?? NSNull(),
+            "lastVaultExportAt": VaultExport.shared.lastRun.map { iso.string(from: $0) } as Any? ?? NSNull(),
             "detail": ["capture": StatusProbe.describe(current.capture), "outboxStatus": OutboxSender.shared.lastStatus,
                        "problems": current.problems.map { "\($0.source): \($0.text)" },
                        "capturePhase": CaptureEnvironment.capturePhase as Any? ?? NSNull()],
         ]
-    }
-
-    /// Newest conversation.md under ~/ai-vault-data: when ai-vault last exported anything.
-    /// Lets the server tell "nothing exported" from "sync broken".
-    func lastVaultExport() -> Date? {
-        let fm = FileManager.default
-        var newest: Date?
-        for provider in ["chatgpt", "claude", "gemini"] {
-            let dir = homeDir + "/ai-vault-data/\(provider)/conversations"
-            for convo in (try? fm.contentsOfDirectory(atPath: dir)) ?? [] {
-                if let m = (try? fm.attributesOfItem(atPath: "\(dir)/\(convo)/conversation.md"))?[.modificationDate] as? Date,
-                   m > (newest ?? .distantPast) { newest = m }
-            }
-        }
-        return newest
     }
 
     // MARK: - screenpipe sign-in flag
@@ -346,7 +322,6 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func restartAggregatorServices() {
         tunnel.restart()
-        watcher.restart()
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.statusJob.kick("helpers restarted") }
     }
 
@@ -355,7 +330,7 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func openVaultFolder() {
-        NSWorkspace.shared.open(URL(fileURLWithPath: homeDir + "/ai-vault-data"))
+        NSWorkspace.shared.open(URL(fileURLWithPath: Paths.vault))
     }
 
     @objc func openScreenpipeData() {
@@ -384,8 +359,8 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSWorkspace.shared.open(URL(fileURLWithPath: dir))
     }
 
-    @objc func openWatcherLogs() {
-        NSWorkspace.shared.open(URL(fileURLWithPath: homeDir + "/.ai-aggregator/logs/watcher.log"))
+    @objc func openAppLog() {
+        if !NSWorkspace.shared.open(URL(fileURLWithPath: AppLog.path)) { log.warn("could not open \(AppLog.path)") }
     }
 
     /// Clean shutdown. Every exit path (menu Quit, SIGTERM from launchctl, Cmd-Q) lands
@@ -410,12 +385,8 @@ class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 "\(OutboxSender.shared.drain(until: deadline)) left for next launch"
             },
             .init(name: "close the trial database", budget: 2) { _ in logger.close(); return nil },
-            .init(name: "stop the chat export", budget: 1) { _ in VaultExport.shared.stopForQuit(); return nil },
-            .init(name: "stop the helpers", budget: 2) { _ in
-                self.watcher.stop(grace: 0.5)
-                self.tunnel.stop(grace: 0.5)
-                return nil
-            },
+            .init(name: "stop the export and update check", budget: 1) { _ in ChatAndOutboxJobs.stopForQuit(); return nil },
+            .init(name: "stop the tunnel", budget: 2) { _ in self.tunnel.stop(grace: 0.5); return nil },
         ], total: 18)
         return .terminateNow
     }

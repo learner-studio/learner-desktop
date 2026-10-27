@@ -8,11 +8,11 @@ import TestSupport
 
     @Test func recordingDegradedAndStoppedScreenpipe() throws {
         var health: [String: Any] = ["status": "healthy", "frame_status": "ok", "audio_status": "ok", "version": "9.9.9"]
-        let screenpipe = try StandInServer { req in
-            req.path == "/health" ? StandInServer.json(200, health) : StandInServer.json(200, [:])
+        let screenpipe = try HTTPStandIn { req in
+            req.path == "/health" ? HTTPStandIn.Response.json(200, health) : HTTPStandIn.Response.json(200, [:])
         }
         let saved = StatusProbe.screenpipeURL
-        StatusProbe.screenpipeURL = screenpipe.url
+        StatusProbe.screenpipeURL = screenpipe.baseURL
         defer { StatusProbe.screenpipeURL = saved; screenpipe.stop() }
 
         #expect(StatusProbe.screenpipe() == .recording)
@@ -24,14 +24,14 @@ import TestSupport
     }
 
     @Test func noActiveAudioDevicesRestartsThemAndLogsFailures() throws {
-        let screenpipe = try StandInServer { req in
+        let screenpipe = try HTTPStandIn { req in
             if req.path == "/health" {
-                return StandInServer.json(200, ["status": "healthy", "capture_status": ["active_audio_devices": 0]])
+                return HTTPStandIn.Response.json(200, ["status": "healthy", "capture_status": ["active_audio_devices": 0]])
             }
-            return StandInServer.json(500, ["error": "no"])
+            return HTTPStandIn.Response.json(500, ["error": "no"])
         }
         let saved = StatusProbe.screenpipeURL
-        StatusProbe.screenpipeURL = screenpipe.url
+        StatusProbe.screenpipeURL = screenpipe.baseURL
         defer { StatusProbe.screenpipeURL = saved; screenpipe.stop() }
         let lines = capturingLog { _ = StatusProbe.screenpipe() }
         let starts = screenpipe.requests.filter { $0.path == "/audio/device/start" && $0.method == "POST" }
@@ -40,14 +40,14 @@ import TestSupport
     }
 
     @Test func collectReportsServerJobAndHelperProblems() throws {
-        let screenpipe = try StandInServer { _ in StandInServer.json(200, ["status": "healthy"]) }
-        let server = try StandInServer { _ in StandInServer.json(503, [:]) }
+        let screenpipe = try HTTPStandIn { _ in HTTPStandIn.Response.json(200, ["status": "healthy"]) }
+        let server = try HTTPStandIn { _ in HTTPStandIn.Response.json(503, [:]) }
         let vault = TempDir("vault")
         for id in ["a", "b", "c"] { _ = vault.write("chatgpt/conversations/\(id)/conversation.md", "# t") }
         _ = vault.write("claude/conversations/x/conversation.md", "# t")
         let saved = (StatusProbe.screenpipeURL, StatusProbe.serverHealthURL, StatusProbe.vaultRoot)
-        StatusProbe.screenpipeURL = screenpipe.url
-        StatusProbe.serverHealthURL = server.url + "/api/health"
+        StatusProbe.screenpipeURL = screenpipe.baseURL
+        StatusProbe.serverHealthURL = server.baseURL + "/api/health"
         StatusProbe.vaultRoot = vault.path
         defer {
             (StatusProbe.screenpipeURL, StatusProbe.serverHealthURL, StatusProbe.vaultRoot) = saved

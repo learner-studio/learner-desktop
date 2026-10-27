@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import LearnerDesktop
+import TestSupport
 
 /// A screenpipe that answers from a table in memory.
 final class CannedScreenpipe {

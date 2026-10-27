@@ -30,7 +30,7 @@ final class ManagedHelper {
     static let healthyAfter: TimeInterval = 60
 
     init(name: String, executable: String, arguments: [String], marker: String,
-         runtimeDir: String = NSHomeDirectory() + "/.ai-aggregator") {
+         runtimeDir: String = Paths.data) {
         self.name = name
         self.executable = executable
         self.arguments = arguments

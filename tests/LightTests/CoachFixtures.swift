@@ -1,6 +1,7 @@
 import Foundation
 import SQLite3
 @testable import LearnerDesktop
+import TestSupport
 
 // Stand-ins for everything around the coach: speech, calls, the wristband, the toast,
 // the clock. The settings store and the trial logger are the real ones, pointed at a

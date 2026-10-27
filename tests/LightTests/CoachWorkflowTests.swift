@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import LearnerDesktop
+import TestSupport
 
 /// The whole coach, end to end on fixtures: speech spans -> streak -> 30 s / 60 s ->
 /// the arm's stimulus -> the trial row in SQLite.

@@ -1,0 +1,46 @@
+{
+ "filePath": "/x/ai-vault-data/perplexity/conversations//conversation.md",
+ "documentId": "ai-vault:unknown:conversations",
+ "conversationId": "conversations",
+ "provider": "unknown",
+ "contentSha256": "a1ed9de732b19b0454623160dac0a1b31c570d7df23f29d6f9884e4fa8b2b047",
+ "stats": {
+  "sections": 1,
+  "user": 1,
+  "assistant": 0,
+  "skipped": 0,
+  "skippedByReason": {},
+  "truncated": 0,
+  "attachments": 0
+ },
+ "problems": [],
+ "document": {
+  "documentId": "ai-vault:unknown:conversations",
+  "source": "other",
+  "title": "A fictional chat",
+  "occurredAt": "2024-06-22T12:45:56.025Z",
+  "messages": [
+   {
+    "role": "user",
+    "text": "lower-case heading"
+   }
+  ],
+  "metadata": {
+   "exporter": "ai-vault",
+   "provider": "unknown",
+   "conversationId": "conversations",
+   "contentSha256": "a1ed9de732b19b0454623160dac0a1b31c570d7df23f29d6f9884e4fa8b2b047",
+   "createdAt": "2024-06-22T12:45:56.025Z",
+   "updatedAt": "2024-06-22T12:46:03.820Z",
+   "headerMessageCount": 1,
+   "sectionCount": 1,
+   "messageCount": 1,
+   "userMessageCount": 1,
+   "assistantMessageCount": 0,
+   "skippedMessageCount": 0,
+   "skippedByReason": {},
+   "truncatedMessageCount": 0,
+   "attachmentCount": 0
+  }
+ }
+}

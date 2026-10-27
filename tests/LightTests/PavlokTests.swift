@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import LearnerDesktop
+import TestSupport
 
 @Suite("Pavlok") struct PavlokTests {
     @Test func eachStimulusIsOnePulseAtTheChosenLevel() {

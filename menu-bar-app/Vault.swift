@@ -8,227 +8,275 @@ import CommonCrypto
 // MARK: - AI Vault export
 
 /// Pulls new ChatGPT and Claude conversations into ~/ai-vault-data with the `ai-vault`
-/// CLI, where the transcript watcher picks them up and archives them on learner-server.
-/// Nothing scheduled this before, so nothing new was exported after 2026-09-07. ai-vault
-/// logs in with browser cookies that expire. An expired login turns the tray red and the
-/// menu offers "Sign In Again", which runs VaultSignIn: the session is taken from Chrome
-/// (signing in there first if needed) and handed to `ai-vault setup --cookies-file`.
+/// CLI (the "Export" job: 2 min after launch, then hourly), fills in the ChatGPT voice
+/// transcripts ai-vault leaves out (VoiceTranscripts), then kicks the Archive job, which
+/// sends what changed to learner-server.
+///
+/// ai-vault exits 0 even when it failed, so each run's output is read:
+///   expired login            that provider is skipped until Sign In Again (VaultSignIn)
+///                            or ai-vault's config changes; all expired -> blocked
+///   "API request failed: 429" failed, retried in 30 min
+///   stuck, crashed browser,  failed, retried after 15 min doubling to 2 h
+///   "✗ Failed:", "Errors: N" (--only-new resumes where a run stopped, so nothing is lost)
+///   ai-vault not installed   failed, said so
 final class VaultExport {
-    static let shared = VaultExport()
-    static let interval: TimeInterval = 6 * 3600
-    /// A run that is still printing is left alone; one silent this long is stuck (ai-vault
-    /// prints a line per conversation and waits at most ~25 s between them).
-    static let stallTimeout: TimeInterval = 10 * 60
-    static let maxRunTime: TimeInterval = 4 * 3600
-    static let killGrace: TimeInterval = 15
-    static let rateLimitRetry: TimeInterval = 30 * 60
-    /// After a failure (crash, stall, failed fetches): 15 min, doubling up to `interval`.
-    static let failureRetryBase: TimeInterval = 15 * 60
-    static let providers = ["claude", "chatgpt"]
+    struct Config {
+        var jobName = "Export"
+        var providers = ["claude", "chatgpt"]
+        var cliPath: () -> String? = VaultExport.installedCLI
+        /// nil: ChildProcess.toolEnvironment (ai-vault's node under nvm on PATH).
+        var env: [String: String]?
+        var logPath = Paths.logs + "/vault-export.log"
+        var loginsPath = Paths.data + "/vault-logins.json"
+        var aiVaultConfig = NSHomeDirectory() + "/.ai-vault/config.json"
+        var period: TimeInterval = 3600
+        var firstRun: TimeInterval = 120
+        /// A run that is still printing is left alone; one silent this long is stuck (ai-vault
+        /// prints a line per conversation and waits at most ~30 s between them).
+        var stallTimeout: TimeInterval = 10 * 60
+        var maxRunTime: TimeInterval = 4 * 3600
+        var killGrace: TimeInterval = 15
+        var rateLimitRetry: TimeInterval = 30 * 60
+        var failureBackoff = Backoff(base: 15 * 60, max: 2 * 3600)
+        /// A failing export reaches the tray once it has failed this long (a rate limit or
+        /// one stuck run that the next retry gets past does not).
+        var problemGrace: TimeInterval = 3600
+        /// Left by a crash of this app (parented to launchd): would race the next export.
+        var orphanMarkers = ["ai-vault backup", "learner-watcher.js voice-transcripts"]
+        /// nil: no voice step.
+        var voice: VoiceTranscripts? = VoiceTranscripts()
+        /// After every run, finished or not: the archive sends what arrived.
+        var afterRun: (() -> Void)? = { Archive.shared.job.kick("after export") }
+    }
 
-    private let work = DispatchQueue(label: "com.benpollack.vault-export", qos: .utility)
-    private let logPath = NSHomeDirectory() + "/.ai-aggregator/logs/vault-export.log"
-    private var nextRun = Date().addingTimeInterval(120)
-    private var running = false
-    private var rerun = false
-    private var failures = 0
-    private var current: Process?
-    private let currentLock = NSLock()
+    /// One provider's backup, read from ai-vault's output.
+    enum ProviderResult: Equatable {
+        case ok(archived: Int?)
+        case loginExpired
+        case rateLimited
+        case failed(String)
+    }
 
     static let loginExpiredPattern = "Authentication failed|cookies appear to be expired|Organization ID not available|API request failed: 40[13]"
+    static let rateLimitPattern = "API request failed: 429"
     static let failedPattern = "Errors: [1-9]|Completed with [1-9][0-9]* errors|✗ Failed:|browser has been closed"
-    private(set) var expiredLogins: Set<String> = []
-    private(set) var lastRun: Date?
-    private(set) var lastSummary = "not run yet"
-    /// Main thread, after each run, so the tray refreshes without waiting for the poll.
+
+    static let shared = VaultExport()
+
+    let config: Config
+    private(set) var job: Job!
+    private let log = Log("Export")
+    private let lock = NSLock()
+    private var current: Process?
+    private var quitting = false
+    /// provider -> modification time of ai-vault's config when the login was found expired.
+    private var expired: [String: Double] = [:]
+    private var lastRunAt: Date?
+    private var summary = "not run yet"
+
+    /// Main thread, after each run, so the tray refreshes without waiting for its poll.
     var onFinished: (() -> Void)?
 
-    /// Called on the 8 s status poll.
-    func tick() {
-        guard !running, Date() >= nextRun else { return }
-        runNow()
+    init(config: Config = Config()) {
+        self.config = config
+        expired = VaultExport.loadLogins(config.loginsPath, log: log)
+        job = Job(config.jobName, period: config.period, firstRun: config.firstRun, backoff: config.failureBackoff,
+                  problemGrace: config.problemGrace) { [weak self] _ in self?.runOnce() ?? .idle }
     }
+
+    // MARK: Status for the menu
+
+    /// Providers whose ai-vault login expired: the menu offers Sign In Again for each.
+    var expiredLogins: Set<String> { lock.withLock { Set(expired.keys) } }
+    var lastRun: Date? { lock.withLock { lastRunAt } }
+    /// e.g. "claude: ok (3 new), chatgpt: login expired, voice: 2 updated (5 messages)".
+    var lastSummary: String { lock.withLock { summary } }
+    var isRunning: Bool { lock.withLock { current != nil } }
+
+    // MARK: Triggers
+
+    /// Older callers tick from the status poll; the Scheduler ticks the job too. Also ticks
+    /// the Archive job, which the export feeds.
+    func tick() {
+        job.tick()
+        Archive.shared.job.tick()
+    }
+
+    /// "Pull Latest Chats".
+    func runNow() { job.kick("pull latest chats") }
 
     /// A fresh sign-in clears its error at once, rather than when the next export ends.
     func signedIn(_ provider: String) {
-        expiredLogins.remove(provider)
-        onFinished?()
-        runNow()
-    }
-
-    func runNow() {
-        // A sign-in during a run must not be lost: run again once this one ends.
-        guard !running else { rerun = true; return }
-        running = true
-        nextRun = Date().addingTimeInterval(VaultExport.interval)
-        work.async {
-            VaultExport.killOrphans()
-            var expired: Set<String> = []
-            var notes: [String] = []
-            var rateLimited = false
-            var failed = false
-            for provider in VaultExport.providers {
-                let (status, output) = self.backup(provider)
-                // ai-vault exits 0 even when its summary lists errors, so read the output.
-                if output.range(of: VaultExport.loginExpiredPattern, options: .regularExpression) != nil {
-                    expired.insert(provider)
-                    notes.append("\(provider): login expired")
-                } else if output.contains("API request failed: 429") {
-                    rateLimited = true
-                    notes.append("\(provider): rate limited, retrying in 30 min")
-                } else if status == nil {
-                    failed = true
-                    notes.append("\(provider): stuck, stopped")
-                } else if output.range(of: VaultExport.failedPattern, options: .regularExpression) != nil {
-                    failed = true
-                    notes.append("\(provider): failed (see vault-export.log)")
-                } else {
-                    notes.append("\(provider): \(status == 0 ? "ok" : "exit \(status!)")")
-                }
-            }
-            // ai-vault drops ChatGPT voice transcripts; write them back in (see voice-transcripts.ts).
-            if !expired.contains("chatgpt") {
-                let (status, output) = self.fillVoiceTranscripts()
-                if output.contains("stopped: rate-limited") { rateLimited = true }
-                else if status != 0 { failed = true; notes.append("voice transcripts: failed (see vault-export.log)") }
-                if let m = output.range(of: #"[0-9]+ updated \([0-9]+ messages\)"#, options: .regularExpression), !output[m].hasPrefix("0 ") {
-                    notes.append("voice transcripts: \(output[m])")
-                }
-            }
-            DispatchQueue.main.async {
-                self.expiredLogins = expired
-                self.lastRun = Date()
-                self.lastSummary = notes.joined(separator: ", ")
-                self.running = false
-                // --only-new resumes where a run stopped, so retrying soon loses nothing.
-                self.failures = failed ? self.failures + 1 : 0
-                if failed {
-                    let wait = min(VaultExport.interval, VaultExport.failureRetryBase * pow(2, Double(self.failures - 1)))
-                    self.nextRun = min(self.nextRun, Date().addingTimeInterval(wait))
-                    notes.append("retrying in \(Int(wait / 60)) min")
-                    self.lastSummary = notes.joined(separator: ", ")
-                }
-                if rateLimited { self.nextRun = min(self.nextRun, Date().addingTimeInterval(VaultExport.rateLimitRetry)) }
-                print("[VaultExport] \(self.lastSummary)")
-                self.onFinished?()
-                if self.rerun { self.rerun = false; self.runNow() }
-            }
-        }
-    }
-
-    private func backup(_ provider: String) -> (Int32?, String) {
-        guard let cli = VaultExport.cliPath() else { return (127, "ai-vault CLI not found") }
-        var args = ["backup", provider, "--only-new", "--skip-media", "-y"]
-        if provider == "chatgpt" { args.append("--random-delay") }
-        return runLogged(cli, args, label: provider)
-    }
-
-    /// `learner-watcher voice-transcripts`, through the app's bundled watcher script.
-    private func fillVoiceTranscripts() -> (Int32?, String) {
-        let script = URL(fileURLWithPath: Bundle.main.resourcePath ?? "").appendingPathComponent("learner-watcher.js").path
-        return runLogged(NSHomeDirectory() + "/.bun/bin/bun", [script, "voice-transcripts"], label: "voice-transcripts")
-    }
-
-    /// Runs a command, streaming its output to vault-export.log. Returns the exit status
-    /// (nil when it was stopped as stuck) and the output, for the outcome checks.
-    private func runLogged(_ executable: String, _ args: [String], label: String) -> (Int32?, String) {
-        LogFile.rotate(logPath)
-        if !FileManager.default.fileExists(atPath: logPath) { FileManager.default.createFile(atPath: logPath, contents: nil) }
-        let log = FileHandle(forWritingAtPath: logPath)
-        log?.seekToEndOfFile()
-        log?.write(Data("=== \(Date()) \(label)\n".utf8))
-        defer { try? log?.close() }
-
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: executable)
-        p.arguments = args
-        var env = ProcessInfo.processInfo.environment
-        // ai-vault's node (and the browser it drives) sit beside the CLI under nvm.
-        env["PATH"] = ((VaultExport.cliPath() ?? "/usr/bin/x") as NSString).deletingLastPathComponent + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-        p.environment = env
-        p.standardInput = FileHandle.nullDevice
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = out
-        var data = Data()
-        var lastOutput = Date()
-        let reader = DispatchQueue(label: "vault-export-read")
-        out.fileHandleForReading.readabilityHandler = { h in
-            let chunk = h.availableData
-            guard !chunk.isEmpty else { h.readabilityHandler = nil; return }
-            reader.sync {
-                data.append(chunk)
-                lastOutput = Date()
-                log?.write(chunk)
-            }
-        }
-        guard (try? p.run()) != nil else { return (126, "could not start \(label)") }
-        setCurrent(p)
-        defer { setCurrent(nil) }
-        let started = Date()
-        var stuck: String?
-        while p.isRunning {
-            usleep(500_000)
-            let silent = Date().timeIntervalSince(reader.sync { lastOutput })
-            if silent > VaultExport.stallTimeout { stuck = "no output for \(Int(silent / 60)) min" }
-            else if Date().timeIntervalSince(started) > VaultExport.maxRunTime { stuck = "running over \(Int(VaultExport.maxRunTime / 3600)) h" }
-            if let why = stuck {
-                print("[VaultExport] \(label): \(why); stopping it")
-                VaultExport.stop(p)
-                break
-            }
-        }
-        p.waitUntilExit()
-        out.fileHandleForReading.readabilityHandler = nil
-        let text = reader.sync { String(data: data, encoding: .utf8) ?? "" }
-        if let why = stuck { log?.write(Data("\n=== stopped: \(why)\n".utf8)) }
-        return (stuck == nil ? p.terminationStatus : nil, text)
-    }
-
-    private func setCurrent(_ p: Process?) {
-        currentLock.lock(); current = p; currentLock.unlock()
+        lock.withLock { _ = expired.removeValue(forKey: provider) }
+        saveLogins()
+        notify()
+        job.kick("signed in to \(provider)")
     }
 
     /// On quit: an export left running would outlive the app and race the next launch's.
     func stopForQuit() {
-        currentLock.lock(); let p = current; currentLock.unlock()
+        let p: Process? = lock.withLock {
+            quitting = true
+            return current
+        }
         // Shutdown has seconds, not a grace period.
-        if let p = p, p.isRunning { VaultExport.stop(p, grace: 0) }
-    }
-
-    /// SIGTERM, then SIGKILL for it and its children (the browser) after a grace period.
-    /// ai-vault can sit in its own SIGTERM handler forever once its browser has died.
-    static func stop(_ p: Process, grace: TimeInterval = killGrace) {
-        let pid = p.processIdentifier
-        let tree = [pid] + descendants(of: pid)
-        p.terminate()
-        let deadline = Date().addingTimeInterval(grace)
-        while p.isRunning && Date() < deadline { usleep(200_000) }
-        for child in tree where kill(child, 0) == 0 { kill(child, SIGKILL) }
-    }
-
-    private static func descendants(of pid: pid_t) -> [pid_t] {
-        let kids = ChildProcess.run("/usr/bin/pgrep", ["-P", String(pid)], timeout: 5).output.split(separator: "\n").compactMap { pid_t($0) }
-        return kids + kids.flatMap { descendants(of: $0) }
-    }
-
-    /// An export orphaned by a crash of this app (now parented to launchd) would run
-    /// alongside the next one and trip ChatGPT's rate limit.
-    private static func killOrphans() {
-        for line in ChildProcess.run("/bin/ps", ["-axo", "pid=,ppid=,command="], timeout: 5).output.split(separator: "\n") {
-            let f = line.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
-            guard f.count == 3, f[1] == "1", let pid = pid_t(f[0]),
-                  f[2].contains("ai-vault backup") || f[2].contains("learner-watcher.js voice-transcripts") else { continue }
-            print("[VaultExport] stopping an export left over from an earlier launch (pid \(pid))")
-            kill(pid, SIGKILL)
+        if let p = p, p.isRunning {
+            log.info("stopping the running export for quit")
+            ChildProcess.stop(p, grace: 0)
         }
     }
 
-    /// ai-vault is installed under nvm; pick the newest node version that has it.
-    static func cliPath() -> String? {
+    // MARK: Run
+
+    /// The job body.
+    func runOnce() -> Job.Outcome {
+        lock.withLock { quitting = false }
+        for marker in config.orphanMarkers { ChildProcess.killOrphans(matching: marker, log: log) }
+        defer { config.afterRun?() }
+        guard let cli = config.cliPath() else {
+            return finish(["ai-vault CLI not found (install it under nvm: npm i -g ai-vault)"],
+                          .failed("ai-vault CLI not found"))
+        }
+        var notes: [String] = []
+        var failed: [String] = []
+        var rateLimited = false
+        var ran = 0
+        let configStamp = VaultExport.modified(config.aiVaultConfig)
+        for provider in config.providers {
+            if lock.withLock({ quitting }) { break }
+            if let stamp = lock.withLock({ expired[provider] }), stamp == configStamp {
+                notes.append("\(provider): login expired")
+                continue
+            }
+            ran += 1
+            switch backup(cli, provider) {
+            case let .ok(archived):
+                lock.withLock { _ = expired.removeValue(forKey: provider) }
+                notes.append("\(provider): ok" + (archived.map { $0 > 0 ? " (\($0) new)" : "" } ?? ""))
+            case .loginExpired:
+                lock.withLock { expired[provider] = configStamp }
+                notes.append("\(provider): login expired")
+            case .rateLimited:
+                rateLimited = true
+                notes.append("\(provider): rate limited")
+            case let .failed(why):
+                failed.append(provider)
+                notes.append("\(provider): \(why)")
+            }
+        }
+        saveLogins()
+
+        // ai-vault drops ChatGPT voice transcripts; write them back in.
+        if let voice = config.voice, !lock.withLock({ quitting || expired["chatgpt"] != nil }) {
+            let v = voice.run(cancelled: { [weak self] in self?.lock.withLock { self?.quitting ?? true } ?? true })
+            switch v.stopped {
+            case .rateLimited?: rateLimited = true
+            case .loginExpired?:
+                lock.withLock { expired["chatgpt"] = configStamp }
+                saveLogins()
+            case .unreachable?: failed.append("voice")
+            case nil: break
+            }
+            if v.candidates > 0 || v.stopped != nil { notes.append("voice: \(v.describe)") }
+        }
+
+        let allExpired = lock.withLock { config.providers.allSatisfy { expired[$0] != nil } }
+        if allExpired {
+            return finish(notes, .blocked("ai-vault login expired (\(config.providers.joined(separator: ", "))): Sign In Again"))
+        }
+        if rateLimited {
+            return finish(notes + ["retrying in \(Int(config.rateLimitRetry / 60)) min"],
+                          .failed(notes.joined(separator: ", "), retryAfter: config.rateLimitRetry))
+        }
+        if !failed.isEmpty { return finish(notes, .failed(notes.joined(separator: ", "))) }
+        return finish(notes, .ok(notes.joined(separator: ", ")))
+    }
+
+    private func finish(_ notes: [String], _ outcome: Job.Outcome) -> Job.Outcome {
+        let text = notes.joined(separator: ", ")
+        lock.withLock {
+            summary = text
+            lastRunAt = Date()
+        }
+        notify()
+        return outcome
+    }
+
+    private func notify() {
+        guard let done = onFinished else { return }
+        DispatchQueue.main.async { done() }
+    }
+
+    /// `ai-vault backup <provider> --only-new`, streamed to vault-export.log, bounded by the
+    /// stall watchdog and the run limit, and stoppable at quit.
+    func backup(_ cli: String, _ provider: String) -> ProviderResult {
+        var args = ["backup", provider, "--only-new", "--skip-media", "-y"]
+        if provider == "chatgpt" { args.append("--random-delay") }
+        let r = ChildProcess.run(cli, args, timeout: config.maxRunTime, stallTimeout: config.stallTimeout,
+                                 env: config.env ?? ChildProcess.toolEnvironment, stderr: true, logFile: config.logPath,
+                                 grace: config.killGrace,
+                                 onStart: { [weak self] p in self?.lock.withLock { self?.current = p } })
+        lock.withLock { current = nil }
+        let result = VaultExport.classify(status: r.status, stopped: r.stopped, output: r.output)
+        switch result {
+        case .ok: break
+        case .loginExpired: log.warn("\(provider): login expired")
+        case .rateLimited: log.warn("\(provider): rate limited (429)")
+        case let .failed(why): log.warn("\(provider): \(why)")
+        }
+        return result
+    }
+
+    /// What one ai-vault run's output means. ai-vault exits 0 even when its summary lists
+    /// errors, so the output decides; the exit status only when the output says nothing.
+    static func classify(status: Int32?, stopped: String?, output: String) -> ProviderResult {
+        func has(_ pattern: String) -> Bool { output.range(of: pattern, options: .regularExpression) != nil }
+        if has(loginExpiredPattern) { return .loginExpired }
+        if output.contains(rateLimitPattern) { return .rateLimited }
+        if let why = stopped {
+            return .failed(why.hasPrefix("could not start") ? "ai-vault \(why)" : "stuck, stopped (\(why))")
+        }
+        if output.contains("browser has been closed") { return .failed("browser crashed (see vault-export.log)") }
+        if has(failedPattern) { return .failed("failed (see vault-export.log)") }
+        if let s = status, s != 0 { return .failed("exit \(s) (see vault-export.log)") }
+        let archived = output.range(of: #"Archived: ([0-9]+)"#, options: .regularExpression)
+            .flatMap { Int(output[$0].dropFirst("Archived: ".count)) }
+        return .ok(archived: archived)
+    }
+
+    // MARK: Helpers
+
+    /// ai-vault is installed under nvm; the newest node version that has it.
+    static func installedCLI() -> String? {
         let root = NSHomeDirectory() + "/.nvm/versions/node"
         let versions = ((try? FileManager.default.contentsOfDirectory(atPath: root)) ?? []).sorted().reversed()
         return versions.map { "\(root)/\($0)/bin/ai-vault" }.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    /// Kept for VaultSignIn.
+    static func cliPath() -> String? { installedCLI() }
+
+    static func modified(_ path: String) -> Double {
+        ((try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+    }
+
+    private static func loadLogins(_ path: String, log: Log) -> [String: Double] {
+        guard let data = FileManager.default.contents(atPath: path) else { return [:] }
+        guard let saved = (try? JSONSerialization.jsonObject(with: data)) as? [String: Double] else {
+            log.warn("\(path) is unreadable; ignoring it")
+            return [:]
+        }
+        return saved
+    }
+
+    private func saveLogins() {
+        let snapshot = lock.withLock { expired }
+        do {
+            let data = try JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys])
+            try data.write(to: URL(fileURLWithPath: config.loginsPath), options: .atomic)
+        } catch {
+            log.warn("cannot save \(config.loginsPath): \(error.localizedDescription)")
+        }
     }
 }
 
@@ -251,6 +299,7 @@ final class VaultSignIn {
     static let pollInterval: TimeInterval = 3
     static let waitLimit: TimeInterval = 10 * 60
     private static var active: [String: VaultSignIn] = [:]
+    private static let log = Log("SignIn")
 
     static func isWaiting(_ provider: String) -> Bool { active[provider]?.openedBrowser == true }
 
@@ -258,7 +307,7 @@ final class VaultSignIn {
         guard active[provider] == nil, let site = sites[provider] else { return }
         let s = VaultSignIn(provider: provider, site: site)
         active[provider] = s
-        print("[VaultSignIn] \(provider): checking \(s.browser.name)'s session")
+        log.info("\(provider): checking \(s.browser.name)'s session")
         s.check()
     }
 
@@ -280,8 +329,12 @@ final class VaultSignIn {
     }
 
     private static func savedSession(_ provider: String, site: Site) -> String? {
-        guard let data = FileManager.default.contents(atPath: NSHomeDirectory() + "/.ai-vault/config.json"),
-              let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        guard let data = FileManager.default.contents(atPath: NSHomeDirectory() + "/.ai-vault/config.json") else { return nil }
+        guard let config = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            log.warn("~/.ai-vault/config.json is not JSON")
+            return nil
+        }
+        guard
               let providers = config["providers"] as? [String: Any],
               let entry = providers[provider] as? [String: Any],
               let cookies = entry["cookies"] as? [String: Any] else { return nil }
@@ -305,21 +358,21 @@ final class VaultSignIn {
         busy = false
         if let session = session { triedSession = session }
         if let result = result, result.ok {
-            print("[VaultSignIn] \(provider): ai-vault accepted \(browser.name)'s session; exporting")
+            VaultSignIn.log.info("\(provider): ai-vault accepted \(browser.name)'s session; exporting")
             stop()
             VaultExport.shared.signedIn(provider)
             return
         }
-        if let result = result { print("[VaultSignIn] \(provider): ai-vault setup failed: \(result.detail)") }
+        if let result = result { VaultSignIn.log.warn("\(provider): ai-vault setup failed: \(result.detail)") }
         if Date() > deadline {
-            print("[VaultSignIn] \(provider): no new session in \(browser.name) after \(Int(VaultSignIn.waitLimit / 60)) min; stopped watching")
+            VaultSignIn.log.warn("\(provider): no new session in \(browser.name) after \(Int(VaultSignIn.waitLimit / 60)) min; stopped watching")
             stop()
             return
         }
         guard !openedBrowser else { return }
         openedBrowser = true
         browser.open(site.url)
-        print("[VaultSignIn] \(provider): opened the sign-in page in \(browser.name)")
+        VaultSignIn.log.info("\(provider): opened the sign-in page in \(browser.name)")
         timer = Timer.scheduledTimer(withTimeInterval: VaultSignIn.pollInterval, repeats: true) { [weak self] _ in self?.check() }
     }
 
@@ -332,15 +385,17 @@ final class VaultSignIn {
     /// `ai-vault setup <provider> --cookies-file <0600 file>`; the file is removed afterwards.
     static func runSetup(_ provider: String, cookies: [String: String]) -> (ok: Bool, detail: String) {
         guard sites[provider] != nil, let cli = VaultExport.cliPath() else { return (false, "ai-vault CLI not found") }
-        let path = NSHomeDirectory() + "/.ai-aggregator/ai-vault-cookies-\(provider).json"
+        let path = Paths.data + "/ai-vault-cookies-\(provider).json"
         guard let data = try? JSONSerialization.data(withJSONObject: cookies),
               FileManager.default.createFile(atPath: path, contents: data, attributes: [.posixPermissions: 0o600]) else {
+            log.error("\(provider): could not write the cookies file \(path)")
             return (false, "could not write the cookies file")
         }
-        defer { try? FileManager.default.removeItem(atPath: path) }
-        var env = ProcessInfo.processInfo.environment
-        env["PATH"] = (cli as NSString).deletingLastPathComponent + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-        let r = ChildProcess.run(cli, ["setup", provider, "--cookies-file", path], timeout: 90, env: env, stderr: true)
+        defer {
+            do { try FileManager.default.removeItem(atPath: path) }
+            catch { log.error("could not remove \(path): \(error.localizedDescription)") }
+        }
+        let r = ChildProcess.run(cli, ["setup", provider, "--cookies-file", path], timeout: 90, env: ChildProcess.toolEnvironment, stderr: true)
         guard let status = r.status else { return (false, "ai-vault setup did not finish in 90 s") }
         let ok = status == 0 && r.output.contains("Configuration saved")
         let last = r.output.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.last { !$0.isEmpty }
@@ -464,13 +519,14 @@ enum BrowserCookies {
         let r = ChildProcess.run("/usr/bin/security", ["find-generic-password", "-w", "-s", browser.keychainService, "-a", browser.keychainAccount], timeout: 120)
         let password = r.output.trimmingCharacters(in: .newlines)
         guard r.status == 0, !password.isEmpty else {
-            print("[VaultSignIn] could not read \(browser.keychainService) from the Keychain")
+            Log("SignIn").warn("could not read \(browser.keychainService) from the Keychain: \(r.stopped ?? "security exit \(r.status.map(String.init) ?? "?")")")
             return nil
         }
         let salt = Array("saltysalt".utf8)
         var derived = [UInt8](repeating: 0, count: kCCKeySizeAES128)
         guard CCKeyDerivationPBKDF(CCPBKDFAlgorithm(kCCPBKDF2), password, password.utf8.count, salt, salt.count,
                                    CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA1), 1003, &derived, derived.count) == kCCSuccess else {
+            Log("SignIn").error("could not derive the \(browser.name) cookie key")
             return nil
         }
         keys[browser.id] = derived
@@ -485,10 +541,12 @@ func runBrowserCookieCheckCLI() {
     let args = CommandLine.arguments
     guard let idx = args.firstIndex(of: "--browser-cookie-check"), idx + 2 < args.count,
           let browser = ChromiumBrowser.all.first(where: { $0.id == args[idx + 1] }) else {
-        print("usage: --browser-cookie-check <brave|chrome> <domain>")
+        FileHandle.standardError.write(Data("usage: --browser-cookie-check <brave|chrome> <domain>\n".utf8))
         exit(2)
     }
     let cookies = BrowserCookies.read(browser, domain: args[idx + 2])
-    for (name, value) in cookies.sorted(by: { $0.key < $1.key }) { print("\(name)\t\(value.count) chars") }
+    for (name, value) in cookies.sorted(by: { $0.key < $1.key }) {
+        FileHandle.standardOutput.write(Data("\(name)\t\(value.count) chars\n".utf8))
+    }
     exit(cookies.isEmpty ? 1 : 0)
 }

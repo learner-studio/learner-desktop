@@ -44,7 +44,16 @@ run_lane() {
   swift build --build-tests >/dev/null || { echo "build failed"; swift build --build-tests 2>&1 | grep -E "error" | head -20; return 1; }
   local start end took status
   start=$(date +%s)
-  [ "$lane" = heavy ] && export LEARNER_HEAVY=1
+  if [ "$lane" = heavy ]; then
+    export LEARNER_HEAVY=1
+  else
+    # Light and medium never see the real app data or ai-vault export.
+    local sandbox
+    sandbox="$(mktemp -d "${TMPDIR:-/tmp}/learner-${lane}.XXXXXX")"
+    export LEARNER_DATA_DIR="$sandbox/data" AI_VAULT_DATA="$sandbox/ai-vault-data"
+    mkdir -p "$LEARNER_DATA_DIR" "$AI_VAULT_DATA"
+    trap 'rm -rf "$sandbox"' RETURN
+  fi
   swift test --skip-build --filter "$target" "$@"
   status=$?
   end=$(date +%s)

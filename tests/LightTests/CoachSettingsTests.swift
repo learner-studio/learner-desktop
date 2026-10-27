@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import LearnerDesktop
+import TestSupport
 
 @Suite("Coach settings and arms") struct CoachSettingsTests {
     @Test func armAssignmentIsAStableHashOfTheSession() {

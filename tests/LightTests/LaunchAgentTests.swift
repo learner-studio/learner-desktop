@@ -25,7 +25,7 @@ import TestSupport
         let program = (p["ProgramArguments"] as? [String])?.first ?? ""
         #expect(program.hasSuffix("/Applications/Learner Desktop.app/Contents/MacOS/learner-desktop"))
         #expect((p["StandardOutPath"] as? String)?.hasSuffix(".ai-aggregator/logs/menubar.log") == true)
-        #expect(AppLog.path.hasSuffix(".ai-aggregator/logs/menubar.log"))
+        #expect(AppLog.path == Paths.logs + "/menubar.log")
     }
 
     @Test func theCaptureScriptsUseTheSameLabel() throws {

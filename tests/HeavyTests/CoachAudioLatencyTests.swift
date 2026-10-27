@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import LearnerDesktop
+import TestSupport
 
 // Audio -> screenpipe's configured speech-to-text -> the coach -> the warning, timed.
 // Synthesized speech (macOS `say`) is cut into 2.25 s chunks and uploaded on a real-time
