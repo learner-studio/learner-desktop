@@ -9,14 +9,13 @@ nothing new was exported. The samples below are from those runs' logs.
 import os
 import re
 import unittest
+from tests.swift_source import swift_source
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-SWIFT = os.path.join(REPO, "menu-bar-app", "main.swift")
 
 
 def pattern(name):
-    with open(SWIFT, encoding="utf-8") as fh:
-        return re.search(rf'static let {name} = "([^"]+)"', fh.read()).group(1)
+    return re.search(rf'static let {name} = "([^"]+)"', swift_source()).group(1)
 
 
 EXPIRED = [
@@ -38,16 +37,14 @@ class VaultExportOutcomeTest(unittest.TestCase):
         self.assertRegex(FAILED, pattern("failedPattern"))
 
     def test_a_rate_limit_retries_soon_rather_than_in_six_hours(self):
-        with open(SWIFT, encoding="utf-8") as fh:
-            src = fh.read()
+        src = swift_source()
         self.assertIn('output.contains("API request failed: 429")', src)
         self.assertIn("Date().addingTimeInterval(VaultExport.rateLimitRetry)", src)
         # 429 is not an expired login.
         self.assertNotRegex("API request failed: 429", pattern("loginExpiredPattern"))
 
     def test_voice_transcripts_are_filled_after_each_chatgpt_export(self):
-        with open(SWIFT, encoding="utf-8") as fh:
-            src = fh.read()
+        src = swift_source()
         run = src[src.index("    func runNow() {"):]
         run = run[:run.index("\n    }\n")]
         self.assertLess(run.index("self.backup(provider)"), run.index("self.fillVoiceTranscripts()"))
@@ -70,8 +67,7 @@ class DurabilityTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        with open(SWIFT, encoding="utf-8") as fh:
-            src = fh.read()
+        src = swift_source()
         cls.cls = src[src.index("final class VaultExport {"):src.index("// MARK: - AI Vault sign-in")]
         cls.src = src
 
@@ -111,8 +107,7 @@ class SignInTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        with open(SWIFT, encoding="utf-8") as fh:
-            cls.src = fh.read()
+        cls.src = swift_source()
 
     def test_the_tray_shows_the_error(self):
         self.assertIn('!VaultExport.shared.expiredLogins.isEmpty {\n            baseTitle = "🧠 🔴 VAULT"', self.src)

@@ -1,11 +1,12 @@
 """Exercise the production settings snapshot against meaningful cue combinations."""
 import pathlib, shutil, subprocess, tempfile, unittest
+from tests.swift_source import swift_source
 REPO=pathlib.Path(__file__).resolve().parents[1]
 
 @unittest.skipUnless(shutil.which('swiftc'),'Swift required')
 class CoachSettings(unittest.TestCase):
     def test_effective_combinations_match_arm_and_switches(self):
-        source=(REPO/'menu-bar-app/main.swift').read_text()
+        source=swift_source()
         method=source[source.index('    private func treatmentSettings()'):source.index('    private func settingsKey(')].replace('private func','func')
         swift='''import Foundation
 class PavlokController {

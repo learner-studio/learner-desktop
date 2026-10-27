@@ -14,9 +14,9 @@ shock actually arrived.
 import os
 import re
 import unittest
+from tests.swift_source import swift_source
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-SWIFT = os.path.join(REPO, "menu-bar-app", "main.swift")
 
 TYPES = ("vibe", "beep", "zap")
 
@@ -34,8 +34,8 @@ def span(src, start_marker, end_marker):
 class Source:
     """Parsed once; every test reads these slices."""
 
-    src = read(SWIFT)
-    controller = span(src, "class PavlokController", "\n// MARK: - Habit Experiment Manager")
+    src = swift_source()
+    controller = span(src, "class PavlokController", "\n// MARK: - Headless Test Fire")
     test_fire_fn = span(src, "func testFire(type: String", "\n    // Backward-compatibility bridge")
     cli = span(src, "func runPavlokTestFireCLI()", "\n// MARK: - Application Entrypoint")
 
@@ -81,8 +81,9 @@ class OnlyFiresWhenAHumanAsksTest(unittest.TestCase):
                             f"testFire() is called from outside the CLI and notification hook: {line}")
 
     def test_the_monologue_monitor_cannot_reach_it(self):
-        monitor = span(Source.src, "// MARK: - Continuous Word Talk-Time Monitor",
-                       "// MARK: - Interactive Non-Closing Multi-Select Submenu Views")
+        with open(os.path.join(REPO, "menu-bar-app", "Coach.swift"), encoding="utf-8") as fh:
+            coach = fh.read()
+        monitor = coach[coach.index("// MARK: - Continuous Word Talk-Time Monitor"):]
         self.assertNotIn("testFire(", monitor)
         self.assertNotIn("testIntensity(", monitor)
 

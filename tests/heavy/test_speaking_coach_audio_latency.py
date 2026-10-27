@@ -32,6 +32,7 @@ import unittest
 import urllib.request
 import uuid
 import wave
+from tests.swift_source import swift_source
 
 REPO = Path(__file__).resolve().parents[2]
 ENABLED = os.environ.get("AIAGG_HEAVY") == "1" and os.environ.get("AIAGG_AUDIO_E2E") == "1"
@@ -115,7 +116,7 @@ class CoachAudioLatency(unittest.TestCase):
                          ("whisper-tiny-quantized", 5, "realtime"))
         root = Path(os.environ.get("AIAGG_AUDIO_E2E_DIR") or tempfile.mkdtemp(prefix="coach-audio-e2e-"))
         root.mkdir(parents=True, exist_ok=True)
-        source = (REPO / "menu-bar-app/main.swift").read_text()
+        source = swift_source()
         results = []
         for rate in (120, 200):
             results.append(self.run_sample(root, rate, source))

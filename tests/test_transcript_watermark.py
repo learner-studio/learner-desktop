@@ -11,9 +11,9 @@ The live meeting poll already guarded against this by asking for MAX(id) first.
 
 import os
 import unittest
+from tests.swift_source import swift_source
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-SWIFT = os.path.join(REPO, "menu-bar-app", "main.swift")
 
 
 def read(path):
@@ -29,7 +29,7 @@ def method(src, signature):
 class TranscriptWatermarkTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        src = read(SWIFT)
+        src = swift_source()
         cls.tick = method(src, "func tick() {\n        updatePresentation()")
         cls.live = method(src, "func checkLiveMeetingSegments()")
 

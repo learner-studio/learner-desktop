@@ -32,6 +32,7 @@ import threading
 import time
 import unittest
 import uuid
+from tests.swift_source import swift_source
 
 
 REPO = Path(__file__).resolve().parents[2]
@@ -225,7 +226,7 @@ class SpeakingCoachMeetingE2E(unittest.TestCase):
         self.addCleanup(server.server_close)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.shutdown)
-        source = (REPO / "menu-bar-app/main.swift").read_text()
+        source = swift_source()
         marker = "// MARK: - Application Entrypoint"
         self.assertEqual(source.count(marker), 1)
         original_hash = hashlib.sha256(source.encode()).hexdigest()

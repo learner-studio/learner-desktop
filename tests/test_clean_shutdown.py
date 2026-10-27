@@ -11,10 +11,10 @@ import os
 import plistlib
 import re
 import unittest
+from tests.swift_source import swift_source
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PLIST = os.path.join(REPO, "menu-bar-app", "com.benpollack.learner-desktop.plist")
-SWIFT = os.path.join(REPO, "menu-bar-app", "main.swift")
 BUILD = os.path.join(REPO, "scripts", "build-app.sh")
 
 
@@ -57,7 +57,7 @@ class AutomaticSyncStaysOutOfDocumentsTest(unittest.TestCase):
     def test_upload_never_touches_documents_or_a_database_credential(self):
         # Habit rows go out over HTTPS from the app itself (OutboxSender); no bun
         # script, no .env with a Postgres password, nothing read from ~/Documents.
-        src = read(SWIFT)
+        src = swift_source()
         start = src.index("enum LearnerAPI")
         body = src[start:src.index("// MARK: - Bundled Helpers")]
         self.assertNotIn("/Documents/", body)
@@ -87,7 +87,7 @@ class NoUnrequestedPrivacyPromptsTest(unittest.TestCase):
         self.assertIn('codesign --verify --strict', build)
 
     def test_bluetooth_is_not_initialised_until_pavlok_is_enabled(self):
-        src = read(SWIFT)
+        src = swift_source()
         init_start = src.index("class PavlokController")
         init_body = src[init_start:src.index("func startBleScan(", init_start)]
 
@@ -101,7 +101,7 @@ class NoUnrequestedPrivacyPromptsTest(unittest.TestCase):
 
 class ShutdownSequenceTest(unittest.TestCase):
     def test_every_exit_path_reaches_the_terminate_delegate(self):
-        src = read(SWIFT)
+        src = swift_source()
         # SIGTERM (launchctl bootout / kickstart -k / stop-capture.sh) and SIGINT are
         # routed into NSApplication.terminate so they take the same path as menu Quit.
         self.assertRegex(src, r"for sig in \[SIGTERM, SIGINT\]")
@@ -109,7 +109,7 @@ class ShutdownSequenceTest(unittest.TestCase):
         self.assertIn("func applicationShouldTerminate(", src)
 
     def test_shutdown_flushes_then_closes_in_that_order(self):
-        src = read(SWIFT)
+        src = swift_source()
         body = src[src.index("func applicationShouldTerminate("):src.index("@objc func quitApp()")]
         finalise = body.index("resetStreak()")
         wait_idle = body.index("waitUntilIdle()")
@@ -122,7 +122,7 @@ class ShutdownSequenceTest(unittest.TestCase):
         self.assertIn("return .terminateNow", body)
 
     def test_shutdown_is_bounded_so_quit_cannot_hang(self):
-        src = read(SWIFT)
+        src = swift_source()
         body = src[src.index("func applicationShouldTerminate("):src.index("@objc func quitApp()")]
         self.assertRegex(body, r"drain\(until: Date\(\)\.addingTimeInterval\((\d|1\d)\)\)")
 

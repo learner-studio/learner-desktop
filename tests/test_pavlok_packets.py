@@ -4,13 +4,13 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from tests.swift_source import swift_source
 
-SOURCE = pathlib.Path(__file__).resolve().parents[1] / 'menu-bar-app/main.swift'
 
 @unittest.skipUnless(shutil.which('swiftc'), 'requires Swift')
 class PavlokPacketTests(unittest.TestCase):
     def test_selected_intensity_is_encoded_for_one_pulse(self):
-        source = SOURCE.read_text()
+        source = swift_source()
         encoders = source.split('    // MARK: - Binary BLE Stimulus Encoder', 1)[1].split('    // MARK: - Send Stimulus', 1)[0]
         harness = '''
 import Foundation

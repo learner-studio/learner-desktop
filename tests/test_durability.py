@@ -10,9 +10,9 @@ current call, and the tunnel script could kill a browser holding GrowthBook open
 import os
 import re
 import unittest
+from tests.swift_source import swift_source
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-SWIFT = os.path.join(REPO, "menu-bar-app", "main.swift")
 
 
 def read(*parts):
@@ -28,7 +28,7 @@ def body(src, start):
 class DurabilityTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.src = read("menu-bar-app", "main.swift")
+        cls.src = swift_source()
 
     def test_no_helper_program_is_waited_on_without_a_deadline(self):
         # Only runBounded (deadline + SIGKILL) and the export runner (stall watchdog +

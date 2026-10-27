@@ -31,8 +31,9 @@ import tempfile
 import time
 import unittest
 
+from tests.swift_source import SWIFT_FILES
+
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-SWIFT_SRC = os.path.join(REPO, "menu-bar-app", "main.swift")
 INSTALLED_APP = os.path.expanduser("~/Applications/Learner Desktop.app")
 APP_LOG = os.path.expanduser("~/.ai-aggregator/logs/menubar.log")
 
@@ -65,13 +66,13 @@ class TestFireCommandRejectsBadInputTest(unittest.TestCase):
         cls.tmp = tempfile.mkdtemp(prefix="pavlok-testfire-")
         cls.binary = os.path.join(cls.tmp, "ai-aggregator-testfire-heavy")
         build = subprocess.run(
-            ["swiftc", "-o", cls.binary, SWIFT_SRC,
+            ["swiftc", "-o", cls.binary, *SWIFT_FILES,
              "-framework", "Cocoa", "-framework", "ScreenCaptureKit",
              "-framework", "CoreBluetooth", "-lsqlite3"],
             capture_output=True, text=True, timeout=900, cwd=REPO)
         if build.returncode != 0:
             raise AssertionError(
-                "menu-bar-app/main.swift does not compile:\n" + build.stderr[-2000:])
+                "menu-bar-app/*.swift does not compile:\n" + build.stderr[-2000:])
 
     @classmethod
     def tearDownClass(cls):

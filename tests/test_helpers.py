@@ -11,9 +11,9 @@ restart with it.
 import os
 import re
 import unittest
+from tests.swift_source import swift_source
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-SWIFT = os.path.join(REPO, "menu-bar-app", "main.swift")
 BUILD = os.path.join(REPO, "scripts", "build-app.sh")
 TUNNEL = os.path.join(REPO, "scripts", "tunnel.sh")
 
@@ -36,7 +36,7 @@ def helper_class(src):
 class ManagedHelperTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.src = read(SWIFT)
+        cls.src = swift_source()
         cls.cls = helper_class(cls.src)
 
     def test_restarts_a_helper_that_exits_with_backoff(self):
@@ -72,7 +72,7 @@ class ManagedHelperTest(unittest.TestCase):
 class AppOwnsHelpersTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.src = read(SWIFT)
+        cls.src = swift_source()
 
     def test_starts_tunnel_then_watcher_at_launch(self):
         body = method(self.src, "func applicationDidFinishLaunching(")
@@ -137,7 +137,7 @@ class LearnerDesktopNameTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.build = read(BUILD)
-        cls.src = read(SWIFT)
+        cls.src = swift_source()
 
     def test_bundle_is_named_learner_desktop(self):
         self.assertIn('APP_NAME="Learner Desktop.app"', self.build)

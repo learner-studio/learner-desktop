@@ -11,9 +11,9 @@ import json
 import os
 import re
 import unittest
+from tests.swift_source import swift_source
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-SWIFT = os.path.join(REPO, "menu-bar-app", "main.swift")
 CONTRACT = os.path.join(REPO, "contract", "contract.json")
 
 
@@ -35,7 +35,7 @@ class ContractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.rpc = json.loads(read(CONTRACT))["rpc"]
-        cls.src = read(SWIFT)
+        cls.src = swift_source()
 
     def schema(self, rpc):
         return self.rpc[rpc]["input"]

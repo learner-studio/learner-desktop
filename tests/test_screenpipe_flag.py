@@ -11,9 +11,9 @@ now and relaunches a screenpipe that started without it.
 
 import os
 import unittest
+from tests.swift_source import swift_source
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-SWIFT = os.path.join(REPO, "menu-bar-app", "main.swift")
 
 
 def read(path):
@@ -29,7 +29,7 @@ def method(src, signature):
 class ScreenpipeSignInFlagTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.src = read(SWIFT)
+        cls.src = swift_source()
         cls.ensure = method(cls.src, "func ensureScreenpipeSkipsSignIn(")
 
     def test_sets_the_flag_in_launchd_at_launch(self):

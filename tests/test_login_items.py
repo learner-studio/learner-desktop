@@ -12,9 +12,9 @@ reboot, and only the owner can re-allow it.
 import os
 import re
 import unittest
+from tests.swift_source import swift_source
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-SWIFT = os.path.join(REPO, "menu-bar-app", "main.swift")
 
 
 def read(path):
@@ -30,7 +30,7 @@ def body_of(src, signature):
 class LoginItemsApprovalTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.src = read(SWIFT)
+        cls.src = swift_source()
 
     def test_checks_the_apps_own_agent_with_the_legacy_plist_api(self):
         body = body_of(self.src, "func updateLoginItemApproval(")

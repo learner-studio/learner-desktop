@@ -4,13 +4,13 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from tests.swift_source import swift_source
 
-SOURCE = pathlib.Path(__file__).resolve().parents[1] / 'menu-bar-app/main.swift'
 
 @unittest.skipUnless(shutil.which('swiftc'), 'requires Swift')
 class ResidentRequestTests(unittest.TestCase):
     def test_only_fresh_valid_requests_fire_once_at_requested_level(self):
-        source = SOURCE.read_text()
+        source = swift_source()
         handler = source.split('    @objc func receivePavlokTest', 1)[1].split('    func applicationDidFinishLaunching', 1)[0]
         handler = '    @objc func receivePavlokTest' + handler
         handler = handler.replace('DistributedNotificationCenter.default()', 'ResultSink.shared')

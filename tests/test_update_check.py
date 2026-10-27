@@ -12,9 +12,9 @@ import json
 import os
 import re
 import unittest
+from tests.swift_source import swift_source
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-SWIFT = os.path.join(REPO, "menu-bar-app", "main.swift")
 AGENT = os.path.join(REPO, "config", "screenpipe-update-agent.json")
 RUNBOOK = os.path.join(REPO, "docs", "screenpipe-update-runbook.md")
 PHASE = os.path.join(REPO, "scripts", "start-capture-phase.py")
@@ -33,7 +33,7 @@ def method(src, signature):
 class TriggerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.src = read(SWIFT)
+        cls.src = swift_source()
         start = cls.src.index("final class ScreenpipeUpdateCheck")
         cls.cls = cls.src[start:cls.src.index("\n}\n", start) + 3]
         cls.observe = method(cls.cls, "func observe(")
@@ -98,12 +98,12 @@ class TriggerTest(unittest.TestCase):
 
 class PhaseTagTest(unittest.TestCase):
     def test_every_turn_carries_the_capture_phase(self):
-        src = read(SWIFT)
+        src = swift_source()
         self.assertIn('"capture_phase": CaptureEnvironment.capturePhase', src)
         self.assertIn('"screenpipe_app_version": CaptureEnvironment.screenpipeAppVersion', src)
 
     def test_turn_tag_matches_the_growthbook_phase_name(self):
-        swift = re.search(r'return "(screenpipe \\\(app\) / engine \\\(engine\))"', read(SWIFT))
+        swift = re.search(r'return "(screenpipe \\\(app\) / engine \\\(engine\))"', swift_source())
         python = re.search(r'return f"(screenpipe \{app\} / engine \{engine\})"', read(PHASE))
         self.assertTrue(swift and python)
         self.assertEqual(swift.group(1).replace("\\(", "{").replace(")", "}"), python.group(1))
