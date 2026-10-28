@@ -278,17 +278,36 @@ final class ScreenpipeSpeechSource: SpeechSource {
 
 // MARK: - screenpipe calls
 
-/// The call in progress, from screenpipe's /meetings: the first meeting with no end.
+/// The call in progress, from screenpipe's /meetings: the first meeting with no end that has
+/// lasted `minDuration`. screenpipe opens a "meeting" whenever a call app uses audio (a voice
+/// message, a notification sound, a huddle preview); on 10-27 those ran 1-2 min. Shorter
+/// ones are not calls here: no call session, no cues, the mic kept.
 final class ScreenpipeCallSource: CallSource {
     let api: ScreenpipeAPI
+    let minDuration: TimeInterval
+    let clock: @Sendable () -> Date
 
-    init(api: ScreenpipeAPI) { self.api = api }
+    init(api: ScreenpipeAPI, minDuration: TimeInterval = 180, clock: @escaping @Sendable () -> Date = Date.init) {
+        self.api = api
+        self.minDuration = minDuration
+        self.clock = clock
+    }
 
     func poll(deliver: @escaping @MainActor (CallPoll) -> Void) {
+        let (minDuration, now) = (minDuration, clock())
         api.get("meetings", "meetings", failed: { deliver(.failed($0)) }) { json in
             guard let meetings = json as? [[String: Any]] else { deliver(.failed("meetings: not a list")); return }
-            let active = meetings.first { !($0["meeting_end"] is String) }
-            deliver(.answered(active.map { CallState(app: $0["meeting_app"] as? String ?? "Unknown app", title: $0["title"] as? String) }))
+            deliver(.answered(ScreenpipeCallSource.call(in: meetings, now: now, minDuration: minDuration)))
         }
+    }
+
+    /// The first open meeting that has lasted `minDuration` (one without a start time counts).
+    nonisolated static func call(in meetings: [[String: Any]], now: Date, minDuration: TimeInterval) -> CallState? {
+        let active = meetings.first { m in
+            guard !(m["meeting_end"] is String) else { return false }
+            guard let start = (m["meeting_start"] as? String).flatMap(ScreenpipeSpeechSource.parseDate) else { return true }
+            return now.timeIntervalSince(start) >= minDuration
+        }
+        return active.map { CallState(app: $0["meeting_app"] as? String ?? "Unknown app", title: $0["title"] as? String) }
     }
 }
