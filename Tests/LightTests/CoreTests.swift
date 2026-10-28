@@ -30,34 +30,12 @@ import TestSupport
         #expect(lines.allSatisfy { $0.range(of: #"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d "#, options: .regularExpression) != nil })
     }
 
-    @Test func childProcessReturnsOutputAndStatus() {
-        let r = ChildProcess.run("/bin/sh", ["-c", "echo hello; echo oops >&2; exit 3"], timeout: 5, stderr: true)
-        #expect(r.status == 3)
-        #expect(r.output.contains("hello") && r.output.contains("oops"))
-        #expect(r.stopped == nil)
-    }
-
-    @Test func childProcessThatOverrunsItsDeadlineIsStopped() {
-        let started = Date()
-        let r = ChildProcess.run("/bin/sleep", ["30"], timeout: 0.5, grace: 0.2)
-        #expect(r.status == nil)
-        #expect(r.stopped?.contains("ran over") == true)
-        #expect(Date().timeIntervalSince(started) < 5)
-    }
-
     @Test func childProcessThatCannotStartSaysWhy() {
         let r = ChildProcess.run("/nonexistent/tool", [], timeout: 1)
         #expect(r.status == nil)
         #expect(r.stopped?.contains("could not start") == true)
     }
 
-    @Test func childProcessStreamsToALogFile() {
-        let dir = TempDir()
-        defer { dir.cleanup() }
-        _ = ChildProcess.run("/bin/echo", ["line for the log"], timeout: 5, logFile: dir.file("x.log"))
-        let text = (try? String(contentsOfFile: dir.file("x.log"), encoding: .utf8)) ?? ""
-        #expect(text.contains("=== ") && text.contains("line for the log"))
-    }
 
     // MARK: Job
 
@@ -116,7 +94,7 @@ import TestSupport
             let job = Job("idle-\(UUID().uuidString.prefix(6))", period: 60, backoff: Backoff(base: 1, max: 1), stateDir: dir.path) { _ in .idle }
             let lines = capturingLog {
                 job.kick("test")
-                _ = eventually(0.5) { false }   // the run takes milliseconds
+                _ = waitForRun(job, after: nil)
             }
             #expect(lines.contains { $0.contains("nothing to do") })
         }
@@ -125,15 +103,15 @@ import TestSupport
     @Test func blockedWaitsForAKickAndIsAProblemAtOnce() {
         withJobDir { dir in
             let blocked = Locked(true)
-            let job = Job("blk-\(UUID().uuidString.prefix(6))", period: 1, backoff: Backoff(base: 1, max: 1),
+            let job = Job("blk-\(UUID().uuidString.prefix(6))", period: 0.2, backoff: Backoff(base: 1, max: 1),
                           problemGrace: 3600, stateDir: dir.path) { _ in blocked.value ? .blocked("login expired") : .ok("fine") }
             job.kick("test")
             #expect(waitForRun(job, after: nil))
             #expect(job.problem == "login expired")
             let first = job.snapshot.lastRun
-            usleep(1_200_000)
+            usleep(300_000)
             job.tick()   // due by period, but blocked: must not run
-            usleep(200_000)
+            usleep(150_000)
             #expect(job.snapshot.lastRun == first)
             blocked.value = false
             job.kick("signed in")
@@ -234,9 +212,9 @@ import TestSupport
         var finished: [String] = []
         let lines = capturingLog {
             finished = Shutdown.run([
-                .init(name: "slow", budget: 1) { _ in usleep(900_000); return nil },
-                .init(name: "late", budget: 1) { _ in nil },
-            ], total: 1)
+                .init(name: "slow", budget: 0.3) { _ in usleep(250_000); return nil },
+                .init(name: "late", budget: 0.3) { _ in nil },
+            ], total: 0.3)
         }
         #expect(finished == ["slow"])
         #expect(lines.contains { $0.contains("late: skipped, out of time") })

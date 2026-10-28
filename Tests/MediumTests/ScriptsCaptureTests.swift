@@ -61,7 +61,9 @@ struct Jail: Hashable {
             stub(home + "/.bun/bin/bun", "bun", "exit 0")
             let bodies = [
                 "launchctl": "case \"$1\" in print) exit \(launchctlLoaded ? 0 : 1);; esac\nexit 0",
-                "pgrep": "exit \(screenpipeRunning ? 0 : 1)",
+                // Only screenpipe "runs": matching every pattern made the scripts' wait loop for
+                // the app's own exit spin its full 30 rounds in every run.
+                "pgrep": screenpipeRunning ? "case \"$*\" in *screenpipe*) exit 0;; esac\nexit 1" : "exit 1",
                 "curl": "cat <<'JSON'\n\(healthBody)\nJSON\nexit \(healthOK ? 0 : 1)",
                 "sqlite3": "echo \"\(unsynced)\"\nexit 0",
                 "nc": "exit \(tunnelUp ? 0 : 1)",

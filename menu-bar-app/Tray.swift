@@ -76,6 +76,11 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var handledPavlokRequests = Set<String>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // First, before anything talks to learner-server: a pairing file the server's installer
+        // (or its operator) left pins the server URL and client id and puts the key in the
+        // Keychain. Only when one is there, so a normal launch waits for nothing.
+        if !Paths.underTest { Pairing.importPayload(transport: URLSessionTransport()) }
+
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(receivePavlokTest(_:)),
             name: Notification.Name("com.benpollack.pavlok.test-request"), object: nil)
 
@@ -113,6 +118,12 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         stallWatch.start()
         talkMonitor.start()
         ChatAndOutboxJobs.install(heartbeat: { [weak self] in self?.heartbeatInput() ?? [:] })
+        // The server says where its pieces are; a changed endpointsVersion in a heartbeat
+        // reply refetches them, and the uploader follows the topology they report.
+        OutboxSender.shared.setHeartbeatReplyHandler { PairingLink.shared.heartbeatReplied($0, rpc: .shared) }
+        PairingLink.shared.onChange = { [weak self] _ in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.applyTopology() } }
+        }
         Scheduler.start()
         // The cue panels are slow to build (see cuePanel): ready before the first click.
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
@@ -174,6 +185,10 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let outbox = OutboxSender.shared
         let serverState = !status.serverReachable ? "🔴 unreachable" : outbox.keyProblem ? "🔑 no working device key" : "🟢 reachable"
         add("☁️ learner-server: \(serverState)")
+        if let moved = PairingLink.shared.moved {
+            add("   ⚠️ learner-server says its API moved to \(moved)")
+            _ = add("   Switch to \(URL(string: moved)?.host ?? moved)...", #selector(switchToAdvertisedServer))
+        }
         add("   └─ 📤 \(status.outboxDepth) queued | last: \(outbox.lastStatus)")
         if status.archiveParked > 0 { add("   ⚠️ \(status.archiveParked) chat(s) refused by the server (see menubar.log)") }
         add(status.cliSessions.map { "💻 CLI sessions (uploader): \($0)" } ?? "💻 CLI sessions: read by learner-server on this Mac")
@@ -190,9 +205,13 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let assignedArm = HabitExperimentManager.shared.resolveArm(for: talkMonitor.activeSessionId)
         _ = add("   🎯 Condition: \(mode.shortTag) [Active: \(assignedArm)]")
         add("   📈 Recorded Trials: \(status.trialCount)")
-        let growthbook = GrowthBookLink.current
-        _ = add("   🌐 Open GrowthBook Dashboard (\(growthbook?.host ?? "no learner-server URL"))...",
-                growthbook == nil ? nil : #selector(openGrowthBookDashboard))
+        // Links the server advertises; a missing one has no line.
+        if let growthbook = GrowthBookLink.current {
+            _ = add("   🌐 Open GrowthBook Dashboard (\(growthbook.host ?? growthbook.absoluteString))...", #selector(openGrowthBookDashboard))
+        }
+        if let web = PairingLink.shared.held?.web, let host = URL(string: web)?.host {
+            _ = add("   🌐 Open Learner (\(host))...", #selector(openLearnerWeb))
+        }
         statusMenu.addItem(NSMenuItem.separator())
 
         statusMenu.addItem(pavlokMenuItem())
@@ -205,8 +224,14 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
             add("\(ChromiumBrowser.selected.id == browser.id ? "✓ " : "   ")\(browser.name)", #selector(selectVaultBrowser(_:)), to: browserMenu).representedObject = browser.id
         }
         add("Sign AI Vault In From", to: settings).submenu = browserMenu
-        add(CLISessions.serverOnThisMac ? "✓ learner-server runs on this Mac (no uploader)" : "○ learner-server runs on another machine (uploader on)",
-            #selector(toggleServerOnThisMac), to: settings)
+        if let endpoints = PairingLink.shared.held {
+            // The server says where it runs: shown, not a choice.
+            add(endpoints.uploaderRequired ? "   learner-server runs on another machine (uploader on)" : "   learner-server runs on this Mac (no uploader)",
+                to: settings)
+        } else {
+            add(CLISessions.serverOnThisMac ? "✓ learner-server runs on this Mac (no uploader)" : "○ learner-server runs on another machine (uploader on)",
+                #selector(toggleServerOnThisMac), to: settings)
+        }
         let settingsParent = NSMenuItem(title: "Settings", action: nil, keyEquivalent: "")
         settingsParent.submenu = settings
         statusMenu.addItem(settingsParent)
@@ -243,13 +268,14 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
             current, appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev",
             screenpipeVersion: CaptureEnvironment.screenpipeVersion, capturePhase: CaptureEnvironment.capturePhase,
             lastSentAt: OutboxSender.shared.lastSentAt, lastExport: VaultExport.shared.lastRun,
-            outboxStatus: OutboxSender.shared.lastStatus)
+            outboxStatus: OutboxSender.shared.lastStatus,
+            pairing: PairingLink.shared.report(apiUrlInUse: LearnerAPI.baseURL, services: [("screenpipe", "http://localhost:3030")]))
     }
 
     /// recordAppHeartbeat input (contract/desktop.ts, RecordAppHeartbeatInput), from a status
     /// snapshot. Pure, so the light lane checks it against the contract.
     nonisolated static func heartbeat(_ s: AppStatus, appVersion: String, screenpipeVersion: String?, capturePhase: String?,
-                          lastSentAt: Date?, lastExport: Date?, outboxStatus: String) -> [String: Any] {
+                          lastSentAt: Date?, lastExport: Date?, outboxStatus: String, pairing: [String: Any]? = nil) -> [String: Any] {
         let captureState: String
         switch s.capture {
         case .recording: captureState = "recording"
@@ -268,7 +294,7 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
             "detail": ["capture": StatusProbe.describe(s.capture), "outboxStatus": outboxStatus,
                        "problems": s.problems.map { "\($0.source): \($0.text)" },
                        "capturePhase": capturePhase as Any? ?? NSNull()],
-        ]
+        ].merging(pairing.map { ["pairing": $0] } ?? [:]) { a, _ in a }
     }
 
     // MARK: - screenpipe sign-in flag
@@ -348,15 +374,44 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func toggleServerOnThisMac() {
         CLISessions.serverOnThisMac.toggle()
-        if CLISessions.serverOnThisMac {
-            let running = uploader
-            uploader = nil
-            DispatchQueue.global(qos: .userInitiated).async { running?.stop(grace: 5) }
-        } else {
+        applyTopology()
+    }
+
+    /// Runs the CLI uploader exactly when learner-server is on another machine (what the
+    /// server reports, else the setting).
+    func applyTopology() {
+        let needed = !CLISessions.serverOnThisMac
+        if needed, uploader == nil {
             uploader = CLISessions.helper(key: { LearnerRPC.shared.key() })
             uploader?.start()
+        } else if !needed, let running = uploader {
+            uploader = nil
+            DispatchQueue.global(qos: .userInitiated).async { running.stop(grace: 5) }
+        } else {
+            return
         }
-        statusJob.kick("uploader setting changed")
+        statusJob.kick("uploader \(needed ? "started" : "stopped") for where learner-server runs")
+    }
+
+    @objc func openLearnerWeb() {
+        guard let web = PairingLink.shared.held?.web, let url = URL(string: web) else { return }
+        _ = openURL(url)
+    }
+
+    /// learner-server advertises its API at another URL: switching sends the device key there,
+    /// so only on the owner's word. Pins it and restarts the app onto it.
+    @objc func switchToAdvertisedServer() {
+        guard let moved = PairingLink.shared.moved else { return }
+        let alert = NSAlert()
+        alert.messageText = "Switch learner-server?"
+        alert.informativeText = "learner-server now says its API is at\n\(moved)\n\nThis app uses \(LearnerAPI.baseURL). Switching sends this Mac's device key to the new address and restarts Learner Desktop."
+        alert.addButton(withTitle: "Switch")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        Pairing.pin(apiUrl: moved, clientId: LearnerAPI.clientId)
+        log.info("switching learner-server to \(moved) at the owner's word; restarting")
+        _ = ChildProcess.run("/bin/launchctl", ["kickstart", "-k", "gui/\(getuid())/com.benpollack.learner-desktop"], timeout: 10)
     }
 
     @objc func signInToVault(_ sender: NSMenuItem) {
@@ -393,7 +448,7 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func openGrowthBookDashboard() {
         guard let url = GrowthBookLink.current else {
-            log.warn("no GrowthBook link: the learner-server URL \(LearnerRPC.shared.baseURL) is not a URL")
+            log.warn("no GrowthBook link: learner-server publishes none")
             return
         }
         log.info("opening GrowthBook at \(url.absoluteString)")

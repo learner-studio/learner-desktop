@@ -16,6 +16,15 @@ func toolIO(_ p: Printed, env: [String: String] = [:], cwd: String = NSTemporary
         #expect(Tools.shellQuote(#"it's "x""#) == #"'it'"'"'s "x"'"#)
     }
 
+    /// SQL that may come from production data runs as one statement: a `;` inside could
+    /// end the read-only transaction and run whatever follows.
+    @Test func readOnlySQLTakesExactlyOneStatement() throws {
+        #expect(try OVHRemote.singleStatement("SELECT 1") == "SELECT 1")
+        #expect(try OVHRemote.singleStatement("  SELECT 1 ;; \n") == "SELECT 1")
+        #expect(throws: ToolError.self) { try OVHRemote.singleStatement("SELECT 1; COMMIT; DELETE FROM habit_events") }
+        #expect(throws: ToolError.self) { try OVHRemote.singleStatement(" ; ") }
+    }
+
     @Test func unknownToolExitsTwoWithUsage() {
         let p = Printed()
         #expect(Tools.main(["nope"], io: toolIO(p)) == 2)

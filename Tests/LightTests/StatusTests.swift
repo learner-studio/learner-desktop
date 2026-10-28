@@ -31,7 +31,7 @@ import TestSupport
         #expect(kind({ $0.problems = [Problem(source: "Export", text: "claude login expired")] }) == "export")
         #expect(kind({ $0.problems = [Problem(source: "Trials", text: "the trial database will not open")] }) == "trials")
         #expect(kind({ $0.problems = [Problem(source: "Archive", text: "HTTP 503")] }) == "problem:Archive")
-        #expect(kind({ $0.problems = [Problem(source: "Helper:tunnel", text: "tunnel keeps exiting")] }) == "problem:Helper:tunnel")
+        #expect(kind({ $0.problems = [Problem(source: "Helper:uploader", text: "uploader keeps exiting")] }) == "problem:Helper:uploader")
         #expect(kind({ $0.capture = .degraded("vision ok, audio stalled") }) == "screenpipe-degraded")
         // A rate limit is waiting (yellow): below every red problem, above a degraded capture.
         let limited = Problem(source: "Export", text: "chatgpt: rate limited", waiting: true)
@@ -55,8 +55,8 @@ import TestSupport
         var s = healthy
         s.problems = [Problem(source: "Archive", text: "HTTP 503")]
         #expect(TrayState.make(s, coach: CoachLive()).title == "🧠 🔴 SYNC")
-        s.problems = [Problem(source: "Helper:tunnel", text: "down")]
-        #expect(TrayState.make(s, coach: CoachLive()).title == "🧠 🔴 TUNNEL")
+        s.problems = [Problem(source: "Helper:uploader", text: "down")]
+        #expect(TrayState.make(s, coach: CoachLive()).title == "🧠 🔴 UPLOADER")
     }
 
     @Test func everyChangeIsLoggedAndNothingElse() {

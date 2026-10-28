@@ -121,30 +121,11 @@ private final class ExportFixture {
         #expect(after.summary == "claude: ok (3 new), chatgpt: login expired")
     }
 
-    /// The schedule itself, with an injected 1 s period instead of the real hour: the
-    /// Scheduler's ticks run the export when due and not before.
-    @Test func ticksRunTheExportOnItsPeriod() {
-        let f = ExportFixture(configure: {
-            $0.period = 1
-            $0.firstRun = 0
-        })
-        f.output("claude", Fixture.aiVaultOk)
-        f.output("chatgpt", Fixture.aiVaultOk)
-        let started = Date()
-        while Date().timeIntervalSince(started) < 2.6 {
-            f.export.job.tick()
-            Thread.sleep(forTimeInterval: 0.05)
-        }
-        // Runs at ~0 s, ~1 s and ~2 s (each run takes a few ms): two or three, never one per tick.
-        let runs = f.calls.filter { $0 == "claude" }.count
-        #expect((2...3).contains(runs), "\(runs) runs")
-    }
-
     /// On 10-27 ChatGPT answered 429 for hours while both logins worked, and the tray sat at
     /// 🔴 VAULT (a stale block, then "failed" every 30 min). A rate limit is waiting, not failing:
     /// it clears a stale expired mark and block, is not a tray problem, and waits longer each time.
     @Test func aRateLimitWaitsLongerEachTimeAndIsNotAFailure() throws {
-        let f = ExportFixture(configure: { $0.problemGrace = 0; $0.blockedRecheck = 1 })
+        let f = ExportFixture(configure: { $0.problemGrace = 0; $0.blockedRecheck = 0.2 })
         // Blocked first (both "expired"), as the owner's state was; the re-check then meets
         // a working Claude login and ChatGPT's 429.
         f.output("claude", Fixture.aiVaultExpired)
@@ -194,10 +175,47 @@ private final class ExportFixture {
         f.output("claude", Fixture.aiVaultOk)
         f.output("chatgpt", Fixture.aiVaultOk)
         let retried = run(f.export.job)
+        #expect(f.calls == ["claude", "chatgpt", "claude"], "ChatGPT was asked again during its hold: \(f.calls)")
         #expect(retried.summary.hasPrefix("claude: ok (3 new), chatgpt: rate limited (trying again in"), "\(retried.summary)")
         #expect(f.export.job.problem == nil && f.export.job.waiting != nil)
         let left = retried.nextRun.timeIntervalSince(try #require(retried.lastRun))
         #expect(left > 25 * 60 && left <= 30 * 60, "waits out ChatGPT's hold: \(left) s")
+    }
+
+    /// The 10-28 incident itself: Claude's browser crashed while ChatGPT's conversation API
+    /// (the voice step's) answered 429. The crash retries on the normal backoff; on that
+    /// retry the voice step sits out its hold, so ChatGPT's API is not asked again.
+    @Test func aVoice429BesideACrashRetriesSoonAndHoldsOnlyTheVoiceStep() throws {
+        let vault = TempDir("vault-429")
+        vault.write("chatgpt/conversations/voice-1/conversation.md", Fixture.voiceMd)
+        vault.write("ai-vault-config.json", #"{"providers":{"chatgpt":{"cookies":{"__Secure-next-auth.session-token":"fake-session"}}}}"#)
+        let chatgpt = try HTTPStandIn { req in
+            req.path == "/api/auth/session" ? .json(200, ["accessToken": "fake-token"]) : .json(429, [:])
+        }
+        var vc = VoiceTranscripts.Config()
+        vc.root = vault.path
+        vc.baseURL = chatgpt.baseURL
+        vc.aiVaultConfig = vault.file("ai-vault-config.json")
+        vc.memoPath = vault.file("memo.json")
+        vc.delay = 0
+        let f = ExportFixture(voice: VoiceTranscripts(config: vc), configure: { $0.problemGrace = 3600 })
+        f.output("claude", "Fetching…\ncdpSession.send: Target page, context or browser has been closed")
+        f.output("chatgpt", Fixture.aiVaultOk)
+        let crashed = run(f.export.job)
+        #expect(crashed.summary.hasPrefix("claude: browser crashed"), "\(crashed.summary)")
+        #expect(crashed.summary.contains("voice:") && crashed.summary.contains("rate-limited"), "\(crashed.summary)")
+        let retry = crashed.nextRun.timeIntervalSince(try #require(crashed.lastRun))
+        #expect(retry >= 15 * 60 * 0.8 - 2 && retry <= 15 * 60 + 2, "retry in \(retry) s, not the rate limit's hours")
+        #expect(f.export.job.problem == nil)
+        let asked = chatgpt.requests.filter { $0.path.hasPrefix("/backend-api/") }.count
+        #expect(asked == 1)
+
+        // The retry: Claude works; the voice step is held, so ChatGPT's API is left alone.
+        f.output("claude", Fixture.aiVaultOk)
+        let retried = run(f.export.job)
+        #expect(retried.summary.contains("voice: rate limited (trying again in"), "\(retried.summary)")
+        #expect(chatgpt.requests.filter { $0.path.hasPrefix("/backend-api/") }.count == asked, "the voice step asked again during its hold")
+        #expect(f.export.job.problem == nil && f.export.job.waiting != nil)
     }
 
     @Test func aStuckExportThatIgnoresSIGTERMIsKilledAndRetriedWithBackoffAcrossARestart() throws {

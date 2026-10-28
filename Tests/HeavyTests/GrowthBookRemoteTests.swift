@@ -80,11 +80,31 @@ struct GrowthBookRemoteTests {
 // The tray's GrowthBook link against the deployed GrowthBook, READ-ONLY: its page and its
 // API must share the link's origin (10-28: a tunnelled page could not reach its API), and
 // the link must answer (the page, or that site's login).
-@Suite("GrowthBook link (deployed)", .tags(.heavy), .timeLimit(.minutes(2)),
-       .enabled(if: ProcessInfo.processInfo.environment["LEARNER_HEAVY"] == "1", "heavy lane: set LEARNER_HEAVY=1"))
+@Suite("GrowthBook link (deployed)", .tags(.heavy, .status), .quietLog, .timeLimit(.minutes(2)),
+       .enabled(if: Live.remote, "remote opt-in: set LEARNER_HEAVY=1 LEARNER_REMOTE_E2E=1"))
 struct GrowthBookLinkTests {
+    /// The live server, read-only: its health says learner-server and pairing contract 1, and
+    /// getPairingEndpoints (this Mac's own device key; it reads, records nothing) advertises
+    /// the remote topology with the uploader on and a GrowthBook link.
+    @Test func theServerAdvertisesItsEndpointsToThisDevice() throws {
+        let rpc = LearnerRPC.shared
+        if case .failure(let e) = Pairing.checkServer(rpc.baseURL, transport: URLSessionTransport()) { Issue.record("\(rpc.baseURL): \(e)") }
+        let link = PairingLink(path: NSTemporaryDirectory() + "live-endpoints-\(UUID().uuidString).json")
+        let reply = link.refresh(rpc: rpc)
+        try #require(reply.kind == .ok, "getPairingEndpoints: \(reply.describe) \(reply.message ?? "")")
+        let e = try #require(link.held)
+        #expect(e.topology == "remote" && e.uploaderRequired)
+        #expect(link.moved == nil, "the server advertises \(e.apiBase), the app uses \(rpc.baseURL)")
+        #expect(e.growthbookApp != nil, "no GrowthBook advertised")
+    }
+
     @Test func theTrayLinkIsWhereGrowthBookServesItsPageAndAPI() throws {
-        let link = try #require(GrowthBookLink.url(serverBase: LearnerRPC.defaultBaseURL, override: nil))
+        // What the server advertises (the tray's link), else derived as before pairing.
+        let link: URL = try {
+            let pairing = PairingLink(path: NSTemporaryDirectory() + "live-endpoints-\(UUID().uuidString).json")
+            pairing.refresh(rpc: LearnerRPC.shared)
+            return try #require(GrowthBookLink.current(override: nil, advertised: pairing.held, serverBase: LearnerRPC.shared.baseURL))
+        }()
         let env = try OVHRemote(timeout: 60).run("docker inspect biztools-growthbook-growthbook-1 --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E '^(APP_ORIGIN|API_HOST)='")
         let values = Dictionary(uniqueKeysWithValues: env.split(separator: "\n").compactMap { line -> (String, String)? in
             let parts = line.split(separator: "=", maxSplits: 1).map(String.init)

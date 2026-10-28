@@ -36,7 +36,7 @@ private let rowOK = #"[{"id":1,"audio_chunk_id":2,"timestamp":"2026-09-09T00:00:
             api = s.baseURL
         }
         defer { server?.stop() }
-        var env = ProcessInfo.processInfo.environment
+        var env = appEnv()
         env["HOME"] = dir.path
         env["PREFLIGHT_EXPECTED"] = expFile
         env["SCREENPIPE_API"] = api

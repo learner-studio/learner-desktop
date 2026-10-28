@@ -134,11 +134,11 @@ func accepted(_ s: StubTransport.Seen) -> HTTPReply {
         let sender = OutboxSender(logger: f.logger, rpc: LearnerRPC(baseURL: "http://x.invalid", transport: slow, key: { _ in "k" }),
                                   config: { var c = OutboxSender.Config(); c.jobName = drainJob.name; c.heartbeatJobName = drainHeartbeat.name; return c }())
         let started = Date()
-        let left = sender.drain(until: Date().addingTimeInterval(1))
+        let left = sender.drain(until: Date().addingTimeInterval(0.3))
         let took = Date().timeIntervalSince(started)
         #expect(left == 3)
-        #expect(took < 1.5, "drain took \(took) s")
-        #expect(slow.timeouts.allSatisfy { $0 <= 1.0 })
+        #expect(took < 0.8, "drain took \(took) s")
+        #expect(slow.timeouts.allSatisfy { $0 <= 0.3 })
         withExtendedLifetime((sender, drainJob, drainHeartbeat)) {}
     }
 

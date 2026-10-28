@@ -21,6 +21,18 @@ func describe(_ o: Job.Outcome) -> String {
 
 /// Kicks `job` and waits for it to record an outcome (not `.idle`, which records none).
 @discardableResult
+/// The environment for a spawned app binary: this process's, with the app's data and
+/// ai-vault folders pinned to the test sandbox (Paths, which are scratch under test). A
+/// child is not "under test" itself, so without these it would use the owner's real ones
+/// whenever the lane is run without scripts/test.sh.
+func appEnv(_ extra: [String: String] = [:]) -> [String: String] {
+    var env = ProcessInfo.processInfo.environment
+    env["LEARNER_DATA_DIR"] = Paths.data
+    env["AI_VAULT_DATA"] = Paths.vault
+    env.merge(extra) { _, new in new }
+    return env
+}
+
 func run(_ job: Job, timeout: TimeInterval = 30) -> Job.State {
     let before = job.snapshot.lastRun
     job.kick("test")

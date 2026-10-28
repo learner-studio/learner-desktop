@@ -142,8 +142,11 @@ struct OVHRemote {
         defer { try? FileManager.default.removeItem(atPath: dir) }
         let input = dir + "/script.sh", errors = dir + "/stderr"
         try script.write(toFile: input, atomically: true, encoding: .utf8)
-        let r = ChildProcess.run("/bin/sh", ["-c", #"exec "$0" -o BatchMode=yes -o ConnectTimeout=8 "$1" bash -s < "$2" 2> "$3""#,
-                                             ssh, host, input, errors], timeout: timeout)
+        // One shared connection for a burst of calls (the heavy lane makes about a dozen):
+        // the first opens it, the rest reuse it for a minute.
+        let control = NSTemporaryDirectory() + "learner-ssh-%C"
+        let r = ChildProcess.run("/bin/sh", ["-c", #"exec "$0" -o BatchMode=yes -o ConnectTimeout=8 -o ControlMaster=auto -o "ControlPath=$4" -o ControlPersist=60 "$1" bash -s < "$2" 2> "$3""#,
+                                             ssh, host, input, errors, control], timeout: timeout)
         let stderr = (try? String(contentsOfFile: errors, encoding: .utf8)) ?? ""
         guard r.ok else {
             let why = r.stopped ?? "exit \(r.status ?? -1)"
@@ -164,9 +167,22 @@ struct OVHRemote {
         try run(OVHRemote.mongoScript(js, marker: marker))
     }
 
-    /// Runs `sql` read-only against the `habits` database (BEGIN READ ONLY ... ROLLBACK).
+    /// Runs one `sql` statement read-only against the `habits` database. Two guards, since
+    /// the statement can come from production data (GrowthBook's stored exposure query):
+    /// one statement only (a `;` inside could end the read-only transaction and run more),
+    /// and every transaction of the session read-only (default_transaction_read_only).
     func readOnlySQL(_ sql: String) throws -> String {
-        try run("sudo -u postgres psql -X -qAt -v ON_ERROR_STOP=1 -d habits <<'SQL'\nBEGIN READ ONLY;\n" + sql + "\nROLLBACK;\nSQL\n")
+        let one = try OVHRemote.singleStatement(sql)
+        return try run("sudo -u postgres env PGOPTIONS='-c default_transaction_read_only=on' psql -X -qAt -v ON_ERROR_STOP=1 -d habits <<'SQL'\nBEGIN READ ONLY;\n"
+                       + one + ";\nROLLBACK;\nSQL\n")
+    }
+
+    /// `sql` without a trailing `;`, or an error when it holds more than one statement.
+    static func singleStatement(_ sql: String) throws -> String {
+        var s = sql.trimmingCharacters(in: .whitespacesAndNewlines)
+        while s.hasSuffix(";") { s = String(s.dropLast()).trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard !s.isEmpty, !s.contains(";") else { throw ToolError("read-only SQL must be one statement: \(String(s.prefix(200)))") }
+        return s
     }
 
     /// The last line of mongosh output, parsed as a JSON object.

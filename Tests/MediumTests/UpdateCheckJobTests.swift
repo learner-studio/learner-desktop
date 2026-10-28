@@ -119,12 +119,12 @@ private final class UpdateCheckFixture {
         var c = f.check.config
         let version = Locked("1.0.0")
         c.installedVersion = { version.value }
-        c.settleSeconds = 0.5
+        c.settleSeconds = 0.15
         let check = ScreenpipeUpdateCheck(config: c)
         #expect(describe(check.runOnce()) == "idle") // baseline
         version.value = "1.0.1"
         #expect(describe(check.runOnce()) == "idle") // seen, settling
-        Thread.sleep(forTimeInterval: 0.6)
+        Thread.sleep(forTimeInterval: 0.2)
         #expect(describe(check.runOnce()) == "ok: STATUS: OK")
         #expect(describe(check.runOnce()) == "idle") // once per version
         #expect(f.dir.read("logs/index.log").components(separatedBy: "screenpipe updated from 1.0.0 to 1.0.1").count == 2)

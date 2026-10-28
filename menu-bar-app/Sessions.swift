@@ -24,8 +24,9 @@ enum CLISessions {
     static let stateDir = env["LEARNER_UPLOAD_STATE_DIR"] ?? NSHomeDirectory() + "/.learner/uploader"
     static var statusPath: String { stateDir + "/status.json" }
 
+    /// What the paired server reports (its uploader.required), else the owner's setting.
     static var serverOnThisMac: Bool {
-        get { UserDefaults.standard.bool(forKey: defaultsKey) }
+        get { PairingLink.shared.held.map { !$0.uploaderRequired } ?? UserDefaults.standard.bool(forKey: defaultsKey) }
         set {
             UserDefaults.standard.set(newValue, forKey: defaultsKey)
             log.info("learner-server runs on this Mac: \(newValue) (the uploader \(newValue ? "is not needed" : "runs here"))")

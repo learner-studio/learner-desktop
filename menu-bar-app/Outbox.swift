@@ -382,6 +382,8 @@ final class OutboxSender: Sendable {
         var status = "not tried yet"
         var sentAt: Date?
         var heartbeat: (@Sendable () -> [String: Any])?
+        /// Gets each accepted heartbeat's reply (its endpointsVersion: see PairingLink).
+        var afterHeartbeat: (@Sendable (Any?) -> Void)?
         var stopOutcome: Job.Outcome = .idle
     }
     private let state = Locked(State())
@@ -410,6 +412,9 @@ final class OutboxSender: Sendable {
     /// The heartbeat's recordAppHeartbeat input (contract RecordAppHeartbeatInput), built
     /// only when a heartbeat is due. The tray provides it.
     func setHeartbeatInput(_ input: @escaping @Sendable () -> [String: Any]) { state.withLock { $0.heartbeat = input } }
+
+    /// Called on the heartbeat's thread with each accepted reply.
+    func setHeartbeatReplyHandler(_ handler: @escaping @Sendable (Any?) -> Void) { state.withLock { $0.afterHeartbeat = handler } }
 
     // MARK: Triggers
 
@@ -541,7 +546,9 @@ final class OutboxSender: Sendable {
         guard let build = state.value.heartbeat else { return .idle }
         let r = rpc.call("recordAppHeartbeat", build(), timeout: config.callTimeout)
         switch r.kind {
-        case .ok: return .ok("sent")
+        case .ok:
+            state.value.afterHeartbeat?(r.body)
+            return .ok("sent")
         case .auth: return .blocked("device key refused (\(r.describe))")
         case .noKey: return .blocked("no device key")
         case .transient: return .failed(r.status == 0 ? "server unreachable: \(r.error ?? "no answer")" : "server error \(r.status)")

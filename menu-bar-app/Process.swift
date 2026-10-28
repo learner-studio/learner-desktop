@@ -29,8 +29,10 @@ final class ManagedHelper: Sendable {
         var backoff = Backoff(base: 1, max: 60, jitter: 0)
         var lastExit: (code: Int32, rule: ExitRule)?
     }
-    private let state = Locked(State())
+    private let state: Locked<State>
     static let healthyAfter: TimeInterval = 60
+    /// How long an orphan from a crashed run gets to exit after SIGTERM before SIGKILL.
+    private let reapWait: TimeInterval
 
     /// Extra environment, read at each launch (so a key is fetched fresh and never stored).
     private let environment: @Sendable () -> [String: String]
@@ -44,7 +46,12 @@ final class ManagedHelper: Sendable {
 
     init(name: String, executable: String, arguments: [String], marker: String,
          runtimeDir: String = Paths.data, environment: @escaping @Sendable () -> [String: String] = { [:] },
-         minRestart: TimeInterval = 1, exitRules: [Int32: ExitRule] = [:]) {
+         minRestart: TimeInterval = 1, exitRules: [Int32: ExitRule] = [:],
+         restartBackoff: Backoff = Backoff(base: 1, max: 60, jitter: 0), reapWait: TimeInterval = 3) {
+        var initial = State()
+        initial.backoff = restartBackoff
+        state = Locked(initial)
+        self.reapWait = reapWait
         self.environment = environment
         self.minRestart = minRestart
         self.exitRules = exitRules
@@ -178,7 +185,7 @@ final class ManagedHelper: Sendable {
         log.warn("stopping one left over from a previous run (pid \(pid))")
         let tree = [pid] + ChildProcess.descendants(of: pid)
         kill(pid, SIGTERM)
-        let deadline = Date().addingTimeInterval(3)
+        let deadline = Date().addingTimeInterval(reapWait)
         while kill(pid, 0) == 0 && Date() < deadline { usleep(100_000) }
         for p in tree where kill(p, 0) == 0 { kill(p, SIGKILL) }
     }

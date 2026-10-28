@@ -21,7 +21,8 @@ enum Live {
         return try? JSONSerialization.jsonObject(with: d)
     }
 
-    static var health: [String: Any]? { json(api + "/health") as? [String: Any] }
+    /// Fetched once for the lane (every suite instance used to GET it again).
+    nonisolated(unsafe) static let health: [String: Any]? = json(api + "/health") as? [String: Any]
     static let screenpipeUp = heavy && health != nil
 
     static func sql(_ query: String) -> Any? { json(api + "/raw_sql", body: ["query": query]) }

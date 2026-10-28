@@ -2089,8 +2089,7 @@
             "type": "string",
             "enum": [
               "codex",
-              "claude",
-              "agy"
+              "claude"
             ]
           },
           "model": {
@@ -2133,8 +2132,7 @@
             "type": "string",
             "enum": [
               "codex",
-              "claude",
-              "agy"
+              "claude"
             ]
           },
           "model": {
@@ -2167,8 +2165,7 @@
             "type": "string",
             "enum": [
               "codex",
-              "claude",
-              "agy"
+              "claude"
             ]
           },
           "model": {
@@ -2199,6 +2196,900 @@
           "updatedAt"
         ],
         "additionalProperties": {}
+      }
+    },
+    "getLearningPolicy": {
+      "client": "web",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {}
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "injectionRate": {
+            "default": 40,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "multipleOf": 20
+          },
+          "progressionLinearity": {
+            "default": 60,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "multipleOf": 20
+          },
+          "prerequisiteCount": {
+            "default": 2,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5
+          },
+          "prerequisiteDepth": {
+            "default": 2,
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5
+              },
+              {
+                "type": "string",
+                "const": "all"
+              }
+            ]
+          },
+          "spacedRepetition": {
+            "default": false,
+            "type": "boolean"
+          },
+          "reviewHops": {
+            "default": 1,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5
+          },
+          "reviewUrgency": {
+            "default": 40,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "multipleOf": 20
+          },
+          "taskRelevance": {
+            "default": 80,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "multipleOf": 20
+          },
+          "misconceptionPriority": {
+            "default": 80,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "multipleOf": 20
+          },
+          "frontierPull": {
+            "default": 40,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "multipleOf": 20
+          },
+          "uncertaintyProbing": {
+            "default": 40,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "multipleOf": 20
+          },
+          "repetitionAvoidance": {
+            "default": 60,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "multipleOf": 20
+          },
+          "transferDepth": {
+            "default": 60,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "multipleOf": 20
+          },
+          "updatedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "injectionRate",
+          "progressionLinearity",
+          "prerequisiteCount",
+          "prerequisiteDepth",
+          "spacedRepetition",
+          "reviewHops",
+          "reviewUrgency",
+          "taskRelevance",
+          "misconceptionPriority",
+          "frontierPull",
+          "uncertaintyProbing",
+          "repetitionAvoidance",
+          "transferDepth",
+          "updatedAt"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "saveLearningPolicyFunction": {
+      "client": "web",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "injectionRate": {
+            "default": 40,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "multipleOf": 20
+          },
+          "progressionLinearity": {
+            "default": 60,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "multipleOf": 20
+          },
+          "prerequisiteCount": {
+            "default": 2,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5
+          },
+          "prerequisiteDepth": {
+            "default": 2,
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5
+              },
+              {
+                "type": "string",
+                "const": "all"
+              }
+            ]
+          },
+          "spacedRepetition": {
+            "default": false,
+            "type": "boolean"
+          },
+          "reviewHops": {
+            "default": 1,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5
+          },
+          "reviewUrgency": {
+            "default": 40,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "multipleOf": 20
+          },
+          "taskRelevance": {
+            "default": 80,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "multipleOf": 20
+          },
+          "misconceptionPriority": {
+            "default": 80,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "multipleOf": 20
+          },
+          "frontierPull": {
+            "default": 40,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "multipleOf": 20
+          },
+          "uncertaintyProbing": {
+            "default": 40,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "multipleOf": 20
+          },
+          "repetitionAvoidance": {
+            "default": 60,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "multipleOf": 20
+          },
+          "transferDepth": {
+            "default": 60,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "multipleOf": 20
+          }
+        }
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "injectionRate": {
+            "default": 40,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "multipleOf": 20
+          },
+          "progressionLinearity": {
+            "default": 60,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "multipleOf": 20
+          },
+          "prerequisiteCount": {
+            "default": 2,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5
+          },
+          "prerequisiteDepth": {
+            "default": 2,
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5
+              },
+              {
+                "type": "string",
+                "const": "all"
+              }
+            ]
+          },
+          "spacedRepetition": {
+            "default": false,
+            "type": "boolean"
+          },
+          "reviewHops": {
+            "default": 1,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5
+          },
+          "reviewUrgency": {
+            "default": 40,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "multipleOf": 20
+          },
+          "taskRelevance": {
+            "default": 80,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "multipleOf": 20
+          },
+          "misconceptionPriority": {
+            "default": 80,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "multipleOf": 20
+          },
+          "frontierPull": {
+            "default": 40,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "multipleOf": 20
+          },
+          "uncertaintyProbing": {
+            "default": 40,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "multipleOf": 20
+          },
+          "repetitionAvoidance": {
+            "default": 60,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "multipleOf": 20
+          },
+          "transferDepth": {
+            "default": 60,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "multipleOf": 20
+          },
+          "updatedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "injectionRate",
+          "progressionLinearity",
+          "prerequisiteCount",
+          "prerequisiteDepth",
+          "spacedRepetition",
+          "reviewHops",
+          "reviewUrgency",
+          "taskRelevance",
+          "misconceptionPriority",
+          "frontierPull",
+          "uncertaintyProbing",
+          "repetitionAvoidance",
+          "transferDepth",
+          "updatedAt"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "getCallIdentity": {
+      "client": "web",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {}
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "names": {
+            "maxItems": 50,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            }
+          },
+          "emails": {
+            "maxItems": 50,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 320,
+              "format": "email",
+              "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$"
+            }
+          },
+          "updatedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "names",
+          "emails",
+          "updatedAt"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "saveCallIdentity": {
+      "client": "web",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "names": {
+            "maxItems": 50,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            }
+          },
+          "emails": {
+            "maxItems": 50,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 320,
+              "format": "email",
+              "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$"
+            }
+          }
+        },
+        "required": [
+          "names",
+          "emails"
+        ]
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "names": {
+            "maxItems": 50,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            }
+          },
+          "emails": {
+            "maxItems": 50,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 320,
+              "format": "email",
+              "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$"
+            }
+          },
+          "updatedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reattributed": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "names",
+          "emails",
+          "updatedAt",
+          "reattributed"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "listCallsNeedingAttribution": {
+      "client": "web",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {}
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "calls": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "sessionId": {
+                  "type": "string"
+                },
+                "source": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "eventTime": {
+                  "type": "string"
+                },
+                "attribution": {
+                  "type": "string",
+                  "enum": [
+                    "inferred",
+                    "unattributed"
+                  ]
+                },
+                "participants": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "speakers": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "label": {
+                        "type": "string"
+                      },
+                      "lines": {
+                        "type": "integer",
+                        "minimum": -9007199254740991,
+                        "maximum": 9007199254740991
+                      },
+                      "sample": {
+                        "type": "string"
+                      },
+                      "learner": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "label",
+                      "lines",
+                      "sample",
+                      "learner"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "sessionId",
+                "source",
+                "title",
+                "eventTime",
+                "attribution",
+                "participants",
+                "speakers"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "calls"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "claimCallSpeakers": {
+      "client": "web",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "speakers": {
+            "maxItems": 20,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            }
+          },
+          "remember": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "sessionId",
+          "speakers"
+        ]
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "reattributed": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "reattributed"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "getReadAiWebhook": {
+      "client": "web",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {}
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "configured": {
+            "type": "boolean"
+          },
+          "tokenHint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updatedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lastDelivery": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "at": {
+                    "type": "string"
+                  },
+                  "test": {
+                    "type": "boolean"
+                  },
+                  "sessionId": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "outcome": {
+                    "type": "string",
+                    "enum": [
+                      "stored",
+                      "updated",
+                      "unchanged",
+                      "duplicate",
+                      "not-stored",
+                      "test-ok"
+                    ]
+                  },
+                  "graded": {
+                    "type": "boolean"
+                  },
+                  "lines": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "at",
+                  "test",
+                  "sessionId",
+                  "title",
+                  "outcome",
+                  "graded",
+                  "lines"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "configured",
+          "tokenHint",
+          "updatedAt",
+          "lastDelivery"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "saveReadAiWebhook": {
+      "client": "web",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "token": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._~-]{24,256}$"
+          }
+        },
+        "required": [
+          "token"
+        ]
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "configured": {
+            "type": "boolean"
+          },
+          "tokenHint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updatedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lastDelivery": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "at": {
+                    "type": "string"
+                  },
+                  "test": {
+                    "type": "boolean"
+                  },
+                  "sessionId": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "outcome": {
+                    "type": "string",
+                    "enum": [
+                      "stored",
+                      "updated",
+                      "unchanged",
+                      "duplicate",
+                      "not-stored",
+                      "test-ok"
+                    ]
+                  },
+                  "graded": {
+                    "type": "boolean"
+                  },
+                  "lines": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "at",
+                  "test",
+                  "sessionId",
+                  "title",
+                  "outcome",
+                  "graded",
+                  "lines"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "configured",
+          "tokenHint",
+          "updatedAt",
+          "lastDelivery"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "clearReadAiWebhook": {
+      "client": "web",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {}
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "configured": {
+            "type": "boolean"
+          },
+          "tokenHint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updatedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lastDelivery": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "at": {
+                    "type": "string"
+                  },
+                  "test": {
+                    "type": "boolean"
+                  },
+                  "sessionId": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "outcome": {
+                    "type": "string",
+                    "enum": [
+                      "stored",
+                      "updated",
+                      "unchanged",
+                      "duplicate",
+                      "not-stored",
+                      "test-ok"
+                    ]
+                  },
+                  "graded": {
+                    "type": "boolean"
+                  },
+                  "lines": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "at",
+                  "test",
+                  "sessionId",
+                  "title",
+                  "outcome",
+                  "graded",
+                  "lines"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "configured",
+          "tokenHint",
+          "updatedAt",
+          "lastDelivery"
+        ],
+        "additionalProperties": false
       }
     },
     "getLearningVectorExperiment": {
@@ -3101,6 +3992,174 @@
         "additionalProperties": {}
       }
     },
+    "deleteLearningCurriculum": {
+      "client": "web",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "curriculumId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "allowSeed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "curriculumId"
+        ]
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "purgeId": {
+            "type": "string"
+          },
+          "curriculumId": {
+            "type": "string"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "frozen",
+              "completed"
+            ]
+          },
+          "conceptCount": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "counts": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {
+              "type": [
+                "number",
+                "string"
+              ]
+            }
+          },
+          "requestedBy": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "completedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "purgeId",
+          "curriculumId",
+          "title",
+          "status",
+          "conceptCount",
+          "counts",
+          "requestedBy",
+          "createdAt",
+          "completedAt"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "getLearningCurriculumPurge": {
+      "client": "web",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "purgeId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          }
+        },
+        "required": [
+          "purgeId"
+        ]
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "purgeId": {
+            "type": "string"
+          },
+          "curriculumId": {
+            "type": "string"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "frozen",
+              "completed"
+            ]
+          },
+          "conceptCount": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "counts": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {
+              "type": [
+                "number",
+                "string"
+              ]
+            }
+          },
+          "requestedBy": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "completedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "purgeId",
+          "curriculumId",
+          "title",
+          "status",
+          "conceptCount",
+          "counts",
+          "requestedBy",
+          "createdAt",
+          "completedAt"
+        ],
+        "additionalProperties": false
+      }
+    },
     "rebuildCurriculumTree": {
       "client": "web",
       "input": {
@@ -3516,6 +4575,77 @@
           "size",
           "appended",
           "replayed"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "getTranscriptUploadState": {
+      "client": "remote",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "claude",
+              "codex"
+            ]
+          },
+          "clientId": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+          },
+          "paths": {
+            "minItems": 1,
+            "maxItems": 200,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 512,
+              "pattern": "^[A-Za-z0-9._-]+(\\/[A-Za-z0-9._-]+){0,7}$"
+            }
+          }
+        },
+        "required": [
+          "provider",
+          "clientId",
+          "paths"
+        ]
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "size": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "path",
+                "size",
+                "sha256"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "files"
         ],
         "additionalProperties": false
       }
@@ -4033,6 +5163,419 @@
         "additionalProperties": false
       }
     },
+    "recordCalls": {
+      "client": "desktop",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "clientId": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+          },
+          "calls": {
+            "minItems": 1,
+            "maxItems": 20,
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "format": {
+                      "type": "string",
+                      "const": "speech"
+                    },
+                    "source": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 50
+                    },
+                    "call": {
+                      "type": "object",
+                      "properties": {
+                        "sessionId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "title": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 500
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "startedAt": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "date-time",
+                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "endedAt": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "date-time",
+                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "platform": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 100
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "participants": {
+                          "default": [],
+                          "maxItems": 500,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "name": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "maxLength": 320
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "email": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "maxLength": 320
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            }
+                          }
+                        },
+                        "lines": {
+                          "maxItems": 20000,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "speaker": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 120
+                              },
+                              "text": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 200000
+                              },
+                              "at": {
+                                "type": "string",
+                                "format": "date-time",
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                              },
+                              "endAt": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "format": "date-time",
+                                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            },
+                            "required": [
+                              "speaker",
+                              "text",
+                              "at"
+                            ]
+                          }
+                        },
+                        "category": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 50
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "isDemo": {
+                          "default": false,
+                          "type": "boolean"
+                        },
+                        "metadata": {
+                          "default": {},
+                          "type": "object",
+                          "propertyNames": {
+                            "type": "string"
+                          },
+                          "additionalProperties": {}
+                        }
+                      },
+                      "required": [
+                        "sessionId",
+                        "lines"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "format",
+                    "source",
+                    "call"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "format": {
+                      "type": "string",
+                      "const": "readai"
+                    },
+                    "payload": {
+                      "type": "object",
+                      "properties": {
+                        "session_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "title": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "start_time": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "end_time": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "platform": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "report_url": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "owner": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": [
+                                    "string",
+                                    "null"
+                                  ]
+                                },
+                                "email": {
+                                  "type": [
+                                    "string",
+                                    "null"
+                                  ]
+                                }
+                              },
+                              "additionalProperties": {}
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "participants": {
+                          "anyOf": [
+                            {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "name": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "email": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  }
+                                },
+                                "additionalProperties": {}
+                              }
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "transcript": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "speaker_blocks": {
+                                  "maxItems": 20000,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "start_time": {
+                                        "type": "number"
+                                      },
+                                      "end_time": {
+                                        "type": [
+                                          "number",
+                                          "null"
+                                        ]
+                                      },
+                                      "speaker": {
+                                        "anyOf": [
+                                          {
+                                            "type": "object",
+                                            "properties": {
+                                              "name": {
+                                                "type": [
+                                                  "string",
+                                                  "null"
+                                                ]
+                                              }
+                                            },
+                                            "additionalProperties": {}
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      },
+                                      "words": {
+                                        "type": [
+                                          "string",
+                                          "null"
+                                        ]
+                                      }
+                                    },
+                                    "required": [
+                                      "start_time"
+                                    ],
+                                    "additionalProperties": {}
+                                  }
+                                }
+                              },
+                              "required": [
+                                "speaker_blocks"
+                              ],
+                              "additionalProperties": {}
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "session_id"
+                      ],
+                      "additionalProperties": {}
+                    }
+                  },
+                  "required": [
+                    "format",
+                    "payload"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        "required": [
+          "clientId",
+          "calls"
+        ]
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "accepted": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "updated": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "unchanged": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "notGraded": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "duplicates": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "accepted",
+          "updated",
+          "unchanged",
+          "notGraded",
+          "duplicates"
+        ],
+        "additionalProperties": false
+      }
+    },
     "recordAppHeartbeat": {
       "client": "desktop",
       "input": {
@@ -4103,6 +5646,56 @@
               "type": "string"
             },
             "additionalProperties": {}
+          },
+          "pairing": {
+            "type": "object",
+            "properties": {
+              "apiUrlInUse": {
+                "type": "string",
+                "maxLength": 2000
+              },
+              "endpointsVersionHeld": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 100
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "hostname": {
+                "type": "string",
+                "maxLength": 255
+              },
+              "services": {
+                "default": [],
+                "maxItems": 20,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 50
+                    },
+                    "url": {
+                      "type": "string",
+                      "maxLength": 2000
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "url"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "apiUrlInUse"
+            ]
           }
         },
         "required": [
@@ -4118,10 +5711,223 @@
         "properties": {
           "serverTime": {
             "type": "string"
+          },
+          "endpointsVersion": {
+            "type": "string"
           }
         },
         "required": [
-          "serverTime"
+          "serverTime",
+          "endpointsVersion"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "getPairingEndpoints": {
+      "client": "desktop",
+      "input": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "clientId": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+          }
+        },
+        "required": [
+          "clientId"
+        ]
+      },
+      "output": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "topology": {
+            "type": "string",
+            "enum": [
+              "same-machine",
+              "remote"
+            ]
+          },
+          "contract": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "serverVersion": {
+            "type": "string"
+          },
+          "endpointsVersion": {
+            "type": "string"
+          },
+          "api": {
+            "type": "object",
+            "properties": {
+              "base": {
+                "type": "string",
+                "maxLength": 2000
+              },
+              "rpcBase": {
+                "type": "string",
+                "maxLength": 2000
+              },
+              "health": {
+                "type": "string",
+                "maxLength": 2000
+              }
+            },
+            "required": [
+              "base",
+              "rpcBase",
+              "health"
+            ],
+            "additionalProperties": false
+          },
+          "web": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2000
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "growthbook": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "app": {
+                    "type": "string",
+                    "maxLength": 2000
+                  },
+                  "api": {
+                    "type": "string",
+                    "maxLength": 2000
+                  }
+                },
+                "required": [
+                  "app",
+                  "api"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "uploader": {
+            "type": "object",
+            "properties": {
+              "required": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "required"
+            ],
+            "additionalProperties": false
+          },
+          "device": {
+            "type": "object",
+            "properties": {
+              "pairingState": {
+                "type": "string",
+                "enum": [
+                  "ok",
+                  "stale",
+                  "mismatch",
+                  "unknown"
+                ]
+              },
+              "lastPairing": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "apiUrlInUse": {
+                        "type": "string",
+                        "maxLength": 2000
+                      },
+                      "endpointsVersionHeld": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 100
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "hostname": {
+                        "type": "string",
+                        "maxLength": 255
+                      },
+                      "services": {
+                        "default": [],
+                        "maxItems": 20,
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "name": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 50
+                            },
+                            "url": {
+                              "type": "string",
+                              "maxLength": 2000
+                            }
+                          },
+                          "required": [
+                            "name",
+                            "url"
+                          ],
+                          "additionalProperties": false
+                        }
+                      }
+                    },
+                    "required": [
+                      "apiUrlInUse",
+                      "services"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "lastPairingAt": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "pairingState",
+              "lastPairing",
+              "lastPairingAt"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "topology",
+          "contract",
+          "serverVersion",
+          "endpointsVersion",
+          "api",
+          "web",
+          "growthbook",
+          "uploader",
+          "device"
         ],
         "additionalProperties": false
       }

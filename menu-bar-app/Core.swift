@@ -229,12 +229,14 @@ enum ChildProcess {
     static func run(_ executable: String, _ args: [String], timeout: TimeInterval,
                     stallTimeout: TimeInterval? = nil, env: [String: String]? = nil,
                     stderr: Bool = false, logFile: String? = nil, grace: TimeInterval = 2,
-                    onStart: ((Process) -> Void)? = nil) -> Result {
+                    input: Data? = nil, onStart: ((Process) -> Void)? = nil) -> Result {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: executable)
         p.arguments = args
         if let env = env { p.environment = env }
-        p.standardInput = FileHandle.nullDevice
+        // Secrets go in on stdin, never in the arguments (which `ps` shows anyone).
+        let stdin = input.map { _ in Pipe() }
+        p.standardInput = stdin ?? FileHandle.nullDevice
         let out = Pipe()
         p.standardOutput = out
         p.standardError = stderr ? out : FileHandle.nullDevice
@@ -262,6 +264,10 @@ enum ChildProcess {
         } catch {
             out.fileHandleForReading.readabilityHandler = nil
             return Result(status: nil, output: "", stopped: "could not start: \(error.localizedDescription)")
+        }
+        if let stdin, let input {
+            try? stdin.fileHandleForWriting.write(contentsOf: input)
+            try? stdin.fileHandleForWriting.close()
         }
         onStart?(p)
         let started = Date()

@@ -40,11 +40,11 @@ final class QuietToast: CoachToast {
 }
 
 func scratchLogger() -> (HabitEventLogger, String) {
+    // By path, not through LEARNER_OUTBOX_DB: changing the process environment races with
+    // other suites, and a logger made in that window could open another test's database
+    // (or the owner's real one).
     let path = NSTemporaryDirectory() + "coach-medium-\(UUID().uuidString).sqlite"
-    let before = ProcessInfo.processInfo.environment["LEARNER_OUTBOX_DB"]
-    setenv("LEARNER_OUTBOX_DB", path, 1)
-    defer { if let before = before { setenv("LEARNER_OUTBOX_DB", before, 1) } else { unsetenv("LEARNER_OUTBOX_DB") } }
-    return (HabitEventLogger(), path)
+    return (HabitEventLogger(path: path), path)
 }
 
 func turnDurations(_ path: String) -> [Double] {

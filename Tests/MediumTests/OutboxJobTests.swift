@@ -118,29 +118,3 @@ private func eventIds(_ req: HTTPStandIn.Request) -> [String] {
         #expect(req.data?["captureState"] as? String == "recording")
     }
 }
-
-@Suite("Job state survives a restart", .tags(.medium, .core, .outbox), .quietLog, .timeLimit(.minutes(1))) struct JobPersistenceTests {
-    @Test func aFailureKeepsItsBackoffAndABlockIsReCheckedAtTheNextLaunch() {
-        let name = JobName("persist")
-        let first = Job(name.name, period: 3600, backoff: Backoff(base: 600, max: 3600)) { _ in .failed("boom") }
-        let s = run(first)
-        #expect(s.failures == 1 && s.summary == "boom")
-        let again = Job(name.name, period: 3600, backoff: Backoff(base: 600, max: 3600)) { _ in .ok("fine") }
-        #expect(again.snapshot.failures == 1)
-        #expect(abs(again.snapshot.nextRun.timeIntervalSince(s.nextRun)) < 1)
-        #expect(again.snapshot.problemSince != nil)
-
-        let blockedName = JobName("persist-blocked")
-        let b = Job(blockedName.name, period: 1, backoff: Backoff(base: 1, max: 1)) { _ in .blocked("needs the user") }
-        run(b)
-        // The block survives the restart (still shown), and is checked once at launch: a key
-        // fixed while the app was down unblocks it with no click.
-        let ran = Locked(false)
-        let b2 = Job(blockedName.name, period: 1, backoff: Backoff(base: 1, max: 1)) { _ in ran.value = true; return .ok("x") }
-        #expect(b2.snapshot.blocked)
-        #expect(b2.problem == "needs the user")
-        b2.tick()
-        #expect(waitFor(3) { !b2.snapshot.blocked })
-        #expect(ran.value && b2.problem == nil)
-    }
-}

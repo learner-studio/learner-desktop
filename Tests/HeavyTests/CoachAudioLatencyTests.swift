@@ -107,8 +107,11 @@ final class NoCalls: CallSource {
        .enabled(if: env["LEARNER_HEAVY_AUDIO"] != "0", "audio benchmark switched off (LEARNER_HEAVY_AUDIO=0)"),
        .timeLimit(.minutes(2)), .serialized)
 struct CoachAudioLatencyTests {
+    /// Two real-time passes of ~36 s each; a push runs the fast speaker only (the slower
+    /// one reaches 30 s of speech the same way). LEARNER_HEAVY_AUDIO=full runs both.
+    static let rates = env["LEARNER_HEAVY_AUDIO"] == "full" ? [120, 200] : [200]
     @MainActor
-    @Test(arguments: [120, 200])
+    @Test(arguments: rates)
     func theWarningFollowsThirtySecondsOfSpeechWithinSixSeconds(wpm: Int) async throws {
         let before = ScreenpipeRows.maxId()
         defer {

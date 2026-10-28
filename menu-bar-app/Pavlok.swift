@@ -255,6 +255,9 @@ final class PavlokController: NSObject, Wearable, @preconcurrency CBCentralManag
 
     func startBleScan(force: Bool = false) {
         guard connectionRequested else { return }
+        // Light and medium tests build the real tray and coach: they never reach the radio,
+        // whatever the test process's defaults say (the heavy lane's opt-in Pavlok test does).
+        guard !Paths.underTest else { return }
         if let p = peripheral, p.state == .connected || p.state == .connecting { return }
         reconnectWork?.cancel()
         guard let central = central else {

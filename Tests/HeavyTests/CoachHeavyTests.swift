@@ -40,11 +40,11 @@ final class TimedToast: CoachToast {
 }
 
 func heavyLogger() -> (HabitEventLogger, String) {
+    // By path, not through LEARNER_OUTBOX_DB: changing the process environment races with
+    // other suites, and a logger made in that window could open another test's database
+    // (or the owner's real one).
     let path = NSTemporaryDirectory() + "coach-heavy-\(UUID().uuidString).sqlite"
-    let before = env["LEARNER_OUTBOX_DB"]
-    setenv("LEARNER_OUTBOX_DB", path, 1)
-    defer { if let before = before { setenv("LEARNER_OUTBOX_DB", before, 1) } else { unsetenv("LEARNER_OUTBOX_DB") } }
-    return (HabitEventLogger(), path)
+    return (HabitEventLogger(path: path), path)
 }
 
 @MainActor

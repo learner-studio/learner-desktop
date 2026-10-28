@@ -26,9 +26,17 @@ enum GrowthBookLink {
         return c.url
     }
 
-    /// The link for this app as configured now.
+    /// The link for this app now: an override; else what the paired server advertises
+    /// (nil when it publishes no GrowthBook: the line is hidden); else, before the server
+    /// has answered once, the derived URL.
     static var current: URL? {
-        url(serverBase: LearnerRPC.shared.baseURL,
-            override: ProcessInfo.processInfo.environment["GROWTHBOOK_URL"] ?? UserDefaults.standard.string(forKey: defaultsKey))
+        current(override: ProcessInfo.processInfo.environment["GROWTHBOOK_URL"] ?? UserDefaults.standard.string(forKey: defaultsKey),
+                advertised: PairingLink.shared.held, serverBase: LearnerRPC.shared.baseURL)
+    }
+
+    static func current(override: String?, advertised: PairingEndpoints?, serverBase: String) -> URL? {
+        if let o = override?.trimmingCharacters(in: .whitespaces), !o.isEmpty { return URL(string: o) }
+        if let advertised { return advertised.growthbookApp.flatMap(URL.init(string:)) }
+        return url(serverBase: serverBase, override: nil)
     }
 }

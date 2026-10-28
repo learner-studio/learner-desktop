@@ -27,6 +27,22 @@ import TestSupport
         #expect(log.contains("start") && log.contains("=== stopped: no output"))
     }
 
+    // From light (a real child process is medium's): output, status and the log file.
+    @Test func childProcessReturnsOutputAndStatus() {
+        let r = ChildProcess.run("/bin/sh", ["-c", "echo hello; echo oops >&2; exit 3"], timeout: 5, stderr: true)
+        #expect(r.status == 3)
+        #expect(r.output.contains("hello") && r.output.contains("oops"))
+        #expect(r.stopped == nil)
+    }
+
+    @Test func childProcessStreamsToALogFile() {
+        let dir = TempDir()
+        defer { dir.cleanup() }
+        _ = ChildProcess.run("/bin/echo", ["line for the log"], timeout: 5, logFile: dir.file("x.log"))
+        let text = (try? String(contentsOfFile: dir.file("x.log"), encoding: .utf8)) ?? ""
+        #expect(text.contains("=== ") && text.contains("line for the log"))
+    }
+
     @Test func aProgramThatIgnoresSIGTERMIsKilledWithItsChildren() throws {
         let dir = TempDir()
         defer { dir.cleanup() }
@@ -95,14 +111,16 @@ import TestSupport
         defer { dir.cleanup() }
         let launches = dir.file("launches")
         let script = dir.write("crashy.sh", "#!/bin/bash\necho x >> \"\(launches)\"\nexit 1\n", executable: true)
-        let helper = ManagedHelper(name: "crashy", executable: script, arguments: [], marker: "crashy.sh", runtimeDir: dir.path)
+        // The app's backoff (1 s doubling) scaled down to 0.3 s, so the test takes 1.5 s, not 4.5.
+        let helper = ManagedHelper(name: "crashy", executable: script, arguments: [], marker: "crashy.sh", runtimeDir: dir.path,
+                                   minRestart: 0.3, restartBackoff: Backoff(base: 0.3, max: 60, jitter: 0))
         DispatchQueue.main.sync { helper.start() }
-        // Launches at 0 s, 1 s and 3 s (waits of 1, 2, 4 s): exactly three in the first 4.5 s. A
-        // fixed 1 s wait (no backoff) would launch at 0, 1, 2, 3 and 4 s; a fixed wait here, so it cannot pass early.
+        // Launches at 0, 0.3 and 0.9 s (waits of 0.3, 0.6, 1.2 s): exactly three in the first 1.5 s.
+        // A fixed 0.3 s wait (no backoff) would launch five times; a fixed wait here, so it cannot pass early.
         let count = { ((try? String(contentsOfFile: launches, encoding: .utf8)) ?? "").split(separator: "\n").count }
-        Thread.sleep(forTimeInterval: 4.5)
+        Thread.sleep(forTimeInterval: 1.5)
         let seen = count()
-        #expect(seen == 3, "launched \(seen) times in 4.5 s")
+        #expect(seen == 3, "launched \(seen) times in 1.5 s")
         // The third exit is counted a moment after the third launch.
         #expect(eventually(3) { helper.problem != nil })
         helper.stop(grace: 0.5)
@@ -134,25 +152,55 @@ import TestSupport
         orphan.executableURL = URL(fileURLWithPath: script)
         try? orphan.run()
         try? String(orphan.processIdentifier).write(toFile: dir.file("tree.pid"), atomically: true, encoding: .utf8)
-        let next = ManagedHelper(name: "tree", executable: script, arguments: [], marker: marker, runtimeDir: dir.path)
+        // The orphan ignores SIGTERM: killed after the reap wait (3 s in the app, 0.5 s here).
+        let next = ManagedHelper(name: "tree", executable: script, arguments: [], marker: marker, runtimeDir: dir.path, reapWait: 0.5)
+        defer { if orphan.isRunning { kill(orphan.processIdentifier, SIGKILL) } }
         DispatchQueue.main.sync { next.start() }
-        #expect(eventually(6) { !orphan.isRunning })
+        #expect(eventually(4) { !orphan.isRunning })
         next.stop(grace: 0.5)
+    }
+
+    /// Stopped while it waits to restart (the owner switched the uploader off mid-backoff):
+    /// it never comes back. Restarted: a new process, recorded in its pid file.
+    @Test func aStoppedHelperStaysDownAndARestartBringsANewProcess() {
+        let dir = TempDir()
+        defer { dir.cleanup() }
+        let launches = dir.file("launches")
+        let crashy = dir.write("crash-once.sh", "#!/bin/bash\necho x >> \"\(launches)\"\nexit 1\n", executable: true)
+        let helper = ManagedHelper(name: "crash-once", executable: crashy, arguments: [], marker: "crash-once.sh", runtimeDir: dir.path,
+                                   minRestart: 0.4, restartBackoff: Backoff(base: 0.4, max: 1, jitter: 0))
+        DispatchQueue.main.sync { helper.start() }
+        let count = { ((try? String(contentsOfFile: launches, encoding: .utf8)) ?? "").split(separator: "\n").count }
+        #expect(eventually(3) { count() == 1 })
+        helper.stop(grace: 0.2)          // inside the 0.4 s wait before the next launch
+        Thread.sleep(forTimeInterval: 1.0)
+        #expect(count() == 1, "relaunched after stop")
+
+        let steady = dir.write("steady.sh", "#!/bin/bash\nwhile true; do sleep 1; done\n", executable: true)
+        let up = ManagedHelper(name: "steady", executable: steady, arguments: [], marker: "steady.sh", runtimeDir: dir.path)
+        DispatchQueue.main.sync { up.start() }
+        let pidFile = dir.file("steady.pid")
+        #expect(eventually(3) { FileManager.default.fileExists(atPath: pidFile) })
+        let first = (try? String(contentsOfFile: pidFile, encoding: .utf8)) ?? ""
+        DispatchQueue.main.sync { up.restart() }
+        #expect(eventually(4) { up.isRunning && ((try? String(contentsOfFile: pidFile, encoding: .utf8)) ?? first) != first })
+        up.stop(grace: 0.5)
     }
 
     @Test func aHelperWhoseBinaryIsMissingKeepsRetrying() {
         let dir = TempDir()
         defer { dir.cleanup() }
-        let helper = ManagedHelper(name: "missing", executable: dir.file("not-there"), arguments: [], marker: "not-there", runtimeDir: dir.path)
+        let helper = ManagedHelper(name: "missing", executable: dir.file("not-there"), arguments: [], marker: "not-there", runtimeDir: dir.path,
+                                   minRestart: 0.2, restartBackoff: Backoff(base: 0.2, max: 1, jitter: 0))
         let lines = capturingLog {
             DispatchQueue.main.sync { helper.start() }
-            // Retries at 1 s, 2 s: two "could not start" lines within 3.5 s.
-            usleep(3_500_000)
+            // Retries 0.2 s, then 0.4 s later: two "could not start" lines within a second.
+            usleep(1_000_000)
         }
         #expect(lines.filter { $0.contains("could not start") }.count >= 2)
         // The binary appears (an upgrade finished): the helper comes up on its own.
         _ = dir.write("not-there", "#!/bin/bash\nwhile true; do sleep 1; done\n", executable: true)
-        #expect(eventually(6) { helper.isRunning })
+        #expect(eventually(4) { helper.isRunning })
         helper.stop(grace: 0.5)
     }
 }

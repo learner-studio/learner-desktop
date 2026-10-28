@@ -185,7 +185,7 @@ final class HabitExperimentManager {
 final class CoachSettings {
     static let shared = CoachSettings(defaults: .standard)
 
-    enum Key: String {
+    enum Key: String, CaseIterable {
         case wearableEnabled = "pavlok_shock_enabled"
         case keepConnected = "pavlok_keep_connected"
         case apiToken = "pavlok_api_token"

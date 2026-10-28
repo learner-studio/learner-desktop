@@ -38,8 +38,11 @@ import TestSupport
             var s = AppStatus(capture: capture, outboxDepth: 3)
             s.problems = [Problem(source: "Export", text: "rate limited")]
             for (sent, version) in [(Date?.none, String?.none), (Date(), "0.3.0")] {
+                // With and without the pairing report (contract PairingReport).
+                let pairing = sent == nil ? nil : PairingLink(path: NSTemporaryDirectory() + "no-endpoints-\(UUID().uuidString).json")
+                    .report(apiUrlInUse: "https://learner.example.test/learner-api", services: [("screenpipe", "http://localhost:3030")])
                 let body = TrayAppManager.heartbeat(s, appVersion: "1.0.0", screenpipeVersion: version, capturePhase: nil,
-                                                    lastSentAt: sent, lastExport: sent, outboxStatus: "sent 3")
+                                                    lastSentAt: sent, lastExport: sent, outboxStatus: "sent 3", pairing: pairing)
                 let json = try JSONSerialization.jsonObject(with: JSONSerialization.data(withJSONObject: body))
                 #expect(Schema.validate(json, schema).isEmpty, "\(capture): \(Schema.validate(json, schema))")
             }
@@ -49,7 +52,7 @@ import TestSupport
     @Test func theWorstProblemShowsWhenEveryProblemIsTrue() {
         // Worst first; each is removed in turn and the next one must show.
         var s = AppStatus(capture: .stopped("port 3030 closed"), serverReachable: false, loginItemBlocked: true)
-        s.problems = [Problem(source: "Helper:tunnel", text: "down"), Problem(source: "Archive", text: "HTTP 503"),
+        s.problems = [Problem(source: "Helper:uploader", text: "down"), Problem(source: "Archive", text: "HTTP 503"),
                       Problem(source: "Trials", text: "db"), Problem(source: "Export", text: "login"),
                       Problem(source: "Outbox", text: "key refused")]
         var seen: [String] = []
@@ -69,7 +72,7 @@ import TestSupport
             }
         }
         #expect(seen == ["login-item", "outbox", "server", "screenpipe", "export", "trials",
-                         "problem:Helper:tunnel", "problem:Archive", "screenpipe-degraded"])
+                         "problem:Helper:uploader", "problem:Archive", "screenpipe-degraded"])
     }
 
     @Test func aLoginItemChangeIsLogged() {

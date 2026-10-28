@@ -5,20 +5,18 @@ import TestSupport
 
 
 @Suite("Coach, medium: the real binary and a local screenpipe", .tags(.medium, .coach), .timeLimit(.minutes(1)), .quietLog) struct CoachMediumTests {
-    /// Every malformed invocation dies on the argument check: exit 2 with the usage, and
-    /// nothing reaches CoreBluetooth (which would also get an unsigned binary killed by TCC).
+    /// The real binary refuses a bad invocation on the argument check: exit 2 with the
+    /// usage, and nothing reaches CoreBluetooth (which would also get an unsigned binary
+    /// killed by TCC). One launch: light's PavlokTests checks every malformed form against
+    /// the same parser, and each launch here that slipped past the check would go on to
+    /// scan for (or ask the running app to fire) the owner's wristband.
     @Test func testFireRejectsBadArgumentsBeforeTouchingBluetooth() throws {
         let app = appBinary
         #expect(FileManager.default.isExecutableFile(atPath: app), "not built: \(app)")
-        let bad: [[String]] = [[], ["punch"], ["ZAPP"], ["shock"], [""], ["vibe", "0"], ["vibe", "-5"], ["vibe", "101"],
-                               ["vibe", "banana"], ["vibe", "20", "--wait", "0"], ["vibe", "20", "--wait", "999999"],
-                               ["vibe", "20", "--wait", "soon"], ["vibe", "20", "--wait"]]
-        for args in bad {
-            let r = ChildProcess.run(app, ["--pavlok-test-fire"] + args, timeout: 20, stderr: true)
-            #expect(r.status == 2, "\(args) was accepted: \(r.output)")
-            #expect(r.output.contains("usage: --pavlok-test-fire <vibe|beep|zap>"))
-            #expect(!r.output.contains("radio state") && !r.output.contains("scanning"))
-        }
+        let r = ChildProcess.run(app, ["--pavlok-test-fire", "punch"], timeout: 20, env: appEnv(), stderr: true)
+        #expect(r.status == 2, "accepted: \(r.output)")
+        #expect(r.output.contains("usage: --pavlok-test-fire <vibe|beep|zap>"))
+        #expect(!r.output.contains("radio state") && !r.output.contains("scanning"))
     }
 
     /// Real URLSession against a stand-in: the call is found, speech becomes a trial row,

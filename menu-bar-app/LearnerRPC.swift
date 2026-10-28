@@ -106,13 +106,22 @@ final class LearnerRPC: Sendable {
     private let log = Log("RPC")
     private let cachedKey = Locked<String?>(nil)
 
-    init(baseURL: String = ProcessInfo.processInfo.environment["LEARNER_API_URL"] ?? LearnerRPC.defaultBaseURL,
-         clientId: String = "ben-mbp", transport: HTTPTransport = URLSessionTransport(),
+    /// The server and device: LEARNER_API_URL / LEARNER_CLIENT_ID, else what the pairing
+    /// payload pinned (see Pairing), else this install's original server and "ben-mbp".
+    static var configuredBaseURL: String {
+        ProcessInfo.processInfo.environment["LEARNER_API_URL"] ?? Pairing.pinned()?.apiUrl ?? defaultBaseURL
+    }
+    static var configuredClientId: String {
+        ProcessInfo.processInfo.environment["LEARNER_CLIENT_ID"] ?? Pairing.pinned()?.clientId ?? "ben-mbp"
+    }
+
+    init(baseURL: String = LearnerRPC.configuredBaseURL,
+         clientId: String = LearnerRPC.configuredClientId, transport: HTTPTransport = URLSessionTransport(),
          key: (@Sendable (TimeInterval) -> String?)? = nil) {
         self.baseURL = baseURL.replacingOccurrences(of: "/+$", with: "", options: .regularExpression)
         self.clientId = clientId
         self.transport = transport
-        self.keySource = key ?? LearnerRPC.environmentOrKeychainKey
+        self.keySource = key ?? { LearnerRPC.environmentOrKeychainKey(clientId: clientId, timeout: $0) }
     }
 
     static func classify(_ status: Int) -> Kind {
@@ -126,17 +135,18 @@ final class LearnerRPC: Sendable {
         }
     }
 
-    /// The device key: LEARNER_API_KEY (tests), else the Keychain item the operator stored
-    /// with `security add-generic-password -s learner-server -a ben-mbp`, read through
-    /// /usr/bin/security (which that item trusts, so a rebuilt app is not prompted) and
-    /// bounded, so a locked keychain's prompt cannot stall a job.
-    static func environmentOrKeychainKey(timeout: TimeInterval) -> String? {
+    /// The device key: LEARNER_API_KEY (tests), else the Keychain item for this client id
+    /// (stored by the pairing import, or by hand with `security add-generic-password -s
+    /// learner-server -a <client id>`), read through /usr/bin/security (which that item
+    /// trusts, so a rebuilt app is not prompted) and bounded, so a locked keychain's prompt
+    /// cannot stall a job.
+    static func environmentOrKeychainKey(clientId: String, timeout: TimeInterval) -> String? {
         if let k = ProcessInfo.processInfo.environment["LEARNER_API_KEY"]?.trimmingCharacters(in: .whitespacesAndNewlines), !k.isEmpty { return k }
-        let r = ChildProcess.run("/usr/bin/security", ["find-generic-password", "-s", "learner-server", "-a", "ben-mbp", "-w"],
+        let r = ChildProcess.run("/usr/bin/security", ["find-generic-password", "-s", Pairing.keychainService, "-a", clientId, "-w"],
                                  timeout: max(1, timeout))
         let key = r.output.trimmingCharacters(in: .whitespacesAndNewlines)
         if r.status == 0 && !key.isEmpty { return key }
-        Log("RPC").noisy("no device key in the Keychain (learner-server / ben-mbp): \(r.stopped ?? "security exit \(r.status.map(String.init) ?? "?")")")
+        Log("RPC").noisy("no device key in the Keychain (learner-server / \(clientId)): \(r.stopped ?? "security exit \(r.status.map(String.init) ?? "?")")")
         return nil
     }
 

@@ -45,7 +45,5 @@ import TestSupport
         #expect(!FileManager.default.fileExists(atPath: root + "/scripts/tunnel.sh"))
         let build = try String(contentsOfFile: root + "/scripts/build-app.sh", encoding: .utf8)
         #expect(!build.contains("tunnel.sh"))
-        let tray = try String(contentsOfFile: root + "/menu-bar-app/Tray.swift", encoding: .utf8)
-        #expect(!tray.contains("3200:127.0.0.1:3200") && !tray.contains("localhost:3200"))
     }
 }

@@ -30,12 +30,29 @@ Everything goes to learner-server over HTTPS as `POST ${LEARNER_API_URL}/rpc/<na
 `{"data": <input>}` and the device key in `x-api-key`. The wire shapes are pinned in
 `contract/desktop.ts` and `contract/contract.json` (see `contract/PINNED_COMMIT`).
 
-- **Server:** `LEARNER_API_URL`, default `https://dev.biztoolz.app/learner-api`.
-- **Client id:** `ben-mbp`. It must not change: the server keys every thread on it.
-- **Device key:** issued by learner-server for that client id. The app reads it from the
-  Keychain (service `learner-server`, account `ben-mbp`) or `LEARNER_API_KEY`.
+Learner Desktop and learner-server are always installed together, on one machine or two
+(learner-server `docs/specs/server-desktop-pairing.md`):
+
+- **Pairing payload.** The server's installer (same machine) or its operator (remote, with
+  `mint-api-key.ts --device <id> --pairing <file>`) leaves `{apiUrl, clientId, apiKey}`, mode
+  600, at `~/Library/Application Support/Learner/desktop-pairing.json` (`LEARNER_PAIRING_FILE`
+  overrides). At launch the app checks it, checks that `GET <apiUrl>/api/health` answers
+  `product: learner-server, contract: 1`, puts the key in the Keychain (service
+  `learner-server`, account the client id), pins the URL and client id, and deletes the file.
+  A file it refuses stays put and is logged.
+- **Server and client id.** `LEARNER_API_URL` / `LEARNER_CLIENT_ID`, else the pinned ones, else
+  this install's original `https://dev.biztoolz.app/learner-api` and `ben-mbp`. The client id
+  must not change: the server keys every thread on it.
+- **Device key.** `LEARNER_API_KEY`, else the Keychain item for the client id. It is only
+  ever sent to the pinned URL.
+- **What the server advertises.** `getPairingEndpoints` says where its pieces are: the
+  topology (which turns the CLI uploader on for `remote`), the GrowthBook link and the web UI
+  link (each a menu line only when published). A heartbeat reply whose `endpointsVersion`
+  differs from the one held refetches them. If the server advertises a different API URL,
+  the menu offers to switch (it asks first: switching sends the key there).
 - **What it sends:** `recordHabitEvents` (trial rows), `archiveConversationDocuments` (chats,
-  always the full conversation; the server dedupes), `recordAppHeartbeat`.
+  always the full conversation; the server dedupes), `recordAppHeartbeat` (with a pairing
+  report: the API URL in use, the endpoints version held, and screenpipe's local URL).
 
 ## Architecture
 
@@ -129,25 +146,39 @@ scripts/install-hooks.sh  # pre-commit runs light (+ gitleaks); pre-push runs me
 ```
 
 - **Light** (`Tests/LightTests`) runs in parallel against fixtures, injected clocks and
-  in-process fakes. No network, no real processes beyond `/bin` helpers.
+  in-process fakes. No network, no child processes, no Core ML model, no Bluetooth (the
+  app never starts its radio under test). It builds the real tray menu and clicks every
+  line in-process (`TrayMenuClickTests`): every action has a handler, every link and folder
+  opens the right place, every setting flips and flips back.
 - **Medium** (`Tests/MediumTests`) runs one test at a time: fake `ai-vault` and `claude`
   scripts (including ones that hang and ignore SIGTERM), the real capture scripts in a
-  stubbed sandbox, `tool preflight` and the coach poller against `HTTPStandIn` servers.
+  stubbed sandbox, `tool preflight` and the coach poller against `HTTPStandIn` servers,
+  and Silero on speech synthesized with `say` (`SpeechModelTests`). Spawned app binaries
+  get the sandboxed data folders explicitly (`appEnv()`).
 - Light and medium point the app's data folders at a throwaway directory
   (`LEARNER_DATA_DIR`, `AI_VAULT_DATA`), so they never touch `~/.ai-aggregator` or
   `~/ai-vault-data`. No test waits on a real schedule; each finishes within 2 minutes.
 - **Heavy** (`Tests/HeavyTests`, `LEARNER_HEAVY=1`) needs the real world: screenpipe on
   `:3030` (read-only queries), the real export and ledger, one ChatGPT read, learner-server
   health, and with `LEARNER_REMOTE_E2E=1` the deployed GrowthBook design over `ssh ovh`
-  (read-only). It also builds the release binary and checks the signed bundle as it ships,
+  and the server's pairing endpoints for this device (both read-only; SQL from GrowthBook
+  runs as one read-only statement). It also builds the release binary and checks the signed bundle as it ships,
   and runs the audio benchmark: synthesized speech through screenpipe's speech-to-text
   endpoint into the coach, timing the 30 s warning (it checks that screenpipe stored none of
   it; any row left behind is tagged `learner-heavy-test` and fails the test;
-  `LEARNER_HEAVY_AUDIO=0` skips it). Each suite skips, with the reason, when its dependency
-  is missing. The live wristband test needs `LEARNER_HEAVY_PAVLOK=1`. About 3–4 minutes.
+  `LEARNER_HEAVY_AUDIO=0` skips it; a push runs one speaking rate, `=full` both). The bundle's
+  microphone self-test is skipped during a meeting or on a Bluetooth input. Each suite
+  skips, with the reason, when its dependency is missing. The live wristband test needs `LEARNER_HEAVY_PAVLOK=1`. About 3–4 minutes.
 
-Two heavy suites really do stop and restart the capture stack and the installed app,
-and stay skipped even in the heavy lane unless you opt in a second time:
+**UI tests** (`UITests/`, XCUITest; `scripts/ui-test.sh`, needs XcodeGen and the app
+running) click the installed app's real menu-bar item: how long the menu takes to open
+against an ordinary AppKit menu, every submenu opening (the cue panels too), and two
+settings flipped through the real menu and back. They move the pointer, so they are in no
+hook; run them when the Mac is free. They never click anything that acts on data, devices or
+accounts (that is covered in-process by the light lane).
+
+The heavy destructive suite really does stop and restart the capture stack and the installed app,
+and stays skipped even in the heavy lane unless you opt in a second time:
 
 ```bash
 LEARNER_HEAVY_DESTRUCTIVE=1 scripts/test.sh heavy --filter Destructive
