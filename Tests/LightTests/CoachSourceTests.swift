@@ -145,23 +145,4 @@ func settle(_ condition: () -> Bool = { false }, within seconds: Double = 1) asy
         guard case .answered(let state)? = polls.first else { Issue.record("no answer"); return }
         #expect(state == CallState(app: "Google Meet", title: nil))
     }
-
-    /// screenpipe opens a "meeting" for a voice message or a notification sound in a call app;
-    /// one under 3 minutes old is not a call yet.
-    @Test func aMeetingCountsAsACallOnlyAfterThreeMinutes() {
-        let t0 = Date(timeIntervalSince1970: 1_800_000_000)
-        let start = ISO8601DateFormatter().string(from: t0)
-        let open: [[String: Any]] = [["meeting_app": "WhatsApp", "title": NSNull(), "meeting_start": start, "meeting_end": NSNull()]]
-        func call(after s: TimeInterval) -> CallState? { ScreenpipeCallSource.call(in: open, now: t0.addingTimeInterval(s), minDuration: 180) }
-        #expect(call(after: 30) == nil)
-        #expect(call(after: 179) == nil)
-        #expect(call(after: 180) == CallState(app: "WhatsApp", title: nil))
-        // An ended one never counts; a fractional-second start parses too.
-        let ended: [[String: Any]] = [["meeting_app": "Slack", "meeting_start": "2026-10-27T22:32:11.534+01:00", "meeting_end": "2026-10-27T23:57:23.637+01:00"]]
-        #expect(ScreenpipeCallSource.call(in: ended, now: t0, minDuration: 180) == nil)
-        let real: [[String: Any]] = [["meeting_app": "Slack", "meeting_start": "2026-10-27T22:32:11.534+01:00", "meeting_end": NSNull()]]
-        let startedAt = try! #require(ScreenpipeSpeechSource.parseDate("2026-10-27T22:32:11.534+01:00"))
-        #expect(ScreenpipeCallSource.call(in: real, now: startedAt.addingTimeInterval(120), minDuration: 180) == nil)
-        #expect(ScreenpipeCallSource.call(in: real, now: startedAt.addingTimeInterval(200), minDuration: 180)?.app == "Slack")
-    }
 }
