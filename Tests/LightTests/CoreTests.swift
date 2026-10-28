@@ -276,8 +276,19 @@ import TestSupport
             watch.answered(now: 105.1)       // ...answered at once: nothing logged
         }
         #expect(pending.value.count == 2)
-        #expect(samples.value.count == 1 && samples.value[0].hasSuffix("/main-thread-stall.txt"))
+        #expect(samples.value.count == 1 && samples.value[0].contains("/main-thread-stall-"))
         #expect(lines.filter { $0.contains("[Stall] the main thread was blocked for 4.0 s") }.count == 1)
         #expect(lines.filter { $0.contains("sampling it") }.count == 1)
+    }
+
+    @Test func eachSampleGetsItsOwnFileAndOnlyTheNewestFiveAreKept() {
+        let dir = TempDir("stalls")
+        for i in 1...7 { dir.write("main-thread-stall-2026102\(i)-000000.txt", "") }
+        dir.write("menubar.log", "")
+        let file = MainThreadWatch.sampleFile(at: Date(), dir: dir.path)
+        let left = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []).sorted()
+        #expect(left == ["main-thread-stall-20261024-000000.txt", "main-thread-stall-20261025-000000.txt", "main-thread-stall-20261026-000000.txt",
+                         "main-thread-stall-20261027-000000.txt", "menubar.log"])
+        #expect(file.hasPrefix(dir.path + "/main-thread-stall-") && file.hasSuffix(".txt"))
     }
 }
