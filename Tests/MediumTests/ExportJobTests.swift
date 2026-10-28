@@ -176,6 +176,29 @@ private final class ExportFixture {
         #expect(abs(again.nextRun.timeIntervalSince(try #require(again.lastRun)) - 1800) < 5)
     }
 
+    /// 10-28: a crash in one provider alongside another's 429 waited out the rate limit's
+    /// hours, and the tray went red. The crash retries in minutes; the throttled provider
+    /// sits that retry out until its own wait is over.
+    @Test func aCrashBesideARateLimitRetriesSoonAndLeavesTheThrottledProviderAlone() throws {
+        let f = ExportFixture(configure: { $0.problemGrace = 3600 })
+        f.output("claude", "Fetching…\ncdpSession.send: Target page, context or browser has been closed")
+        f.output("chatgpt", Fixture.aiVaultRateLimited)
+        let crashed = run(f.export.job)
+        #expect(crashed.summary == "claude: browser crashed (see vault-export.log), chatgpt: rate limited", "\(crashed.summary)")
+        let retry = crashed.nextRun.timeIntervalSince(try #require(crashed.lastRun))
+        #expect(retry >= 15 * 60 * 0.8 - 2 && retry <= 15 * 60 + 2, "retry in \(retry) s, not the rate limit's wait")
+        #expect(f.export.job.problem == nil, "inside the grace: not red")
+
+        // The retry: Claude works now; ChatGPT is not asked again while its limit lasts.
+        f.output("claude", Fixture.aiVaultOk)
+        f.output("chatgpt", Fixture.aiVaultOk)
+        let retried = run(f.export.job)
+        #expect(retried.summary.hasPrefix("claude: ok (3 new), chatgpt: rate limited (trying again in"), "\(retried.summary)")
+        #expect(f.export.job.problem == nil && f.export.job.waiting != nil)
+        let left = retried.nextRun.timeIntervalSince(try #require(retried.lastRun))
+        #expect(left > 25 * 60 && left <= 30 * 60, "waits out ChatGPT's hold: \(left) s")
+    }
+
     @Test func aStuckExportThatIgnoresSIGTERMIsKilledAndRetriedWithBackoffAcrossARestart() throws {
         let f = ExportFixture(configure: { $0.stallTimeout = 1.5 })
         f.dir.write("claude.hang", "")

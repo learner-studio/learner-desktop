@@ -79,6 +79,10 @@ final class VaultExport: Sendable {
         var quitting = false
         /// provider -> modification time of ai-vault's config when the login was found expired.
         var expired: [String: Double] = [:]
+        /// step (a provider, or "voice") -> when its rate limit is over. Set only when the same
+        /// run also failed for another reason: that failure retries on the normal backoff, and
+        /// the retry leaves the throttled step alone until then.
+        var held: [String: Date] = [:]
         var lastRunAt: Date?
         var summary = "not run yet"
         var onFinished: (@MainActor () -> Void)?
@@ -147,7 +151,16 @@ final class VaultExport: Sendable {
         var notes: [String] = []
         var failed: [String] = []
         var rateLimited: Set<String> = []
+        var stillHeld: [String: Date] = [:]
         var ran = 0
+        let now = Date()
+        /// Whether `step` is still held off by an earlier rate limit (noted, then skipped).
+        func heldOff(_ step: String) -> Bool {
+            guard let until = state.value.held[step], until > now else { return false }
+            stillHeld[step] = until
+            notes.append("\(step): rate limited (trying again in \(Job.describe(until.timeIntervalSince(now))))")
+            return true
+        }
         let configStamp = VaultExport.modified(config.aiVaultConfig)
         // A run while blocked is the periodic re-check: try the expired logins again (a
         // block can be wrong, or fixed outside the app).
@@ -159,10 +172,11 @@ final class VaultExport: Sendable {
                 notes.append("\(provider): login expired")
                 continue
             }
+            if heldOff(provider) { continue }
             ran += 1
             switch backup(cli, provider) {
             case let .ok(archived):
-                state.withLock { _ = $0.expired.removeValue(forKey: provider) }
+                state.withLock { _ = $0.expired.removeValue(forKey: provider); _ = $0.held.removeValue(forKey: provider) }
                 notes.append("\(provider): ok" + (archived.map { $0 > 0 ? " (\($0) new)" : "" } ?? ""))
             case .loginExpired:
                 state.withLock { $0.expired[provider] = configStamp }
@@ -181,8 +195,8 @@ final class VaultExport: Sendable {
 
         // ai-vault drops ChatGPT voice transcripts; write them back in. Not while ChatGPT is
         // throttling: the voice step calls the same API, and would only extend the limit.
-        if let voice = config.voice, !rateLimited.contains("chatgpt"),
-           !state.withLock({ $0.quitting || $0.expired["chatgpt"] != nil }) {
+        if let voice = config.voice, !rateLimited.contains("chatgpt"), stillHeld["chatgpt"] == nil,
+           !state.withLock({ $0.quitting || $0.expired["chatgpt"] != nil }), !heldOff("voice") {
             let v = voice.run(cancelled: { [state] in state.value.quitting })
             switch v.stopped {
             case .rateLimited?: rateLimited.insert("voice")
@@ -190,7 +204,7 @@ final class VaultExport: Sendable {
                 state.withLock { $0.expired["chatgpt"] = configStamp }
                 saveLogins()
             case .unreachable?: failed.append("voice")
-            case nil: break
+            case nil: state.withLock { _ = $0.held.removeValue(forKey: "voice") }
             }
             if v.candidates > 0 || v.stopped != nil { notes.append("voice: \(v.describe)") }
         }
@@ -206,15 +220,26 @@ final class VaultExport: Sendable {
         if allExpired {
             return finish(notes, .blocked("ai-vault login expired (\(config.providers.joined(separator: ", "))): Sign In Again"))
         }
+        // Back to back limits wait longer each time: 30 min, 1 h, 2 h … up to 6 h.
+        let streak = job.snapshot.waitingSince == nil ? 0 : job.snapshot.failures
+        let wait = min(config.rateLimitRetry * pow(2, Double(min(streak, 10))), config.rateLimitMax)
+        if !failed.isEmpty {
+            // A crash or an outage is retried on the normal backoff (minutes), not held for a
+            // rate limit's hours (10-28: a ChatGPT browser crash alongside voice's 429 waited
+            // 6 h and went red); the throttled steps sit that retry out.
+            state.withLock { s in for step in rateLimited { s.held[step] = now.addingTimeInterval(wait) } }
+            return finish(notes, .failed(notes.joined(separator: ", ")))
+        }
+        state.withLock { s in for step in rateLimited { s.held[step] = nil } }
         if !rateLimited.isEmpty {
-            // Back to back limits wait longer each time: 30 min, 1 h, 2 h … up to 6 h.
-            let streak = job.snapshot.waitingSince == nil ? 0 : job.snapshot.failures
-            let wait = min(config.rateLimitRetry * pow(2, Double(min(streak, 10))), config.rateLimitMax)
             let text = notes.joined(separator: ", ")
-            if !failed.isEmpty { return finish(notes, .failed(text, retryAfter: wait)) }
             return finish(notes + ["trying again in \(Job.describe(wait))"], .waiting(text, retryAfter: wait))
         }
-        if !failed.isEmpty { return finish(notes, .failed(notes.joined(separator: ", "))) }
+        if let until = stillHeld.values.min() {
+            // Everything else went through; only a held step is left.
+            let left = max(60, until.timeIntervalSince(now))
+            return finish(notes, .waiting(notes.joined(separator: ", "), retryAfter: left))
+        }
         return finish(notes, .ok(notes.joined(separator: ", ")))
     }
 
