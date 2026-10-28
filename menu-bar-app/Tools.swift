@@ -144,7 +144,8 @@ struct OVHRemote {
         try script.write(toFile: input, atomically: true, encoding: .utf8)
         // One shared connection for a burst of calls (the heavy lane makes about a dozen):
         // the first opens it, the rest reuse it for a minute.
-        let control = NSTemporaryDirectory() + "learner-ssh-%C"
+        // Short: a Unix socket path is limited to ~104 bytes, and $TMPDIR alone is ~50 (10-28).
+        let control = "/tmp/lssh-%C"
         let r = ChildProcess.run("/bin/sh", ["-c", #"exec "$0" -o BatchMode=yes -o ConnectTimeout=8 -o ControlMaster=auto -o "ControlPath=$4" -o ControlPersist=60 "$1" bash -s < "$2" 2> "$3""#,
                                              ssh, host, input, errors, control], timeout: timeout)
         let stderr = (try? String(contentsOfFile: errors, encoding: .utf8)) ?? ""

@@ -68,7 +68,11 @@ struct PairingE2ETests {
         /// SIGTERM to the harness (its teardown revokes the device and checks nothing is
         /// left), then the tunnel ends with it; the remote dir goes.
         func stop() {
-            _ = ChildProcess.run("/usr/bin/ssh", ["-o", "BatchMode=yes", "ovh", "pkill -TERM -f 'pairing-server.ts.*\(dir)'"], timeout: 30)
+            // Bracketed, so the pattern does not match the remote shell running this very
+            // command (pkill would kill that shell first). One TERM; teardown takes ~5 s
+            // (revoke, check the old key gets 401, check the database, stop nginx and the API),
+            // and runs even mid-startup.
+            _ = ChildProcess.run("/usr/bin/ssh", ["-o", "BatchMode=yes", "ovh", "pkill -TERM -f '[p]airing-server.ts.*\(dir)'"], timeout: 30)
             let deadline = Date().addingTimeInterval(60)
             while ssh.isRunning && Date() < deadline { usleep(200_000) }
             if ssh.isRunning { ssh.terminate() }
