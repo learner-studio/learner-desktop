@@ -124,12 +124,13 @@ struct CoachHeavyTests {
         _ = NSApplication.shared
         let toast = MonologueToastController()
         toast.show(streak: 35, callApp: "Heavy test")
-        await waitFor(0.5)
+        // Waited for, not slept on: the 0.25 s fade runs late under the pre-push load.
+        await waitFor(3) { (toast.panel?.alphaValue ?? 0) > 0.9 }
         #expect(toast.panel?.isVisible == true)
         #expect(toast.panel?.sharingType == NSWindow.SharingType.none)
         #expect((toast.panel?.alphaValue ?? 0) > 0.9)
         toast.hide()
-        await waitFor(0.5)
+        await waitFor(3) { toast.panel?.isVisible == false }
         #expect(toast.panel?.isVisible == false)
     }
 

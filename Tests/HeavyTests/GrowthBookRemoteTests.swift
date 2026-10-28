@@ -114,7 +114,6 @@ struct GrowthBookLinkTests {
         #expect(values["APP_ORIGIN"] == origin, "GrowthBook's APP_ORIGIN \(values["APP_ORIGIN"] ?? "?") vs the tray's \(link)")
         #expect(values["API_HOST"] == origin, "GrowthBook's API_HOST \(values["API_HOST"] ?? "?") vs the tray's \(link)")
 
-        // Not followed: a 302 to the same site's login is right for a signed-out request.
         final class NoRedirect: NSObject, URLSessionTaskDelegate {
             func urlSession(_ s: URLSession, task: URLSessionTask, willPerformHTTPRedirection r: HTTPURLResponse,
                             newRequest: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
@@ -131,7 +130,9 @@ struct GrowthBookLinkTests {
             done.signal()
         }.resume()
         _ = done.wait(timeout: .now() + 25)
-        let sameSiteLogin = status == 302 && (location.hasPrefix("/") || location.hasPrefix("\(link.scheme!)://\(link.host!)/"))
-        #expect(status == 200 || sameSiteLogin, "GET \(link): HTTP \(status) \(location)")
+        // A redirect within the same site is right: to the login when signed out, or from
+        // /growthbook to /growthbook/ (the server advertises it without the slash).
+        let sameSite = (300..<400).contains(status) && (location.hasPrefix("/") || location.hasPrefix("\(link.scheme!)://\(link.host!)/"))
+        #expect(status == 200 || sameSite, "GET \(link): HTTP \(status) \(location)")
     }
 }
