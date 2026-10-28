@@ -166,4 +166,29 @@ struct PairingTests {
         // An explicit URL always wins.
         #expect(GrowthBookLink.current(override: "https://mine.example.test", advertised: none, serverBase: Self.api)?.absoluteString == "https://mine.example.test")
     }
+
+    /// The first launch's heartbeat goes out before any endpoints are held; its reply
+    /// fetches them, and a second heartbeat follows at once with the version held (not a
+    /// 5-minute beat later, as on 10-28). The same version again sends nothing more.
+    @Test func aChangeOfEndpointsSendsAHeartbeatAtOnceWithTheVersionHeld() throws {
+        let f = OutboxFixture(turns: 0) { s in
+            s.path.hasSuffix("/rpc/getPairingEndpoints")
+                ? StubTransport.json(200, ["data": Self.endpoints(version: "v1")])
+                : StubTransport.json(200, ["data": ["serverTime": "2026-10-28T14:00:00Z", "endpointsVersion": "v1"]])
+        }
+        let rpc = LearnerRPC(baseURL: "http://stand-in.invalid", clientId: "test-mac", transport: f.stub, key: { _ in Self.key })
+        let link = PairingLink(path: f.dir.file("endpoints.json"))
+        f.sender.setHeartbeatInput { ["clientId": "test-mac", "pairing": link.report(apiUrlInUse: "http://stand-in.invalid", services: [])] }
+        link.follow(f.sender, rpc: rpc)
+        f.sender.heartbeatJob.kick("launch")
+        let beats = { f.stub.seen.filter { $0.path.hasSuffix("/rpc/recordAppHeartbeat") } }
+        #expect(eventually(5) { beats().count == 2 })
+        let held = beats().map { (($0.body?["data"] as? [String: Any])?["pairing"] as? [String: Any])?["endpointsVersionHeld"] }
+        #expect(held.first.map { $0 is NSNull } == true, "the launch heartbeat knows no version yet")
+        #expect(held.last as? String == "v1", "the next heartbeat carries the version: \(held)")
+        #expect(f.stub.seen.filter { $0.path.hasSuffix("/rpc/getPairingEndpoints") }.count == 1)
+        usleep(300_000)
+        #expect(beats().count == 2, "an unchanged version sends no more")
+        withExtendedLifetime(link) {}
+    }
 }

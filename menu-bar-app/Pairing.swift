@@ -190,6 +190,19 @@ final class PairingLink: Sendable {
         set { state.withLock { $0.onChange = newValue } }
     }
 
+    /// Wires the heartbeat to this link: a reply whose endpointsVersion is not the one held
+    /// refetches the endpoints, and a change sends a heartbeat at once, so the server sees
+    /// the version held within seconds (10-28: the first launch's heartbeat went out before
+    /// the first fetch, and the pairing read `stale` for a whole 5-minute beat). `changed`
+    /// gets the new endpoints too (the tray applies the topology).
+    func follow(_ sender: OutboxSender, rpc: LearnerRPC, changed: @escaping @Sendable (PairingEndpoints?) -> Void = { _ in }) {
+        sender.setHeartbeatReplyHandler { [weak self] in self?.heartbeatReplied($0, rpc: rpc) }
+        onChange = { endpoints in
+            sender.heartbeatJob.kick("pairing endpoints changed")
+            changed(endpoints)
+        }
+    }
+
     /// This side, for the heartbeat (contract PairingReport).
     func report(apiUrlInUse: String, services: [(name: String, url: String)]) -> [String: Any] {
         var r: [String: Any] = [

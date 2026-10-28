@@ -120,8 +120,7 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ChatAndOutboxJobs.install(heartbeat: { [weak self] in self?.heartbeatInput() ?? [:] })
         // The server says where its pieces are; a changed endpointsVersion in a heartbeat
         // reply refetches them, and the uploader follows the topology they report.
-        OutboxSender.shared.setHeartbeatReplyHandler { PairingLink.shared.heartbeatReplied($0, rpc: .shared) }
-        PairingLink.shared.onChange = { [weak self] _ in
+        PairingLink.shared.follow(OutboxSender.shared, rpc: .shared) { [weak self] _ in
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.applyTopology() } }
         }
         Scheduler.start()
