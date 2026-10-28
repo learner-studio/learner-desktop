@@ -197,6 +197,13 @@ enum SpeechSelfTest {
             io.err("speech-selftest: \(source.problem ?? "could not start")")
             return 2
         }
+        // The engine starts on its own queue (a Bluetooth input takes seconds): wait for it.
+        let deadline = Date().addingTimeInterval(15)
+        while !source.isListening, Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.1)) }
+        guard source.isListening else {
+            io.err("speech-selftest: \(source.problem ?? "the microphone did not start in 15 s")")
+            return 2
+        }
         RunLoop.main.run(until: Date().addingTimeInterval(3))
         let frames = source.framesScored
         source.stop()

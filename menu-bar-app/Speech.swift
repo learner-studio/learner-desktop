@@ -166,20 +166,80 @@ struct VADSegmenter {
     }
 }
 
+/// The audio engine, owned by one serial queue: every call into AVAudioEngine runs there,
+/// never on the main thread. Starting a Bluetooth input waits on the hardware for seconds
+/// (10-28: 4.7 s with AirPods), which on the main thread froze the tray menu for as long.
+/// AVAudio's Objective-C exceptions are caught here and become failures to retry.
+final class MicEngine: @unchecked Sendable {
+    enum Opened: Sendable { case listening(String), failed(String) }
+    let queue = DispatchQueue(label: "learner.speech.engine", qos: .userInitiated)
+    // Only touched on `queue`. Replaced at every close: after a device switch an engine can
+    // keep reporting the old input's format (10-28: 48 kHz while AirPods ran at 24 kHz),
+    // and tapping it then raises.
+    private var engine = AVAudioEngine()
+    private var observer: NSObjectProtocol?
+
+    /// On `queue`. `changed` runs when the input device changes under the running engine.
+    func open(state: Locked<MicSpeechSource.VADState>, vad: DispatchQueue, log: Log, changed: @escaping @Sendable () -> Void) -> Opened {
+        dispatchPrecondition(condition: .onQueue(queue))
+        let input = engine.inputNode
+        let format = input.outputFormat(forBus: 0)
+        // Mid-switch (AirPods connecting) the input has no format yet.
+        guard format.sampleRate > 0, format.channelCount > 0 else {
+            return .failed("no microphone input ready (\(format.sampleRate) Hz, \(format.channelCount) channels)")
+        }
+        guard let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: SileroVAD.sampleRate, channels: 1, interleaved: false),
+              let converter = AVAudioConverter(from: format, to: target) else {
+            return .failed("cannot convert the microphone's \(format) to 16 kHz")
+        }
+        let tap = MicSpeechSource.tap(format: format, target: target, converter: converter, state: state, queue: vad, log: log)
+        var startError: Error?
+        if let raised = LDCatchException({
+            input.removeTap(onBus: 0)
+            input.installTap(onBus: 0, bufferSize: 4096, format: format, block: tap)
+            do { try engine.start() } catch { startError = error }
+        }) {
+            close()
+            return .failed("the microphone refused to start (\(raised.reason ?? raised.name.rawValue))")
+        }
+        if let startError {
+            close()
+            return .failed("microphone would not start: \(startError.localizedDescription)")
+        }
+        // A new input device (AirPods connecting, a mic unplugged) stops the engine and
+        // changes the format: start again on the new one.
+        observer = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { _ in changed() }
+        return .listening("\(format.sampleRate / 1000) kHz \(format.channelCount)-channel input")
+    }
+
+    /// On `queue`: stop and drop the engine; the next open reads the device afresh.
+    func close() {
+        dispatchPrecondition(condition: .onQueue(queue))
+        if let o = observer { NotificationCenter.default.removeObserver(o) }
+        observer = nil
+        let old = engine
+        _ = LDCatchException {
+            old.inputNode.removeTap(onBus: 0)
+            old.stop()
+        }
+        engine = AVAudioEngine()
+    }
+}
+
 /// The owner's speech from the microphone through Silero; other speakers and word counts
 /// still from screenpipe (whose own spans for the owner add words but no timing).
 @MainActor
 final class MicSpeechSource: SpeechSource {
     private let screenpipe: SpeechSource
     private let log = Log("Speech")
-    /// Replaced on every restart: after a device switch an engine can keep reporting the old
-    /// input's format (10-28: 48 kHz while AirPods ran at 24 kHz), and tapping it then raises.
-    private var engine = AVAudioEngine()
+    private let mic = MicEngine()
     private let queue = DispatchQueue(label: "learner.speech.vad", qos: .userInitiated)
     private let state = Locked<VADState>(VADState())
     private(set) var problem: String?
     private var started = false
-    private var configObserver: NSObjectProtocol?
+    /// The engine is being started on its queue; the result comes back to `opened`.
+    private var opening = false
+    var isListening: Bool { started }
     private var stall = StallWatch()
     /// The coach wants the mic (it called `start()`), and nothing permanent stops it (no
     /// permission, no model). While wanted and not running, opening is retried with backoff.
@@ -212,11 +272,16 @@ final class MicSpeechSource: SpeechSource {
     }
 
     private func open(now: Date) -> Bool {
-        guard !started else { return true }
+        guard !started, !opening else { return true }
         if inCall && inputIsBluetooth() { return false }
+        // Loaded once (from disk, on this thread); a reopen only clears its memory of the last audio.
         do {
-            let vad = try SileroVAD()
-            state.withLock { $0.vad = vad }
+            if state.withLock({ $0.vad == nil }) {
+                let vad = try SileroVAD()
+                state.withLock { $0.vad = vad }
+            } else {
+                state.withLock { $0.vad?.reset() }
+            }
         } catch {
             problem = "speech model unavailable: \(error.localizedDescription)"
             log.error(problem!)
@@ -241,49 +306,35 @@ final class MicSpeechSource: SpeechSource {
             return false
         default: break
         }
-        let input = engine.inputNode
-        let format = input.outputFormat(forBus: 0)
-        // Mid-switch (AirPods connecting) the input has no format yet, and installing a tap
-        // on it raises an Objective-C exception that Swift cannot catch: on 10-27 one left
-        // the mic off, silently, for good. Not ready: say so and try again shortly.
-        guard format.sampleRate > 0, format.channelCount > 0 else {
-            return failed(now, "no microphone input ready (\(format.sampleRate) Hz, \(format.channelCount) channels)")
+        opening = true
+        let (mic, state, vad, log) = (self.mic, self.state, self.queue, self.log)
+        mic.queue.async {
+            let result = mic.open(state: state, vad: vad, log: log, changed: { [weak self] in
+                DispatchQueue.main.async { MainActor.assumeIsolated { self?.restart(why: "the audio input changed") } }
+            })
+            DispatchQueue.main.async { MainActor.assumeIsolated { [weak self] in self?.opened(result) } }
         }
-        input.removeTap(onBus: 0)
-        guard let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: SileroVAD.sampleRate, channels: 1, interleaved: false),
-              let converter = AVAudioConverter(from: format, to: target) else {
-            return failed(now, "cannot convert the microphone's \(format) to 16 kHz")
-        }
-        // AVAudioEngine raises Objective-C exceptions (a tap whose format no longer matches the
-        // device): caught here, they are a failure to retry on a fresh engine. Uncaught, one
-        // unwound through the app's clock on 10-28 and stopped it, and the mic, for good.
-        let tap = MicSpeechSource.tap(format: format, target: target, converter: converter, state: state, queue: queue, log: log)
-        var startError: Error?
-        if let raised = LDCatchException({
-            input.installTap(onBus: 0, bufferSize: 4096, format: format, block: tap)
-            do { try engine.start() } catch { startError = error }
-        }) {
-            engine = AVAudioEngine()
-            return failed(now, "the microphone refused to start (\(raised.reason ?? raised.name.rawValue))")
-        }
-        // A new input device (AirPods connecting, a mic unplugged) stops the engine and
-        // changes the format: start again on the new one.
-        configObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.restart(why: "the audio input changed") }
-        }
-        do {
-            if let startError { throw startError }
+        return true
+    }
+
+    /// Back on the main thread with what the engine queue made of an open.
+    private func opened(_ result: MicEngine.Opened) {
+        opening = false
+        switch result {
+        case .listening(let input):
+            // A Bluetooth call began while it was starting: leave the mic to the call.
+            guard wanted, !(inCall && inputIsBluetooth()) else {
+                let mic = self.mic
+                mic.queue.async { mic.close() }
+                return
+            }
             started = true
             if stall.since == nil { problem = nil }
             stall.started(frames: framesScored)
             reopen.succeeded()
-            log.info("listening on \(format.sampleRate / 1000) kHz \(format.channelCount)-channel input; Silero VAD on device")
-            return true
-        } catch {
-            if let o = configObserver { NotificationCenter.default.removeObserver(o) }
-            configObserver = nil
-            engine = AVAudioEngine()
-            return failed(now, "microphone would not start: \(error.localizedDescription)")
+            log.info("listening on \(input); Silero VAD on device")
+        case .failed(let why):
+            _ = failed(Date(), why)
         }
     }
 
@@ -383,20 +434,15 @@ final class MicSpeechSource: SpeechSource {
 
     func stop() {
         guard started else { return }
-        if let o = configObserver { NotificationCenter.default.removeObserver(o) }
-        configObserver = nil
-        _ = LDCatchException {
-            engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
-        }
         started = false
+        let mic = self.mic
+        mic.queue.async { mic.close() }
     }
 
     func restart(why: String) {
         log.warn("\(why); restarting the microphone")
         stop()
-        engine = AVAudioEngine()
-        // A failure is logged by `open` and retried from `poll`.
+        // On the engine queue after the close; a failure is logged and retried from `poll`.
         _ = open(now: Date())
     }
 
