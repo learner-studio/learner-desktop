@@ -242,3 +242,42 @@ import TestSupport
         #expect(lines.contains { $0.contains("late: skipped, out of time") })
     }
 }
+
+// An Objective-C exception in one scheduled task (AVAudioEngine raises them) must not stop
+// the app's clock; a stalled main thread is noticed, sampled once and its length logged.
+@Suite("Clock and stalls", .tags(.light, .core), .timeLimit(.minutes(1)), .quietLog, .serialized) struct ClockStallTests {
+    @MainActor @Test func anExceptionInATaskIsLoggedAndTheNextOneStillRuns() {
+        var ran: [String] = []
+        let lines = capturingLog {
+            Scheduler.guarded("mic") {
+                ran.append("mic")
+                NSException(name: .invalidArgumentException, reason: "Failed to create tap due to format mismatch", userInfo: nil).raise()
+                ran.append("after the raise")
+            }
+            Scheduler.guarded("tray") { ran.append("tray") }
+        }
+        #expect(ran == ["mic", "tray"])
+        #expect(lines.contains { $0.contains("[Scheduler] mic raised NSInvalidArgumentException: Failed to create tap due to format mismatch") })
+    }
+
+    @Test func aStalledMainThreadIsSampledOnceAndItsLengthLogged() {
+        let pending = Locked<[@Sendable () -> Void]>([])
+        let samples = Locked<[String]>([])
+        let watch = MainThreadWatch(threshold: 1, cooldown: 600,
+                                    onMain: { ping in pending.withLock { $0.append(ping) } },
+                                    sample: { file in samples.withLock { $0.append(file) } })
+        let lines = capturingLog {
+            watch.check(now: 100)            // ping sent; the main thread never runs it
+            watch.check(now: 100.5)          // not overdue yet
+            watch.check(now: 101.2)          // overdue: sampled
+            watch.check(now: 103)            // the same stall: not sampled again
+            watch.answered(now: 104)         // it ran at last: 4 s
+            watch.check(now: 105)            // a new ping...
+            watch.answered(now: 105.1)       // ...answered at once: nothing logged
+        }
+        #expect(pending.value.count == 2)
+        #expect(samples.value.count == 1 && samples.value[0].hasSuffix("/main-thread-stall.txt"))
+        #expect(lines.filter { $0.contains("[Stall] the main thread was blocked for 4.0 s") }.count == 1)
+        #expect(lines.filter { $0.contains("sampling it") }.count == 1)
+    }
+}

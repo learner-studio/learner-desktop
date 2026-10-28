@@ -1,5 +1,6 @@
 @preconcurrency import AVFoundation
 import CoreAudio
+import ObjCCatch
 import CoreML
 import Foundation
 
@@ -171,7 +172,9 @@ struct VADSegmenter {
 final class MicSpeechSource: SpeechSource {
     private let screenpipe: SpeechSource
     private let log = Log("Speech")
-    private let engine = AVAudioEngine()
+    /// Replaced on every restart: after a device switch an engine can keep reporting the old
+    /// input's format (10-28: 48 kHz while AirPods ran at 24 kHz), and tapping it then raises.
+    private var engine = AVAudioEngine()
     private let queue = DispatchQueue(label: "learner.speech.vad", qos: .userInitiated)
     private let state = Locked<VADState>(VADState())
     private(set) var problem: String?
@@ -251,16 +254,25 @@ final class MicSpeechSource: SpeechSource {
               let converter = AVAudioConverter(from: format, to: target) else {
             return failed(now, "cannot convert the microphone's \(format) to 16 kHz")
         }
-        input.installTap(onBus: 0, bufferSize: 4096, format: format,
-                         block: MicSpeechSource.tap(format: format, target: target, converter: converter,
-                                                    state: state, queue: queue, log: log))
+        // AVAudioEngine raises Objective-C exceptions (a tap whose format no longer matches the
+        // device): caught here, they are a failure to retry on a fresh engine. Uncaught, one
+        // unwound through the app's clock on 10-28 and stopped it, and the mic, for good.
+        let tap = MicSpeechSource.tap(format: format, target: target, converter: converter, state: state, queue: queue, log: log)
+        var startError: Error?
+        if let raised = LDCatchException({
+            input.installTap(onBus: 0, bufferSize: 4096, format: format, block: tap)
+            do { try engine.start() } catch { startError = error }
+        }) {
+            engine = AVAudioEngine()
+            return failed(now, "the microphone refused to start (\(raised.reason ?? raised.name.rawValue))")
+        }
         // A new input device (AirPods connecting, a mic unplugged) stops the engine and
         // changes the format: start again on the new one.
         configObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.restart(why: "the audio input changed") }
         }
         do {
-            try engine.start()
+            if let startError { throw startError }
             started = true
             if stall.since == nil { problem = nil }
             stall.started(frames: framesScored)
@@ -268,9 +280,9 @@ final class MicSpeechSource: SpeechSource {
             log.info("listening on \(format.sampleRate / 1000) kHz \(format.channelCount)-channel input; Silero VAD on device")
             return true
         } catch {
-            input.removeTap(onBus: 0)
             if let o = configObserver { NotificationCenter.default.removeObserver(o) }
             configObserver = nil
+            engine = AVAudioEngine()
             return failed(now, "microphone would not start: \(error.localizedDescription)")
         }
     }
@@ -373,14 +385,17 @@ final class MicSpeechSource: SpeechSource {
         guard started else { return }
         if let o = configObserver { NotificationCenter.default.removeObserver(o) }
         configObserver = nil
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        _ = LDCatchException {
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+        }
         started = false
     }
 
     func restart(why: String) {
         log.warn("\(why); restarting the microphone")
         stop()
+        engine = AVAudioEngine()
         // A failure is logged by `open` and retried from `poll`.
         _ = open(now: Date())
     }

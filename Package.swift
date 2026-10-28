@@ -10,8 +10,11 @@ let package = Package(
     name: "LearnerDesktop",
     platforms: [.macOS(.v15)],
     targets: [
+        // Catches Objective-C exceptions (AVAudioEngine raises them), which Swift cannot.
+        .target(name: "ObjCCatch", path: "menu-bar-app-objc"),
         .executableTarget(
             name: "LearnerDesktop",
+            dependencies: ["ObjCCatch"],
             path: "menu-bar-app",
             exclude: ["com.benpollack.learner-desktop.plist", "learner-desktop", "Learner Desktop.app", "Models"],
             swiftSettings: [.swiftLanguageMode(.v6)],

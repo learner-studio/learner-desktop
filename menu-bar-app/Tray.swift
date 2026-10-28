@@ -17,6 +17,9 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Collected off the main thread by the Status job; the tray and menu only read it.
     var status = AppStatus()
     private var trayKind = ""
+    private var trayTitle = NSAttributedString()
+    private var trayTooltip = ""
+    private let stallWatch = MainThreadWatch()
     private lazy var statusJob = Job("Status", period: 8, backoff: Backoff(base: 8, max: 60), quiet: true) { [weak self] _ in
         guard let self = self else { return .idle }
         let (previous, helpers, uploaderActive, speechProblem) = DispatchQueue.main.sync {
@@ -109,6 +112,7 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         _ = statusJob
+        stallWatch.start()
         talkMonitor.start()
         ChatAndOutboxJobs.install(heartbeat: { [weak self] in self?.heartbeatInput() ?? [:] })
         Scheduler.start()
@@ -122,10 +126,12 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Draws from the last status snapshot (no I/O), then refreshes it in the background.
     func menuWillOpen(_ menu: NSMenu) {
+        // How long the click waited before AppKit asked for the menu, then the build.
+        let waited = NSApp.currentEvent.map { ProcessInfo.processInfo.systemUptime - $0.timestamp } ?? 0
         let started = Date()
         rebuildMenu()
         let ms = Int(Date().timeIntervalSince(started) * 1000)
-        if ms > 100 { log.warn("menu took \(ms) ms to build") }
+        if ms > 100 || waited > 0.3 { log.warn("menu opened \(Int(waited * 1000)) ms after the click, built in \(ms) ms") }
         statusJob.kick("menu opened")
         PavlokController.shared.updateConnectionStatus()
     }
@@ -320,10 +326,11 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
             trayKind = state.kind
         }
         let queued = status.outboxDepth > 0 ? " 📤\(status.outboxDepth)" : ""
-        button.attributedTitle = NSAttributedString(string: state.title + queued, attributes: [.font: NSFont.systemFont(ofSize: 14)])
-        button.toolTip = state.tooltip
-        button.image = nil
-        button.imagePosition = .noImage
+        // Each change to the button is a round trip to the menu bar (ControlCenter draws
+        // status items): only send what changed.
+        let title = NSAttributedString(string: state.title + queued, attributes: [.font: NSFont.systemFont(ofSize: 14)])
+        if title != trayTitle { button.attributedTitle = title; trayTitle = title }
+        if state.tooltip != trayTooltip { button.toolTip = state.tooltip; trayTooltip = state.tooltip }
     }
 
     @objc func selectVaultBrowser(_ sender: NSMenuItem) {

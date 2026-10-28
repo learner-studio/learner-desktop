@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ObjCCatch
 import Synchronization
 
 // The app runs a handful of workflows -- the speaking coach, the trial outbox, the chat
@@ -583,9 +584,18 @@ enum Scheduler {
         let now = Date()
         for i in tasks.indices where now.timeIntervalSince(tasks[i].last) >= tasks[i].every - 0.05 {
             tasks[i].last = now
-            tasks[i].run()
+            guarded(tasks[i].name, tasks[i].run)
         }
-        for job in Job.all { job.tick() }
+        for job in Job.all { guarded(job.name, job.tick) }
+    }
+
+    /// An Objective-C exception raised in one task stops that tick of it, never the clock:
+    /// one escaping the timer leaves it marked as firing and it never fires again (10-28:
+    /// the coach, the tray and every job stood still for an hour behind a red tray).
+    static func guarded(_ name: String, _ run: () -> Void) {
+        if let raised = LDCatchException(run) {
+            Log("Scheduler").error("\(name) raised \(raised.name.rawValue): \(raised.reason ?? "no reason"); the clock keeps running")
+        }
     }
 }
 
