@@ -442,7 +442,8 @@ final class Job: Sendable {
     /// What the tray shows as waiting (yellow): held off by a rate limit, not failing.
     var waiting: String? {
         let s = snapshot
-        return s.waitingSince == nil || s.blocked ? nil : s.summary
+        guard s.waitingSince != nil, !s.blocked else { return nil }
+        return "\(s.summary); next try \(DateFormatter.localizedString(from: s.nextRun, dateStyle: .none, timeStyle: .short))"
     }
 
     /// Called by the Scheduler; runs the job when it is due.

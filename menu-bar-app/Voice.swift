@@ -18,10 +18,12 @@ final class VoiceTranscripts: Sendable {
         var aiVaultConfig = Paths.aiVaultConfig
         /// Conversations whose transcripts ChatGPT does not have: not fetched again until the file changes.
         var memoPath = Paths.data + "/voice-transcripts.json"
-        var delay: TimeInterval = 3
+        /// Gentle on purpose: on 10-28 a 183-conversation catch-up at one request per 3 s,
+        /// right after ai-vault's own fetching, put ChatGPT into hours of 429s.
+        var delay: TimeInterval = 10
         var requestTimeout: TimeInterval = 30
         /// Bounds one run (the export job runs hourly; the rest waits for the next run).
-        var maxPerRun = 200
+        var maxPerRun = 30
         var userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
     }
 

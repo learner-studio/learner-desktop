@@ -167,6 +167,7 @@ private final class ExportFixture {
         #expect(f.export.expiredLogins.isEmpty, "a 429 comes after a working login")
         #expect(f.export.job.problem == nil)
         #expect(f.export.job.waiting?.contains("chatgpt: rate limited") == true)
+        #expect(f.export.job.waiting?.contains("; next try ") == true, "the menu says when it tries again")
         // Over: back to normal, and the next limit starts at 30 min again.
         f.output("chatgpt", Fixture.aiVaultOk)
         let ok = run(f.export.job)

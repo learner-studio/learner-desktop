@@ -97,7 +97,7 @@ struct TrayState: Equatable {
         if let p = s.problems.first(where: { $0.waiting }) {
             let tag = p.source == "Export" ? "VAULT" : p.source.uppercased()
             return TrayState(kind: "waiting:\(p.source)", title: "🧠 🟡 \(tag)",
-                             tooltip: "Learner Desktop\n\(p.source == "Export" ? "Chat export" : p.source) is waiting out a rate limit (nothing to do): \(p.text)")
+                             tooltip: "Learner Desktop\n\(p.source == "Export" ? "ChatGPT is limiting how often the chat export may ask (HTTP 429)" : "\(p.source) is waiting out a rate limit"). Nothing is broken and nothing needs doing; it retries by itself: \(p.text)")
         }
         if case let .degraded(why) = s.capture {
             return TrayState(kind: "screenpipe-degraded", title: "🧠 🟡 \(s.chats)", tooltip: "Learner Desktop\nScreenpipe: \(why)")
