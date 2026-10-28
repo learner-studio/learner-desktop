@@ -243,7 +243,10 @@ final class SpeakingCoach {
     func start() {
         guard !started else { return }
         started = true
-        (speech as? MicSpeechSource)?.start()
+        if let mic = speech as? MicSpeechSource {
+            mic.inCall = call != nil
+            mic.start()
+        }
         Scheduler.every(1, "coach") { [weak self] in self?.tick() }
         log.info("started: session \(activeSessionId)\(call.map { " (call: \($0.app))" } ?? ""), arm \(arm), assignment \(experiment.currentMode.rawValue), alert only during calls: \(settings.alertOnlyDuringCalls)")
     }
@@ -550,6 +553,7 @@ final class SpeakingCoach {
             experimentLog.info("session \(activeSessionId): arm \(arm) (\(experiment.currentMode.rawValue))")
         }
         call = state
+        (speech as? MicSpeechSource)?.inCall = state != nil
         settings.session = CoachSettings.Session(id: activeSessionId, callApp: state?.app, callTitle: state?.title)
     }
 

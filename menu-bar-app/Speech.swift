@@ -1,4 +1,5 @@
 @preconcurrency import AVFoundation
+import CoreAudio
 import CoreML
 import Foundation
 
@@ -177,6 +178,17 @@ final class MicSpeechSource: SpeechSource {
     private var started = false
     private var configObserver: NSObjectProtocol?
     private var stall = StallWatch()
+    /// The coach wants the mic (it called `start()`), and nothing permanent stops it (no
+    /// permission, no model). While wanted and not running, opening is retried with backoff.
+    private var wanted = false
+    private var reopen = Backoff(base: 5, max: 300)
+    private var retryAt = Date.distantPast
+    /// A call is on (the coach says so). During a call on a Bluetooth input (AirPods) the
+    /// mic is left to the call app: a second app on it keeps the headset in call mode and
+    /// trips its switching. The coach times the owner from screenpipe meanwhile.
+    var inCall = false
+    private var heldForCall = false
+    var inputIsBluetooth: () -> Bool = { MicSpeechSource.defaultInputIsBluetooth() }
 
     struct VADState {
         var segmenter = VADSegmenter()
@@ -189,26 +201,35 @@ final class MicSpeechSource: SpeechSource {
     init(screenpipe: SpeechSource) { self.screenpipe = screenpipe }
 
     /// Starts the microphone (macOS asks the owner once). False when it cannot: the coach
-    /// then keeps working from screenpipe alone, and `problem` says why.
+    /// then keeps working from screenpipe alone, `problem` says why, and polls retry it.
     @discardableResult
     func start() -> Bool {
+        wanted = true
+        return open(now: Date())
+    }
+
+    private func open(now: Date) -> Bool {
         guard !started else { return true }
+        if inCall && inputIsBluetooth() { return false }
         do {
             let vad = try SileroVAD()
             state.withLock { $0.vad = vad }
         } catch {
             problem = "speech model unavailable: \(error.localizedDescription)"
             log.error(problem!)
+            wanted = false
             return false
         }
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .denied, .restricted:
             problem = "microphone access denied (System Settings → Privacy & Security → Microphone)"
             log.warn("\(problem!); timing your speech from screenpipe instead")
+            wanted = false
             return false
         case .notDetermined:
             problem = "waiting for microphone permission (answer the macOS prompt); timing from screenpipe until then"
             log.info("asking for microphone permission; timing your speech from screenpipe until it is granted")
+            wanted = false
             AVCaptureDevice.requestAccess(for: .audio) { granted in
                 Task { @MainActor in
                     if granted { self.start() } else { self.problem = "microphone access denied"; self.log.warn("microphone access denied") }
@@ -219,11 +240,16 @@ final class MicSpeechSource: SpeechSource {
         }
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
+        // Mid-switch (AirPods connecting) the input has no format yet, and installing a tap
+        // on it raises an Objective-C exception that Swift cannot catch: on 10-27 one left
+        // the mic off, silently, for good. Not ready: say so and try again shortly.
+        guard format.sampleRate > 0, format.channelCount > 0 else {
+            return failed(now, "no microphone input ready (\(format.sampleRate) Hz, \(format.channelCount) channels)")
+        }
+        input.removeTap(onBus: 0)
         guard let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: SileroVAD.sampleRate, channels: 1, interleaved: false),
               let converter = AVAudioConverter(from: format, to: target) else {
-            problem = "cannot convert the microphone's \(format) to 16 kHz"
-            log.error(problem!)
-            return false
+            return failed(now, "cannot convert the microphone's \(format) to 16 kHz")
         }
         input.installTap(onBus: 0, bufferSize: 4096, format: format,
                          block: MicSpeechSource.tap(format: format, target: target, converter: converter,
@@ -238,14 +264,63 @@ final class MicSpeechSource: SpeechSource {
             started = true
             if stall.since == nil { problem = nil }
             stall.started(frames: framesScored)
+            reopen.succeeded()
             log.info("listening on \(format.sampleRate / 1000) kHz \(format.channelCount)-channel input; Silero VAD on device")
             return true
         } catch {
             input.removeTap(onBus: 0)
-            problem = "microphone would not start: \(error.localizedDescription)"
-            log.error(problem!)
-            return false
+            if let o = configObserver { NotificationCenter.default.removeObserver(o) }
+            configObserver = nil
+            return failed(now, "microphone would not start: \(error.localizedDescription)")
         }
+    }
+
+    /// A failure that may pass (a device mid-switch): logged, and retried with backoff.
+    private func failed(_ now: Date, _ why: String) -> Bool {
+        let wait = reopen.failed()
+        retryAt = now.addingTimeInterval(wait)
+        problem = why
+        log.warn("\(why); trying again in \(Job.describe(wait))")
+        return false
+    }
+
+    enum MicAction: Equatable { case none, open, release }
+
+    /// What the mic should do on this poll.
+    nonisolated static func decide(running: Bool, wanted: Bool, inCall: Bool, bluetooth: Bool, retryDue: Bool) -> MicAction {
+        let leaveToCall = inCall && bluetooth
+        if running { return leaveToCall ? .release : .none }
+        return wanted && !leaveToCall && retryDue ? .open : .none
+    }
+
+    private func manage(now: Date) {
+        let bluetooth = inCall && inputIsBluetooth()
+        switch MicSpeechSource.decide(running: started, wanted: wanted, inCall: inCall, bluetooth: bluetooth, retryDue: now >= retryAt) {
+        case .none: break
+        case .release:
+            log.info("a call is on with a Bluetooth microphone: leaving it to the call, timing from screenpipe until it ends")
+            stop()
+            stall = StallWatch()
+            heldForCall = true
+        case .open:
+            if heldForCall { log.info(inCall ? "the call moved off Bluetooth: taking the microphone back" : "call over: taking the microphone back") }
+            heldForCall = false
+            _ = open(now: now)
+        }
+    }
+
+    /// Whether the system's default input is Bluetooth (AirPods and other headsets).
+    nonisolated static func defaultInputIsBluetooth() -> Bool {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice,
+                                                 mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var device = AudioObjectID(0)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &device) == noErr else { return false }
+        address.mSelector = kAudioDevicePropertyTransportType
+        var transport: UInt32 = 0
+        size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &transport) == noErr else { return false }
+        return transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE
     }
 
     /// The microphone callback. Built outside the main actor on purpose: AVAudio calls it on
@@ -306,7 +381,8 @@ final class MicSpeechSource: SpeechSource {
     func restart(why: String) {
         log.warn("\(why); restarting the microphone")
         stop()
-        if !start() { log.warn("microphone did not restart: \(problem ?? "unknown")") }
+        // A failure is logged by `open` and retried from `poll`.
+        _ = open(now: Date())
     }
 
     /// Called each poll: frames must keep arriving while the microphone runs.
@@ -328,6 +404,7 @@ final class MicSpeechSource: SpeechSource {
             return [SpeechSpan(speaker: .me, start: span.start, end: span.end, words: 0, audioClock: true,
                                capturedAt: span.start, path: "silero_vad", label: "silero \(String(format: "%.1f", span.end.timeIntervalSince(span.start))) s")]
         }
+        manage(now: now)
         guard started else { return screenpipe.poll(now: now, deliver: deliver) }
         watchdog(now: now)
         if !mine.isEmpty { deliver(mine) }

@@ -179,3 +179,41 @@ struct StallWatchTests {
         #expect(w.check(frames: 140, now: t0.addingTimeInterval(92)) == .restart(silentFor: 11))
     }
 }
+
+// Who holds the microphone: during a call on a Bluetooth input (AirPods) Learner leaves it
+// to the call app; otherwise a mic that is not running (a failed restart mid-switch, as on
+// 10-27) is opened again once its retry is due, never left off for good.
+@MainActor
+@Suite("Microphone hand-off", .tags(.light, .coach))
+struct MicHandOffTests {
+    @Test func theMicIsLeftToABluetoothCallAndReopenedOtherwise() {
+        typealias M = MicSpeechSource
+        // Running: released only for a call on Bluetooth.
+        #expect(M.decide(running: true, wanted: true, inCall: true, bluetooth: true, retryDue: true) == .release)
+        #expect(M.decide(running: true, wanted: true, inCall: true, bluetooth: false, retryDue: true) == .none)
+        #expect(M.decide(running: true, wanted: true, inCall: false, bluetooth: false, retryDue: true) == .none)
+        // Not running: reopened when wanted and due, not during a Bluetooth call.
+        #expect(M.decide(running: false, wanted: true, inCall: false, bluetooth: false, retryDue: true) == .open)
+        #expect(M.decide(running: false, wanted: true, inCall: true, bluetooth: false, retryDue: true) == .open)
+        #expect(M.decide(running: false, wanted: true, inCall: true, bluetooth: true, retryDue: true) == .none)
+        #expect(M.decide(running: false, wanted: true, inCall: false, bluetooth: false, retryDue: false) == .none)
+        #expect(M.decide(running: false, wanted: false, inCall: false, bluetooth: false, retryDue: true) == .none)
+    }
+
+    @Test func startingDuringABluetoothCallDoesNotTouchTheMic() {
+        let mic = MicSpeechSource(screenpipe: QuietSpeech())
+        mic.inCall = true
+        mic.inputIsBluetooth = { true }
+        #expect(mic.start() == false)
+        #expect(mic.problem == nil, "leaving the mic to a call is not a problem")
+        var heard: [SpeechSpan] = []
+        mic.poll(now: Date()) { heard += $0 }
+        #expect(mic.framesScored == 0)
+        #expect(heard.isEmpty)
+    }
+}
+
+@MainActor
+private final class QuietSpeech: SpeechSource {
+    func poll(now: Date, deliver: @escaping @MainActor ([SpeechSpan]) -> Void) {}
+}
