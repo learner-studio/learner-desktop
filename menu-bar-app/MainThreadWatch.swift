@@ -6,7 +6,7 @@ import Foundation
 /// process is saved to logs/main-thread-stall-<time>.txt while it is still stuck (the
 /// newest five are kept; `sample` will not overwrite a file).
 final class MainThreadWatch: Sendable {
-    struct State { var ping: TimeInterval?; var lastSample = -Double.infinity }
+    struct State { var ping: TimeInterval?; var lastSample = -Double.infinity; var menuOpen = false }
 
     let threshold: TimeInterval
     let cooldown: TimeInterval
@@ -17,7 +17,7 @@ final class MainThreadWatch: Sendable {
     private let sample: @Sendable (String) -> Void
 
     init(threshold: TimeInterval = 1, cooldown: TimeInterval = 600,
-         onMain: @escaping @Sendable (@escaping @Sendable () -> Void) -> Void = { DispatchQueue.main.async(execute: $0) },
+         onMain: @escaping @Sendable (@escaping @Sendable () -> Void) -> Void = MainThreadWatch.onMainRunLoop,
          sample: @escaping @Sendable (String) -> Void = { _ = ChildProcess.run("/usr/bin/sample", ["\(getpid())", "2", "-file", $0], timeout: 15) }) {
         self.threshold = threshold
         self.cooldown = cooldown
@@ -37,10 +37,19 @@ final class MainThreadWatch: Sendable {
         thread.start()
     }
 
+    /// While a menu is open AppKit's menu loop holds the main thread on purpose: not a stall.
+    func menu(open: Bool) {
+        state.withLock { s in
+            s.menuOpen = open
+            s.ping = nil
+        }
+    }
+
     /// One look: send a ping if none is out; sample once if the one out is overdue.
     func check(now: TimeInterval) {
         enum Next { case ping, sample(TimeInterval), wait }
         let next: Next = state.withLock { s in
+            if s.menuOpen { s.ping = nil; return .wait }
             guard let sent = s.ping else { s.ping = now; return .ping }
             guard now - sent >= threshold, now - s.lastSample >= cooldown else { return .wait }
             s.lastSample = now
@@ -56,6 +65,14 @@ final class MainThreadWatch: Sendable {
         case .wait:
             break
         }
+    }
+
+    /// Runs `block` on the main run loop in its common modes, which include a menu's event
+    /// tracking: an open menu is not a stall (the main dispatch queue can wait it out).
+    static let onMainRunLoop: @Sendable (@escaping @Sendable () -> Void) -> Void = { block in
+        let main = CFRunLoopGetMain()
+        CFRunLoopPerformBlock(main, CFRunLoopMode.commonModes.rawValue, block)
+        CFRunLoopWakeUp(main)
     }
 
     /// A new file per sample; older ones beyond the newest `keep` are removed.

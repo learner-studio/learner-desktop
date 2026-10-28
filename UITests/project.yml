@@ -1,0 +1,31 @@
+# UI tests against the INSTALLED Learner Desktop (not built here): XCUITest drives the
+# real menu-bar item the way a click does. Generate and run with scripts/ui-test.sh.
+name: LearnerUITests
+options:
+  deploymentTarget:
+    macOS: "15.0"
+targets:
+  # XCUITest needs a host app to start its runner; the tests never launch it.
+  UITestHost:
+    type: application
+    platform: macOS
+    sources: [Host]
+    scheme:
+      testTargets: [MenuUITests]
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.benpollack.learner-uitest-host
+      GENERATE_INFOPLIST_FILE: YES
+      CODE_SIGN_IDENTITY: "-"
+      SWIFT_VERSION: "6.0"
+  MenuUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources: [MenuUITests]
+    dependencies:
+      - target: UITestHost
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.benpollack.learner-menu-uitests
+      GENERATE_INFOPLIST_FILE: YES
+      CODE_SIGN_IDENTITY: "-"
+      SWIFT_VERSION: "6.0"
+      TEST_TARGET_NAME: UITestHost

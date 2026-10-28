@@ -126,9 +126,10 @@ struct SpeechTests {
         let format = file.processingFormat
         let target = try #require(AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: SileroVAD.sampleRate, channels: 1, interleaved: false))
         let converter = try #require(AVAudioConverter(from: format, to: target))
-        let state = Locked<MicSpeechSource.VADState>(MicSpeechSource.VADState(vad: try SileroVAD()))
+        let state = Locked<MicSpeechSource.VADState>(MicSpeechSource.VADState())
+        let model = MicSpeechSource.VADModel(try SileroVAD())
         let queue = DispatchQueue(label: "test.vad")
-        let tap = MicSpeechSource.tap(format: format, target: target, converter: converter, state: state, queue: queue, log: Log("Test"))
+        let tap = MicSpeechSource.tap(format: format, target: target, converter: converter, state: state, model: model, queue: queue, log: Log("Test"))
         let done = DispatchSemaphore(value: 0)
         DispatchQueue.global(qos: .userInteractive).async {
             while file.framePosition < file.length {

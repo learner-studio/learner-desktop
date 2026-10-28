@@ -281,6 +281,21 @@ import TestSupport
         #expect(lines.filter { $0.contains("sampling it") }.count == 1)
     }
 
+    @Test func anOpenMenuIsNotAStall() {
+        let samples = Locked<[String]>([])
+        let watch = MainThreadWatch(threshold: 1, onMain: { _ in }, sample: { file in samples.withLock { $0.append(file) } })
+        let lines = capturingLog {
+            watch.check(now: 100)
+            watch.menu(open: true)           // the menu loop holds the main thread...
+            watch.check(now: 103)
+            watch.check(now: 110)            // ...for as long as the menu stays open
+            watch.menu(open: false)
+            watch.answered(now: 111)         // the ping from before the menu: not counted
+        }
+        #expect(samples.value.isEmpty)
+        #expect(!lines.contains { $0.contains("[Stall]") })
+    }
+
     @Test func eachSampleGetsItsOwnFileAndOnlyTheNewestFiveAreKept() {
         let dir = TempDir("stalls")
         for i in 1...7 { dir.write("main-thread-stall-2026102\(i)-000000.txt", "") }

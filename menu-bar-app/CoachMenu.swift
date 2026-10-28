@@ -278,16 +278,15 @@ extension TrayAppManager {
         add("🎛️ Cue Preset: \(settings.presetName)", to: menu).submenu = presets
 
         for phase in CuePhase.allCases {
-            let view = CueSubmenuView(phase: phase, settings: settings)
+            let (view, sub) = cuePanel(phase)
+            view.sync()
             let parent = add("⏱️ \(phase.title): \(settings.levels(phase).summary)", to: menu)
             view.onChange = { [weak self, weak parent] in
                 parent?.title = "⏱️ \(phase.title): \(settings.levels(phase).summary)"
                 self?.updateTrayButton()
             }
-            let sub = NSMenu()
-            let holder = NSMenuItem()
-            holder.view = view
-            sub.addItem(holder)
+            // A menu has one parent item: let go of the last build's.
+            sub.supermenu?.items.first { $0.submenu === sub }?.submenu = nil
             parent.isEnabled = true
             parent.submenu = sub
         }
@@ -303,6 +302,20 @@ extension TrayAppManager {
         let parent = NSMenuItem(title: "⚡ Pavlok: \(state)", action: nil, keyEquivalent: "")
         parent.submenu = menu
         return parent
+    }
+
+    /// One phase's cue panel in its submenu, built once and kept: on this macOS each of its
+    /// checkboxes sizes itself through SwiftUI, and building the three panels on every open
+    /// cost the tray click 0.4-2.7 s (measured 10-28). Built shortly after launch.
+    func cuePanel(_ phase: CuePhase) -> (CueSubmenuView, NSMenu) {
+        if let built = cuePanels[phase] { return built }
+        let view = CueSubmenuView(phase: phase, settings: CoachSettings.shared)
+        let sub = NSMenu()
+        let holder = NSMenuItem()
+        holder.view = view
+        sub.addItem(holder)
+        cuePanels[phase] = (view, sub)
+        return (view, sub)
     }
 
     func addCoachSettings(to settings: NSMenu) {

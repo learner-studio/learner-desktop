@@ -180,7 +180,7 @@ final class MicEngine: @unchecked Sendable {
     private var observer: NSObjectProtocol?
 
     /// On `queue`. `changed` runs when the input device changes under the running engine.
-    func open(state: Locked<MicSpeechSource.VADState>, vad: DispatchQueue, log: Log, changed: @escaping @Sendable () -> Void) -> Opened {
+    func open(state: Locked<MicSpeechSource.VADState>, model: MicSpeechSource.VADModel, vad: DispatchQueue, log: Log, changed: @escaping @Sendable () -> Void) -> Opened {
         dispatchPrecondition(condition: .onQueue(queue))
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
@@ -192,7 +192,7 @@ final class MicEngine: @unchecked Sendable {
               let converter = AVAudioConverter(from: format, to: target) else {
             return .failed("cannot convert the microphone's \(format) to 16 kHz")
         }
-        let tap = MicSpeechSource.tap(format: format, target: target, converter: converter, state: state, queue: vad, log: log)
+        let tap = MicSpeechSource.tap(format: format, target: target, converter: converter, state: state, model: model, queue: vad, log: log)
         var startError: Error?
         if let raised = LDCatchException({
             input.removeTap(onBus: 0)
@@ -235,6 +235,8 @@ final class MicSpeechSource: SpeechSource {
     private let mic = MicEngine()
     private let queue = DispatchQueue(label: "learner.speech.vad", qos: .userInitiated)
     private let state = Locked<VADState>(VADState())
+    private let model = VADModel()
+    private var modelLoaded = false
     private(set) var problem: String?
     private var started = false
     /// The engine is being started on its queue; the result comes back to `opened`.
@@ -253,12 +255,19 @@ final class MicSpeechSource: SpeechSource {
     private var heldForCall = false
     var inputIsBluetooth: () -> Bool = { MicSpeechSource.defaultInputIsBluetooth() }
 
+    /// What the main thread reads each second. Small and quick under its lock: the model
+    /// runs outside it (`VADModel`), or every coach tick waits on CoreML (10-28: seconds).
     struct VADState {
         var segmenter = VADSegmenter()
-        var vad: SileroVAD?
         var lastError: String?
         /// Frames the model has scored (the self-test's proof that audio arrives).
         var frames = 0
+    }
+
+    /// The Silero model, touched only on the VAD queue (set and reset there too).
+    final class VADModel: @unchecked Sendable {
+        var vad: SileroVAD?
+        init(_ vad: SileroVAD? = nil) { self.vad = vad }
     }
 
     init(screenpipe: SpeechSource) { self.screenpipe = screenpipe }
@@ -276,11 +285,13 @@ final class MicSpeechSource: SpeechSource {
         if inCall && inputIsBluetooth() { return false }
         // Loaded once (from disk, on this thread); a reopen only clears its memory of the last audio.
         do {
-            if state.withLock({ $0.vad == nil }) {
+            let model = self.model
+            if !modelLoaded {
                 let vad = try SileroVAD()
-                state.withLock { $0.vad = vad }
+                queue.async { model.vad = vad }
+                modelLoaded = true
             } else {
-                state.withLock { $0.vad?.reset() }
+                queue.async { model.vad?.reset() }
             }
         } catch {
             problem = "speech model unavailable: \(error.localizedDescription)"
@@ -307,9 +318,9 @@ final class MicSpeechSource: SpeechSource {
         default: break
         }
         opening = true
-        let (mic, state, vad, log) = (self.mic, self.state, self.queue, self.log)
+        let (mic, state, model, vad, log) = (self.mic, self.state, self.model, self.queue, self.log)
         mic.queue.async {
-            let result = mic.open(state: state, vad: vad, log: log, changed: { [weak self] in
+            let result = mic.open(state: state, model: model, vad: vad, log: log, changed: { [weak self] in
                 DispatchQueue.main.async { MainActor.assumeIsolated { self?.restart(why: "the audio input changed") } }
             })
             DispatchQueue.main.async { MainActor.assumeIsolated { [weak self] in self?.opened(result) } }
@@ -390,7 +401,7 @@ final class MicSpeechSource: SpeechSource {
     /// its real-time thread, and a main-actor closure there is a Swift 6 isolation trap
     /// (the app crashed on 10-27 exactly so).
     nonisolated static func tap(format: AVAudioFormat, target: AVAudioFormat, converter: AVAudioConverter,
-                                state: Locked<VADState>, queue: DispatchQueue, log: Log) -> @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void {
+                                state: Locked<VADState>, model: VADModel, queue: DispatchQueue, log: Log) -> @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void {
         { buffer, _ in
             // When this buffer's first sample was heard.
             let heard = Date().addingTimeInterval(-Double(buffer.frameLength) / format.sampleRate)
@@ -409,22 +420,27 @@ final class MicSpeechSource: SpeechSource {
             guard error == nil, let data = out.floatChannelData else { return }
             let samples = Array(UnsafeBufferPointer(start: data[0], count: Int(out.frameLength)))
             queue.async {
-                state.withLock { s in
-                    guard let vad = s.vad else { return }
-                    do {
-                        let probs = try vad.process(samples)
+                guard let vad = model.vad else { return }
+                do {
+                    // Inference outside the lock: the main thread never waits on it.
+                    let probs = try vad.process(samples)
+                    // Frames run back from the newest sample; good to a few ms.
+                    let newest = heard.addingTimeInterval(Double(samples.count) / SileroVAD.sampleRate)
+                    state.withLock { s in
                         s.frames += probs.count
-                        // Frames run back from the newest sample; good to a few ms.
-                        let newest = heard.addingTimeInterval(Double(samples.count) / SileroVAD.sampleRate)
                         for (i, p) in probs.enumerated() {
                             let at = newest.addingTimeInterval(-Double(probs.count - i) * SileroVAD.frameSeconds)
                             s.segmenter.add(p, at: at)
                         }
                         s.lastError = nil
-                    } catch {
-                        if s.lastError == nil { log.error("speech model failed: \(error.localizedDescription)") }
-                        s.lastError = error.localizedDescription
                     }
+                } catch {
+                    let why = error.localizedDescription
+                    let first = state.withLock { s -> Bool in
+                        defer { s.lastError = why }
+                        return s.lastError == nil
+                    }
+                    if first { log.error("speech model failed: \(why)") }
                 }
             }
         }

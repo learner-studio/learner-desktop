@@ -20,6 +20,7 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var trayTitle = NSAttributedString()
     private var trayTooltip = ""
     private let stallWatch = MainThreadWatch()
+    var cuePanels: [CuePhase: (CueSubmenuView, NSMenu)] = [:]
     private lazy var statusJob = Job("Status", period: 8, backoff: Backoff(base: 8, max: 60), quiet: true) { [weak self] _ in
         guard let self = self else { return .idle }
         let (previous, helpers, uploaderActive, speechProblem) = DispatchQueue.main.sync {
@@ -116,6 +117,10 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         talkMonitor.start()
         ChatAndOutboxJobs.install(heartbeat: { [weak self] in self?.heartbeatInput() ?? [:] })
         Scheduler.start()
+        // The cue panels are slow to build (see cuePanel): ready before the first click.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            for phase in CuePhase.allCases { _ = self?.cuePanel(phase) }
+        }
     }
 
     /// Main thread: swap in a fresh status and redraw the tray.
@@ -126,6 +131,7 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Draws from the last status snapshot (no I/O), then refreshes it in the background.
     func menuWillOpen(_ menu: NSMenu) {
+        stallWatch.menu(open: true)
         // How long the click waited before AppKit asked for the menu, then the build.
         let waited = NSApp.currentEvent.map { ProcessInfo.processInfo.systemUptime - $0.timestamp } ?? 0
         let started = Date()
@@ -135,6 +141,8 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusJob.kick("menu opened")
         PavlokController.shared.updateConnectionStatus()
     }
+
+    func menuDidClose(_ menu: NSMenu) { stallWatch.menu(open: false) }
 
     // MARK: - Menu Bar Tray Dropdown Menu
     func rebuildMenu() {
