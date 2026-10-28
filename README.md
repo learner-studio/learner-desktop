@@ -170,6 +170,12 @@ scripts/install-hooks.sh  # pre-commit runs light (+ gitleaks); pre-push runs me
   microphone self-test is skipped during a meeting or on a Bluetooth input. Each suite
   skips, with the reason, when its dependency is missing. The live wristband test needs `LEARNER_HEAVY_PAVLOK=1`. About 3–4 minutes.
 
+**Pairing end to end** (`LEARNER_HEAVY=1 LEARNER_PAIRING_E2E=1`, in no hook): starts
+learner-server's own harness on `ovh` (its test database, a throwaway device its teardown
+revokes) behind one `ssh -L 3019` tunnel, and pairs with it through the app's real import,
+endpoints and heartbeat. The test key stays in memory. The remote-topology case also needs
+`127.0.0.1 learner-pairing.test` in `/etc/hosts`.
+
 **UI tests** (`UITests/`, XCUITest; `scripts/ui-test.sh`, needs XcodeGen and the app
 running) click the installed app's real menu-bar item: how long the menu takes to open
 against an ordinary AppKit menu, every submenu opening (the cue panels too), and two

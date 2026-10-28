@@ -275,7 +275,8 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// recordAppHeartbeat input (contract/desktop.ts, RecordAppHeartbeatInput), from a status
     /// snapshot. Pure, so the light lane checks it against the contract.
     nonisolated static func heartbeat(_ s: AppStatus, appVersion: String, screenpipeVersion: String?, capturePhase: String?,
-                          lastSentAt: Date?, lastExport: Date?, outboxStatus: String, pairing: [String: Any]? = nil) -> [String: Any] {
+                          lastSentAt: Date?, lastExport: Date?, outboxStatus: String, pairing: [String: Any]? = nil,
+                          clientId: String = LearnerAPI.clientId) -> [String: Any] {
         let captureState: String
         switch s.capture {
         case .recording: captureState = "recording"
@@ -284,7 +285,7 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         let iso = ISO8601DateFormatter()
         return [
-            "clientId": LearnerAPI.clientId,
+            "clientId": clientId,
             "appVersion": appVersion,
             "screenpipeVersion": screenpipeVersion as Any? ?? NSNull(),
             "captureState": captureState,

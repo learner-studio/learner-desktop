@@ -58,7 +58,12 @@ private let fixtureConfig = """
         #expect((result["config"] as? [String: Any])?["now"] as? String == "2.7.125 / 0.4.52")
         #expect(read(o.config).contains(#""_screenpipe_engine_version": "0.4.52""#))
         // The ssh side: BatchMode to the ovh alias, the phase script on stdin.
-        #expect(read(dir.file("ssh.args")).components(separatedBy: "\n").prefix(6) == ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "ovh", "bash"])
+        // (and one shared connection for a burst of calls).
+        let args = read(dir.file("ssh.args")).components(separatedBy: "\n")
+        #expect(Array(args.prefix(6)) == ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ControlMaster=auto"])
+        #expect(args.contains { $0.hasPrefix("ControlPath=") } && args.contains("ControlPersist=60"))
+        let host = try #require(args.firstIndex(of: "ovh"))
+        #expect(args[host + 1] == "bash" && args[host - 1] == "ControlPersist=60")
         #expect(read(dir.file("ssh.stdin")) == OVHRemote.mongoScript(CapturePhase.phaseJS(name: "screenpipe 2.7.125 / engine 0.4.52", dryRun: false), marker: "PHASE_JS"))
         #expect(screenpipe.requests.map(\.path) == ["/health"])
     }

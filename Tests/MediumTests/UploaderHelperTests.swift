@@ -38,9 +38,10 @@ import TestSupport
         let dir = TempDir()
         let h = helper(dir, exit: 3, wait: 0.4)
         DispatchQueue.main.sync { h.start() }
-        Thread.sleep(forTimeInterval: 1.0)
+        // Each launch also takes a moment to start bash (more under the pre-push load).
+        Thread.sleep(forTimeInterval: 1.6)
         let launches = dir.read("launches").split(separator: "\n").count
-        #expect((2...3).contains(launches), "launched \(launches) times in 1 s with a 0.4 s wait")
+        #expect((2...4).contains(launches), "launched \(launches) times in 1.6 s with a 0.4 s wait")
         #expect(h.problem == nil || h.isRunning)
         h.stop(grace: 0.5)
     }
