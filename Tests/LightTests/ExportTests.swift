@@ -24,6 +24,9 @@ enum AiVaultOutput {
         // ai-vault's output with the Mac offline, 2026-10-27 17:49 (it also says "Authentication failed").
         let offline = "AI Vault Archive\nAuthenticating...\nAuthentication failed\n\npage.goto: net::ERR_INTERNET_DISCONNECTED at https://claude.ai/\n"
         #expect(VaultExport.classify(status: 0, stopped: nil, output: offline) == .failed("offline (net::ERR_INTERNET_DISCONNECTED)"))
+        // A page that did not load in time is the network too, not an expired login (10-28).
+        let slow = "AI Vault Archive\nAuthenticating...\nAuthentication failed\npage.goto: Timeout 30000ms exceeded.\nCall log:\n  - navigating to \"https://claude.ai/\", waiting until \"domcontentloaded\"\n"
+        #expect(VaultExport.classify(status: 0, stopped: nil, output: slow) == .failed("offline (page.goto: Timeout 30000ms exceeded)"))
         let dns = "Authentication failed\nError: getaddrinfo ENOTFOUND chatgpt.com"
         if case .failed = VaultExport.classify(status: 0, stopped: nil, output: dns) {} else { Issue.record("DNS failure must be retried") }
     }

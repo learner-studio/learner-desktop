@@ -65,7 +65,10 @@ final class VaultExport: Sendable {
     static let rateLimitPattern = "API request failed: 429"
     /// No network (the Mac asleep or offline). ai-vault then also prints "Authentication
     /// failed", which must not read as an expired login: it is checked first and retried.
-    static let offlinePattern = #"net::ERR_[A-Z_]+|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNREFUSED|ECONNRESET|getaddrinfo"#
+    /// A page that did not load in time (`page.goto: Timeout 30000ms exceeded`) is the same:
+    /// on 10-28 claude.ai was slow, ai-vault also printed "Authentication failed", and the
+    /// login was marked expired, which skipped every later Claude export until a sign-in.
+    static let offlinePattern = #"net::ERR_[A-Z_]+|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNREFUSED|ECONNRESET|getaddrinfo|page\.goto: Timeout \d+ms exceeded"#
     static let failedPattern = "Errors: [1-9]|Completed with [1-9][0-9]* errors|✗ Failed:|browser has been closed"
 
     static let shared = VaultExport()
