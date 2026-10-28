@@ -37,12 +37,15 @@ import TestSupport
     }
 }
 
-// The tunnel helper is recognised (for orphan reaping) by a marker in its command line;
-// the script must still contain it.
-@Suite("Tunnel script", .tags(.light, .helpers, .scripts), .timeLimit(.minutes(1)), .quietLog) struct TunnelScriptTests {
-    @Test func theScriptForwardsThePortTheHelperLooksFor() throws {
-        let script = try String(contentsOfFile: toolsRepoRoot() + "/scripts/tunnel.sh", encoding: .utf8)
-        #expect(script.contains("-L \"3200:127.0.0.1:3200\""), "the helper finds orphans by this marker")
-        #expect(script.contains("-sTCP:LISTEN"))
+// The SSH tunnel is gone (it only carried GrowthBook's UI, which could not reach its API
+// through it): no script, and nothing in the app starts it.
+@Suite("No tunnel", .tags(.light, .helpers, .scripts), .timeLimit(.minutes(1)), .quietLog) struct NoTunnelTests {
+    @Test func nothingStartsOrBundlesTheTunnel() throws {
+        let root = toolsRepoRoot()
+        #expect(!FileManager.default.fileExists(atPath: root + "/scripts/tunnel.sh"))
+        let build = try String(contentsOfFile: root + "/scripts/build-app.sh", encoding: .utf8)
+        #expect(!build.contains("tunnel.sh"))
+        let tray = try String(contentsOfFile: root + "/menu-bar-app/Tray.swift", encoding: .utf8)
+        #expect(!tray.contains("3200:127.0.0.1:3200") && !tray.contains("localhost:3200"))
     }
 }

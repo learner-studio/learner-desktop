@@ -16,10 +16,11 @@ text; ids, timestamps, versions and statuses are all you need.
 
 Record each as ✓ or ✗ with the evidence.
 
-1. **Learner Desktop and its helpers.** `launchctl list | grep learner-desktop` shows a pid;
-   `pgrep -fl autossh` finds one process (the GrowthBook tunnel).
+1. **Learner Desktop.** `launchctl list | grep learner-desktop` shows a pid (it runs no
+   SSH tunnel any more).
 2. **learner-server.** `curl -s -m 5 https://dev.biztoolz.app/learner-api/api/health` answers;
-   `nc -z 127.0.0.1 3200` (GrowthBook, the tunnel's only forward) succeeds; and
+   `curl -s -o /dev/null -w '%{http_code}' https://dev.biztoolz.app/growthbook/` is 200 or
+   302 (GrowthBook, or that site's login); and
    `grep '^\[Outbox\]' ~/.ai-aggregator/logs/menubar.log | tail -3` shows sends succeeding,
    not "device key refused" or "server unreachable".
 3. **Sign-in flag.** `launchctl getenv SCREENPIPE_SKIP_ONBOARDING` prints `1`, and

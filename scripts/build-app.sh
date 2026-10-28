@@ -27,14 +27,8 @@ mkdir -p "${BUNDLE_DIR}/Contents/Resources"
 cp "${BINARY}" "${BUNDLE_DIR}/Contents/MacOS/learner-desktop"
 chmod +x "${BUNDLE_DIR}/Contents/MacOS/learner-desktop"
 
-# The app runs the SSH tunnel itself, from its own bundle: a separate /bin/bash
-# LaunchAgent shows in Login Items as "bash" from an unknown developer, and once switched
-# off there it silently stopped starting at login.
-echo "Bundling the tunnel script..."
-cp "${PROJECT_DIR}/scripts/tunnel.sh" "${BUNDLE_DIR}/Contents/Resources/tunnel.sh"
 # The on-device speech detector's model (Silero VAD, Core ML).
 cp -R "${PROJECT_DIR}/menu-bar-app/Models/silero-vad.mlmodelc" "${BUNDLE_DIR}/Contents/Resources/silero-vad.mlmodelc"
-chmod +x "${BUNDLE_DIR}/Contents/Resources/tunnel.sh"
 
 # CFBundleIdentifier deliberately keeps its pre-rename value: TCC grants (Bluetooth) and
 # the saved Pavlok settings in UserDefaults are keyed to it.

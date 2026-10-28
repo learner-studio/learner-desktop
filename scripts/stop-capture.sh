@@ -4,7 +4,7 @@
 #
 # Why this exists: every component is supervised, so `pkill` never works.
 #   * com.benpollack.learner-desktop       KeepAlive on crash -> launchd respawns it; it
-#                                          runs the SSH tunnel and the transcript watcher
+#                                          runs the transcript watcher
 #                                          as child processes and stops them on quit
 #   * screenpipe (LaunchAgent, RunAtLoad)  -> restarts at next login
 #   * screenpipe's Tauri ExitRequested handler calls api.prevent_exit(), so closing
@@ -91,12 +91,12 @@ stop_agent() {
 # 2. Learner Desktop before screenpipe — it re-arms screenpipe audio every
 #    8 seconds (updateAllStatuses -> ensureAudioDevicesActive ->
 #    POST /audio/device/start). Its clean shutdown flushes late habit rows,
-#    then stops its watcher and tunnel.
+#    then stops its watcher.
 ########################################################################
 say "Stopping Learner Desktop"
 stop_agent "$LABEL_APP"
 # bootout returns before the app's clean shutdown is done, and that shutdown still
-# needs its tunnel to flush habit rows. Wait for it, so what is killed below really
+# needs to flush habit rows. Wait for it, so what is killed below really
 # is left over (launchd SIGKILLs a job that has not exited after 20s anyway).
 for _ in $(seq 1 30); do
   pgrep -f "MacOS/learner-desktop" >/dev/null 2>&1 || break
@@ -106,6 +106,7 @@ done
 pkill -f "MacOS/learner-desktop" 2>/dev/null && info "killed leftover learner-desktop process"
 # A crashed or SIGKILLed app cannot stop its helpers; nothing else would.
 pkill -f "learner-watcher.js" 2>/dev/null && info "killed leftover watcher process"
+# The retired GrowthBook tunnel, left by an older version of the app.
 pkill -f "autossh.*3200:127.0.0.1:3200" 2>/dev/null && info "killed leftover autossh process"
 
 ########################################################################

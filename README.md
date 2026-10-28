@@ -18,7 +18,7 @@ stores everything and hosts the Learner web app. The desktop app:
   leaves out and sends every changed conversation to the server.
 - **Reports its health.** A heartbeat every 5 minutes, and a tray icon that turns red, with
   the reason, when anything is stuck: screenpipe, the server, the device key, an expired
-  ai-vault login, the trial database, the tunnel.
+  ai-vault login, the trial database, the CLI uploader.
 
 Codex CLI and Claude Code sessions are captured by learner-server's `clients/uploader`
 (learner-upload), not by this app (yet): it tails `~/.codex/sessions` and
@@ -75,9 +75,12 @@ Desktop.app` and its LaunchAgent (`com.benpollack.learner-desktop`), then restar
 
 ### One app, one login item
 
-Everything runs inside the app; the only helper process is the SSH tunnel for GrowthBook's
-UI (supervised by `ManagedHelper`: restarted with backoff, stopped with its children at
-quit, an orphan from a crash reaped on the next launch).
+Everything runs inside the app; the only helper process is learner-server's CLI uploader,
+when the server runs on another machine (supervised by `ManagedHelper`: restarted with
+backoff, stopped with its children at quit, an orphan from a crash reaped on the next
+launch). There is no SSH tunnel: GrowthBook is installed with learner-server and the menu
+opens it at that server's origin + `/growthbook/` (`GrowthBookLink`; `GROWTHBOOK_URL`
+overrides).
 
 Chats: the Export job runs `ai-vault backup` hourly (and on demand), stopping a run that
 prints nothing for 10 minutes; ChatGPT voice transcripts that ai-vault leaves out are

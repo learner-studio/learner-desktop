@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-// MARK: - Bundled Helpers (SSH tunnel, transcript watcher)
+// MARK: - Bundled Helpers (the CLI uploader)
 
 /// A helper process the app runs for as long as it is running. The SSH tunnel and the
 /// transcript watcher used to be separate /bin/bash LaunchAgents, which Login Items lists

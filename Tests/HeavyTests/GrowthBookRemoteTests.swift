@@ -76,3 +76,42 @@ struct GrowthBookRemoteTests {
         }
     }
 }
+
+// The tray's GrowthBook link against the deployed GrowthBook, READ-ONLY: its page and its
+// API must share the link's origin (10-28: a tunnelled page could not reach its API), and
+// the link must answer (the page, or that site's login).
+@Suite("GrowthBook link (deployed)", .tags(.heavy), .timeLimit(.minutes(2)),
+       .enabled(if: ProcessInfo.processInfo.environment["LEARNER_HEAVY"] == "1", "heavy lane: set LEARNER_HEAVY=1"))
+struct GrowthBookLinkTests {
+    @Test func theTrayLinkIsWhereGrowthBookServesItsPageAndAPI() throws {
+        let link = try #require(GrowthBookLink.url(serverBase: LearnerRPC.defaultBaseURL, override: nil))
+        let env = try OVHRemote(timeout: 60).run("docker inspect biztools-growthbook-growthbook-1 --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E '^(APP_ORIGIN|API_HOST)='")
+        let values = Dictionary(uniqueKeysWithValues: env.split(separator: "\n").compactMap { line -> (String, String)? in
+            let parts = line.split(separator: "=", maxSplits: 1).map(String.init)
+            return parts.count == 2 ? (parts[0], parts[1].trimmingCharacters(in: CharacterSet(charactersIn: "/"))) : nil
+        })
+        let origin = link.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        #expect(values["APP_ORIGIN"] == origin, "GrowthBook's APP_ORIGIN \(values["APP_ORIGIN"] ?? "?") vs the tray's \(link)")
+        #expect(values["API_HOST"] == origin, "GrowthBook's API_HOST \(values["API_HOST"] ?? "?") vs the tray's \(link)")
+
+        // Not followed: a 302 to the same site's login is right for a signed-out request.
+        final class NoRedirect: NSObject, URLSessionTaskDelegate {
+            func urlSession(_ s: URLSession, task: URLSessionTask, willPerformHTTPRedirection r: HTTPURLResponse,
+                            newRequest: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
+        }
+        var req = URLRequest(url: link, timeoutInterval: 20)
+        req.setValue("text/html", forHTTPHeaderField: "Accept")
+        let done = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) var status = 0
+        nonisolated(unsafe) var location = ""
+        URLSession(configuration: .ephemeral, delegate: NoRedirect(), delegateQueue: nil).dataTask(with: req) { _, r, _ in
+            let h = r as? HTTPURLResponse
+            status = h?.statusCode ?? 0
+            location = h?.value(forHTTPHeaderField: "Location") ?? ""
+            done.signal()
+        }.resume()
+        _ = done.wait(timeout: .now() + 25)
+        let sameSiteLogin = status == 302 && (location.hasPrefix("/") || location.hasPrefix("\(link.scheme!)://\(link.host!)/"))
+        #expect(status == 200 || sameSiteLogin, "GET \(link): HTTP \(status) \(location)")
+    }
+}

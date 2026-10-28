@@ -4,8 +4,8 @@ import Testing
 import TestSupport
 
 // The RELEASE binary (as it ships), packaged and signed by build-app.sh
-// (BUNDLE_ONLY: no install, no launchctl). The bundle must run, carry the tunnel script with
-// the marker its helper is recognised by, keep the bundle id that TCC and the Pavlok
+// (BUNDLE_ONLY: no install, no launchctl). The bundle must run, carry no tunnel script (the
+// tunnel is retired), keep the bundle id that TCC and the Pavlok
 // settings are keyed to, and verify.
 @Suite("App bundle (build-app.sh)", .tags(.heavy, .helpers), .quietLog, .serialized, .timeLimit(.minutes(2)),
        .enabled(if: ProcessInfo.processInfo.environment["LEARNER_HEAVY"] == "1", "heavy lane: set LEARNER_HEAVY=1"))
@@ -22,8 +22,7 @@ struct BundleTests {
         let app = out.file("Learner Desktop.app")
         let exe = app + "/Contents/MacOS/learner-desktop"
         #expect(FileManager.default.isExecutableFile(atPath: exe))
-        let tunnel = try String(contentsOfFile: app + "/Contents/Resources/tunnel.sh", encoding: .utf8)
-        #expect(tunnel.contains("3200:127.0.0.1:3200"))
+        #expect(!FileManager.default.fileExists(atPath: app + "/Contents/Resources/tunnel.sh"))
         let info = try #require(NSDictionary(contentsOfFile: app + "/Contents/Info.plist"))
         #expect(info["CFBundleIdentifier"] as? String == "com.benpollack.ai-aggregator-menubar")
         #expect(info["CFBundleExecutable"] as? String == "learner-desktop")

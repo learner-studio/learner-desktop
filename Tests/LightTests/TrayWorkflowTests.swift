@@ -23,9 +23,9 @@ import TestSupport
             logger: logger,
             drain: { _ in order.withLock { $0.append("send") }; seenBySend.value = logger.getUnsyncedCount(); return 0 },
             stopJobs: { order.withLock { $0.append("jobs") } },
-            stopTunnel: { order.withLock { $0.append("tunnel") } })
+            stopHelpers: { order.withLock { $0.append("helpers") } })
         _ = capturingLog { Shutdown.run(steps, total: 10) }
-        #expect(order.value == ["turn", "send", "jobs", "tunnel"])
+        #expect(order.value == ["turn", "send", "jobs", "helpers"])
         #expect(seenBySend.value == 4)   // all four rows, read from an open database
         let send = try #require(steps.map(\.name).firstIndex(of: "send queued trials"))
         let close = try #require(steps.map(\.name).firstIndex(of: "close the trial database"))

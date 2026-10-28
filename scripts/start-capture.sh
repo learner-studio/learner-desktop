@@ -6,8 +6,8 @@
 # Order matters:
 #   1. screenpipe — capture engine + local API on :3030
 #   2. Learner Desktop — polls :3030 and flushes habit rows; start it last so it does
-#      not spend its first 8s ticks reporting screenpipe down. It starts the SSH tunnel
-#      (GrowthBook forward) and the transcript watcher itself.
+#      not spend its first 8s ticks reporting screenpipe down. It starts the transcript
+#      watcher itself.
 #
 # `launchctl enable` undoes the persistent `launchctl disable` that
 # stop-capture.sh --persist applies; without it, bootstrap silently refuses.
@@ -108,7 +108,7 @@ else
   say "Skipping screenpipe (--no-screenpipe)"
 fi
 
-say "Starting Learner Desktop (and its SSH tunnel and watcher)"
+say "Starting Learner Desktop (and its watcher)"
 start_agent "$LABEL_APP" "com.benpollack.learner-desktop.plist"
 if curl -s --max-time 5 https://dev.biztoolz.app/learner-api/api/health >/dev/null 2>&1; then
   info "learner-server API is reachable (queued rows will send)"

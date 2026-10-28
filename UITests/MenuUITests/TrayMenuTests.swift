@@ -53,4 +53,27 @@ final class TrayMenuTests: XCTestCase {
         let limit = baseline.count > 1 ? Self.median(Array(baseline.dropFirst())) + 0.3 : 0.8
         XCTAssertLessThan(mine, limit, "learner \(Self.ms(learner)) vs baseline \(Self.ms(baseline))")
     }
+
+    /// The real menu, opened by a click: every line a click acts on is there and enabled,
+    /// and the GrowthBook line names the learner-server host it opens (never the old tunnel).
+    @MainActor
+    func testEveryMenuLineIsThereAndGrowthBookOpensTheServersHost() throws {
+        let learner = XCUIApplication(bundleIdentifier: "com.benpollack.ai-aggregator-menubar")
+        let item = learner.statusItems.firstMatch
+        XCTAssertTrue(item.waitForExistence(timeout: 10), "Learner Desktop's menu-bar item is not there (is the app running?)")
+        item.click()
+        defer { learner.typeKey(.escape, modifierFlags: []) }
+        func line(_ text: String) -> XCUIElement {
+            learner.menuItems.matching(NSPredicate(format: "title CONTAINS %@", text)).firstMatch
+        }
+        XCTAssertTrue(line("Pull Latest Chats").waitForExistence(timeout: 15), "the menu did not open")
+        for text in ["Pull Latest Chats", "Send Queued Trials Now", "Open GrowthBook Dashboard", "Pavlok", "Settings", "Troubleshooting"] {
+            let l = line(text)
+            XCTAssertTrue(l.exists, "no '\(text)' line")
+            XCTAssertTrue(l.isEnabled, "'\(text)' is disabled")
+        }
+        let growthbook = line("Open GrowthBook Dashboard").title
+        XCTAssertTrue(growthbook.contains("(dev.biztoolz.app)"), growthbook)
+        XCTAssertFalse(growthbook.contains("localhost"), growthbook)
+    }
 }

@@ -20,11 +20,13 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var trayTitle = NSAttributedString()
     private var trayTooltip = ""
     private let stallWatch = MainThreadWatch()
+    /// Every link and folder the menu opens goes through here (tests watch it).
+    var openURL: (URL) -> Bool = { NSWorkspace.shared.open($0) }
     var cuePanels: [CuePhase: (CueSubmenuView, NSMenu)] = [:]
     private lazy var statusJob = Job("Status", period: 8, backoff: Backoff(base: 8, max: 60), quiet: true) { [weak self] _ in
         guard let self = self else { return .idle }
         let (previous, helpers, uploaderActive, speechProblem) = DispatchQueue.main.sync {
-            (self.status, [self.tunnel] + (self.uploader.map { [$0] } ?? []), self.uploader != nil,
+            (self.status, self.uploader.map { [$0] } ?? [], self.uploader != nil,
              (self.talkMonitor.speech as? MicSpeechSource)?.problem)
         }
         let next = StatusProbe.collect(previous: previous, helpers: helpers, appAgentPlist: self.appAgentPlist,
@@ -40,15 +42,12 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// The app's own LaunchAgent. If it is switched off in System Settings -> Login Items,
-    /// launchd skips it at login -- and the tunnel with it -- so a manual start
+    /// launchd skips it at login, so a manual start
     /// does not survive the next reboot. Only the owner can re-allow it there.
     let appAgentPlist = NSHomeDirectory() + "/Library/LaunchAgents/com.benpollack.learner-desktop.plist"
 
-    // Helpers the app runs itself, from its own bundle (see ManagedHelper).
-    lazy var tunnel = ManagedHelper(
-        name: "tunnel", executable: "/bin/bash",
-        arguments: [URL(fileURLWithPath: Bundle.main.resourcePath ?? "").appendingPathComponent("tunnel.sh").path],
-        marker: "3200:127.0.0.1:3200")
+    // No SSH tunnel any more: it only carried GrowthBook's UI, whose page then could not
+    // reach its API (see GrowthBookLink). Everything goes over HTTPS.
 
     /// Uploads Codex and Claude Code sessions when learner-server runs on another machine.
     lazy var uploader: ManagedHelper? = CLISessions.helper(key: { LearnerRPC.shared.key() })
@@ -93,8 +92,6 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         setScreenpipeSkipFlag()
 
-        // Only GrowthBook's UI still needs the tunnel; everything else is HTTPS.
-        tunnel.start()
         uploader?.start()
 
         VaultExport.shared.onFinished = { [weak self] in self?.statusJob.kick("export finished") }
@@ -177,8 +174,7 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let outbox = OutboxSender.shared
         let serverState = !status.serverReachable ? "🔴 unreachable" : outbox.keyProblem ? "🔑 no working device key" : "🟢 reachable"
         add("☁️ learner-server: \(serverState)")
-        add("   └─ 📤 \(status.outboxDepth) queued | last: \(outbox.lastStatus)"
-            + " | Tunnel \(tunnel.isRunning ? "🟢" : "🔴")")
+        add("   └─ 📤 \(status.outboxDepth) queued | last: \(outbox.lastStatus)")
         if status.archiveParked > 0 { add("   ⚠️ \(status.archiveParked) chat(s) refused by the server (see menubar.log)") }
         add(status.cliSessions.map { "💻 CLI sessions (uploader): \($0)" } ?? "💻 CLI sessions: read by learner-server on this Mac")
         for p in status.problems { add("   \(p.waiting ? "⏳" : "⚠️") \(p.source): \(p.text)") }
@@ -194,7 +190,9 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let assignedArm = HabitExperimentManager.shared.resolveArm(for: talkMonitor.activeSessionId)
         _ = add("   🎯 Condition: \(mode.shortTag) [Active: \(assignedArm)]")
         add("   📈 Recorded Trials: \(status.trialCount)")
-        _ = add("   🌐 Open GrowthBook Dashboard...", #selector(openGrowthBookDashboard))
+        let growthbook = GrowthBookLink.current
+        _ = add("   🌐 Open GrowthBook Dashboard (\(growthbook?.host ?? "no learner-server URL"))...",
+                growthbook == nil ? nil : #selector(openGrowthBookDashboard))
         statusMenu.addItem(NSMenuItem.separator())
 
         statusMenu.addItem(pavlokMenuItem())
@@ -227,7 +225,7 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let last = ScreenpipeUpdateCheck.shared.lastRunSummary {
             _ = add("   └─ Last check: \(last)", to: trouble)
         }
-        _ = add("Restart Tunnel", #selector(restartAggregatorServices), to: trouble)
+        if uploader != nil { _ = add("Restart CLI Uploader", #selector(restartUploader), to: trouble) }
         let troubleParent = NSMenuItem(title: "Troubleshooting", action: nil, keyEquivalent: "")
         troubleParent.submenu = trouble
         statusMenu.addItem(troubleParent)
@@ -371,9 +369,9 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rebuildMenu()
     }
 
-    @objc func restartAggregatorServices() {
-        tunnel.restart()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.statusJob.kick("helpers restarted") }
+    @objc func restartUploader() {
+        uploader?.restart()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.statusJob.kick("uploader restarted") }
     }
 
     @objc func openLoginItemsSettings() {
@@ -381,11 +379,11 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func openVaultFolder() {
-        NSWorkspace.shared.open(URL(fileURLWithPath: Paths.vault))
+        _ = openURL(URL(fileURLWithPath: Paths.vault))
     }
 
     @objc func openScreenpipeData() {
-        NSWorkspace.shared.open(URL(fileURLWithPath: homeDir + "/.screenpipe/data"))
+        _ = openURL(URL(fileURLWithPath: homeDir + "/.screenpipe/data"))
     }
 
     @objc func triggerHabitSync() {
@@ -394,9 +392,12 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func openGrowthBookDashboard() {
-        if let url = URL(string: "http://localhost:3200") {
-            NSWorkspace.shared.open(url)
+        guard let url = GrowthBookLink.current else {
+            log.warn("no GrowthBook link: the learner-server URL \(LearnerRPC.shared.baseURL) is not a URL")
+            return
         }
+        log.info("opening GrowthBook at \(url.absoluteString)")
+        _ = openURL(url)
     }
 
     @objc func runScreenpipeUpdateCheck() {
@@ -407,16 +408,16 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func openUpdateCheckLogs() {
         let dir = ScreenpipeUpdateCheck.shared.logDir
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        NSWorkspace.shared.open(URL(fileURLWithPath: dir))
+        _ = openURL(URL(fileURLWithPath: dir))
     }
 
     @objc func openAppLog() {
-        if !NSWorkspace.shared.open(URL(fileURLWithPath: AppLog.path)) { log.warn("could not open \(AppLog.path)") }
+        if !openURL(URL(fileURLWithPath: AppLog.path)) { log.warn("could not open \(AppLog.path)") }
     }
 
     /// Clean shutdown. Every exit path (menu Quit, SIGTERM from launchctl, Cmd-Q) lands
     /// here. We finalise the in-flight turn, push everything unsynced to Postgres while
-    /// the tunnel is still up, close SQLite, and only then let the process exit.
+    /// close SQLite, and only then let the process exit.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if isShuttingDown { return .terminateNow }
         isShuttingDown = true
@@ -425,12 +426,12 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // avoids the .terminateLater/reply handshake, which was seen to finish the work and
         // then never exit. What is left unsent stays in SQLite for the next launch.
         Scheduler.stop()
-        let (coach, tunnel, uploader) = (talkMonitor, self.tunnel, self.uploader)
+        let (coach, uploader) = (talkMonitor, self.uploader)
         Shutdown.run(TrayAppManager.shutdownSteps(
             // Runs on the calling thread, which is main.
             finishTurn: { MainActor.assumeIsolated { coach.resetStreak() } }, logger: HabitEventLogger.shared,
             drain: { OutboxSender.shared.drain(until: $0) }, stopJobs: { ChatAndOutboxJobs.stopForQuit() },
-            stopTunnel: { tunnel.stop(grace: 0.5); uploader?.stop(grace: 1.5) }), total: 18)
+            stopHelpers: { uploader?.stop(grace: 1.5) }), total: 18)
         return .terminateNow
     }
 
@@ -438,14 +439,14 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// is the database closed (closing first strands them until the next launch).
     nonisolated static func shutdownSteps(finishTurn: @escaping @Sendable () -> Void, logger: HabitEventLogger,
                                           drain: @escaping @Sendable (Date) -> Int, stopJobs: @escaping @Sendable () -> Void,
-                                          stopTunnel: @escaping @Sendable () -> Void) -> [Shutdown.Step] {
+                                          stopHelpers: @escaping @Sendable () -> Void) -> [Shutdown.Step] {
         [
             .init(name: "finish the current turn", budget: 2, onCallingThread: true) { _ in finishTurn(); return nil },
             .init(name: "write queued trials", budget: 3) { _ in logger.waitUntilIdle(); return nil },
             .init(name: "send queued trials", budget: 10) { deadline in "\(drain(deadline)) left for next launch" },
             .init(name: "close the trial database", budget: 2) { _ in logger.close(); return nil },
             .init(name: "stop the export and update check", budget: 1) { _ in stopJobs(); return nil },
-            .init(name: "stop the helpers", budget: 3) { _ in stopTunnel(); return nil },
+            .init(name: "stop the helpers", budget: 3) { _ in stopHelpers(); return nil },
         ]
     }
 
