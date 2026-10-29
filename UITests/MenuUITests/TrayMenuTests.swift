@@ -149,7 +149,7 @@ final class TrayMenuTests: XCTestCase {
         let learner = XCUIApplication(bundleIdentifier: Self.bundleId)
         open(learner, trayItem(learner))
         defer { close(learner) }
-        let growthbook = line(learner, "GrowthBook")
+        let growthbook = line(learner, "Open GrowthBook Dashboard")
         guard growthbook.exists else { return }   // the server publishes none: no line
         XCTAssertFalse(growthbook.title.contains("localhost:3200"), growthbook.title)
         XCTAssertTrue(growthbook.title.contains("(") && growthbook.isEnabled, growthbook.title)
