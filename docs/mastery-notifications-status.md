@@ -2,17 +2,17 @@
 
 Brief: [mastery-notifications.md](mastery-notifications.md). States: todo / building / review / accepted / blocked.
 
-Contract pinned: none yet (learner-server's status file says "not yet pushed", checked 2026-10-30). Output shapes the desktop assumes were sent to learner server on 2026-10-30; D2–D6 are built against them behind a stand-in.
+Contract pinned: learner-server `02fec3f400a652c19521364efe7372fd61667f07` (S1–S4; recorded under "Contract" in its status file, announced by learner server 2026-10-30).
 
 | AC | State | Evidence | Last updated |
 |----|-------|----------|--------------|
-| D1 Contract pinned | todo | | 2026-10-30 |
-| D2 Feed job | review | `menu-bar-app/Mastery.swift` MasteryFeed (Job "Mastery", 300 s; cursor, seen run ids and pending toasts in UserDefaults); light MasteryFeedTests pass against a stand-in | 2026-10-30 |
-| D3 Toast | review | MasteryToastController (the coach panel's build: non-activating, HUD, 340×90, radius 18, sharingType none; Open / Nice / Not right; 8 s → ignored); feedback queued in UserDefaults and sent by the job | 2026-10-30 |
-| D4 Call hold and summaries | review | MasteryPresenter.plan; MasteryPresenterTests (call hold, one summary after a call, more than two is one summary) | 2026-10-30 |
-| D5 Tray | review | 🎓 Mastery section after the learner-server lines, coach baseline line under Speaking Coach, offline line, Settings › Mastery: Hold While I'm in a Call; TrayMenuClickTests updated | 2026-10-30 |
-| D6 Positive only | review | MasteryNotification.gain drops a drop or no change; test noWordingForADrop | 2026-10-30 |
-| D7 Tests | building | light MasteryTests, TrayMenuClickTests, tray UI test `testTheMasterySectionShows` (not run yet: needs the Mac free) | 2026-10-30 |
+| D1 Contract pinned | accepted | 0a483d7: contract/PINNED_COMMIT 02fec3f, contract/contract.json byte-identical to the server's; ContractTests + MasteryContractTests (requests and stand-in replies validated against the three RPC schemas) pass. Reviewed: no findings 2026-10-30 | 2026-10-30 |
+| D2 Feed job | accepted | 0a483d7 `menu-bar-app/Mastery.swift` MasteryFeed: Job "Mastery" every 300 s, backoff 60 s→30 min; cursor (newest completedAt, 15 min reach-back, run-id dedupe), pending, on-screen and feedback queues in UserDefaults. Tests: theFirstRunStartsNowAndARestartNeverShowsAGainTwice, aLateCommitIsNotMissed, anUnreadableRowDoesNotMoveTheCursor, aToastUpAtQuitIsReportedIgnored, aFailedFirstRunStillStartsFromNow, noKeyIsRetriedNotBlocked. Reviewed: no findings 2026-10-30. Accepted: no paging in S2 (a backlog over 50 shows the newest 50; replay's busiest week is 24) | 2026-10-30 |
+| D3 Toast | accepted | 0a483d7 MasteryToastController: non-activating NSPanel, .hudWindow, 340×90, radius 18, sharingType none; Open (`<web>osmosis?conceptId=` as the web app resolves it; no web → no link, counted ignored), Nice, Not right; 8 s → ignored; tentative wording per learner-server's S0 grader-noise note. Tests: theToastReportsOnceAndTimesOutAsIgnored, twoAreShownOneAtATimeAndMoreAreOneSummary, openWithNoLinkIsIgnored, aClickIsSentAtOnce, openGoesToTheConceptOnTheMap. Reviewed: no findings 2026-10-30 | 2026-10-30 |
+| D4 Call hold and summaries | accepted | 0a483d7 MasteryPresenter. Tests: aCallHoldsToastsAndItsEndShowsOneSummary, aToastUpWhenACallStartsIsTakenDownAndShownAfter, gainsArrivingAsTheCallEndsAreOneSummary, plansOneToastOrOneSummary, holdingCanBeSwitchedOff. Reviewed: no findings 2026-10-30 | 2026-10-30 |
+| D5 Tray | accepted | 0a483d7: 🎓 Mastery after the learner-server lines (learning baseline; ⏳ waiting for learner-server on no answer or 5xx), coach baseline line ending Speaking Coach, Settings › Mastery: Hold While I'm in a Call. Tests: theTrayHasTheMasterySectionAfterTheServerLines, theCoachBaselineLineIsUnderSpeakingCoach, TrayMenuClickTests (catalog + toggle). Reviewed: no findings 2026-10-30 | 2026-10-30 |
+| D6 Positive only | accepted | 0a483d7 MasteryNotification.gain: only first_clear and gain with delta > 0; a first clear never shows its earlier best. Tests: gainsOnlyNeverADropOrNoChange, noWordingForADrop, baselineLinesSayHowFarAndNeverADrop. Reviewed: no findings 2026-10-30 | 2026-10-30 |
+| D7 Tests | building | light lane green at 0a483d7 (MasteryTests: 3 suites, 29 tests). Left: medium/heavy on push; tray UI test `testTheMasterySectionShows` and the Settings submenu check need the Mac free | 2026-10-30 |
 | D8 Live | todo | | 2026-10-30 |
 | J1 Contract parity | todo | | 2026-10-30 |
 | J2 Live end to end | todo | | 2026-10-30 |
@@ -21,4 +21,6 @@ Contract pinned: none yet (learner-server's status file says "not yet pushed", c
 
 ## Log
 
-- 2026-10-30: brief saved, status file created, loop started. D2–D6 built against a stand-in; adversarial review running.
+- 2026-10-30: brief saved, status file created, loop started. D2–D6 built against a stand-in.
+- 2026-10-30: contract 02fec3f pinned; shapes adapted (first_clear's previousPercent is the best earlier reading, never shown; gains need delta > 0; quote in the toast; coach may be null).
+- 2026-10-30: five fresh-context adversarial reviews (D2–D6, then D1–D6 twice, then two narrow rechecks); every should-fix fixed, nits fixed or accepted above. D1–D6 accepted at 0a483d7.
