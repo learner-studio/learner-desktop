@@ -12,8 +12,8 @@ Contract pinned: learner-server `02fec3f400a652c19521364efe7372fd61667f07` (S1�
 | D4 Call hold and summaries | accepted | 0a483d7 MasteryPresenter. Tests: aCallHoldsToastsAndItsEndShowsOneSummary, aToastUpWhenACallStartsIsTakenDownAndShownAfter, gainsArrivingAsTheCallEndsAreOneSummary, plansOneToastOrOneSummary, holdingCanBeSwitchedOff. Reviewed: no findings 2026-10-30 | 2026-10-30 |
 | D5 Tray | accepted | 0a483d7: 🎓 Mastery after the learner-server lines (learning baseline; ⏳ waiting for learner-server on no answer or 5xx), coach baseline line ending Speaking Coach, Settings › Mastery: Hold While I'm in a Call. Tests: theTrayHasTheMasterySectionAfterTheServerLines, theCoachBaselineLineIsUnderSpeakingCoach, TrayMenuClickTests (catalog + toggle). Reviewed: no findings 2026-10-30 | 2026-10-30 |
 | D6 Positive only | accepted | 0a483d7 MasteryNotification.gain: only first_clear and gain with delta > 0; a first clear never shows its earlier best. Tests: gainsOnlyNeverADropOrNoChange, noWordingForADrop, baselineLinesSayHowFarAndNeverADrop. Reviewed: no findings 2026-10-30 | 2026-10-30 |
-| D7 Tests | building | light lane green at 0a483d7 (MasteryTests: 3 suites, 29 tests). Left: medium/heavy on push; tray UI test `testTheMasterySectionShows` and the Settings submenu check need the Mac free | 2026-10-30 |
-| D8 Live | todo | | 2026-10-30 |
+| D7 Tests | building | all lanes green at 182b022 (MasteryTests: 3 suites; backlog paging, install window with a moving clock); flaky medium aHelperThatCrashesIsRestartedWithBackoff fixed (timed from launches, 10/10). Left: tray UI test `testTheMasterySectionShows` and the Settings check need the Mac free | 2026-10-30 |
+| D8 Live | building | 182b022 installed on the owner's Mac 2026-10-30 18:18Z; first poll ok (cursor 18:18:56Z, start 18:03:56Z); live getBaselineStatus: learning 83/1155, 243 days; coach arms 124/105/30/48 of 232, 39 days. Waiting for a qualifying reading from learner-server | 2026-10-30 |
 | J1 Contract parity | todo | | 2026-10-30 |
 | J2 Live end to end | todo | | 2026-10-30 |
 | J3 Adversarial review | todo | | 2026-10-30 |
@@ -24,3 +24,4 @@ Contract pinned: learner-server `02fec3f400a652c19521364efe7372fd61667f07` (S1�
 - 2026-10-30: brief saved, status file created, loop started. D2–D6 built against a stand-in.
 - 2026-10-30: contract 02fec3f pinned; shapes adapted (first_clear's previousPercent is the best earlier reading, never shown; gains need delta > 0; quote in the toast; coach may be null).
 - 2026-10-30: five fresh-context adversarial reviews (D2–D6, then D1–D6 twice, then two narrow rechecks); every should-fix fixed, nits fixed or accepted above. D1–D6 accepted at 0a483d7.
+- 2026-10-30: learner-server 1f96f44 pages oldest-first: the feed now reads page after page (4ea438d); a microsecond/millisecond stall found here was fixed server-side (68e99c9, migration 0017). Showing starts at the saved install time less the reach-back (eb140d6). Installed and polling for D8/J2.
