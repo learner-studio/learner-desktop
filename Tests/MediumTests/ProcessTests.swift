@@ -110,20 +110,28 @@ import TestSupport
         let dir = TempDir()
         defer { dir.cleanup() }
         let launches = dir.file("launches")
-        let script = dir.write("crashy.sh", "#!/bin/bash\necho x >> \"\(launches)\"\nexit 1\n", executable: true)
-        // The app's backoff (1 s doubling) scaled down to 0.3 s, so the test takes 1.5 s, not 4.5.
+        // Each launch records when it started (ms), then crashes.
+        let script = dir.write("crashy.sh", "#!/bin/bash\n/usr/bin/perl -MTime::HiRes=time -e 'printf \"%.3f\\n\", time' >> \"\(launches)\"\nexit 1\n",
+                               executable: true)
+        // The app's backoff (1 s doubling) scaled down to 0.3 s.
         let helper = ManagedHelper(name: "crashy", executable: script, arguments: [], marker: "crashy.sh", runtimeDir: dir.path,
                                    minRestart: 0.3, restartBackoff: Backoff(base: 0.3, max: 60, jitter: 0))
         DispatchQueue.main.sync { helper.start() }
-        // Launches at 0, 0.3 and 0.9 s (waits of 0.3, 0.6, 1.2 s): exactly three in the first 1.5 s.
-        // A fixed 0.3 s wait (no backoff) would launch five times; a fixed wait here, so it cannot pass early.
-        let count = { ((try? String(contentsOfFile: launches, encoding: .utf8)) ?? "").split(separator: "\n").count }
-        Thread.sleep(forTimeInterval: 1.5)
-        let seen = count()
-        #expect(seen == 3, "launched \(seen) times in 1.5 s")
+        let times = { ((try? String(contentsOfFile: launches, encoding: .utf8)) ?? "").split(separator: "\n").compactMap { Double($0) } }
+        #expect(eventually(6) { times().count >= 3 }, "restarted \(times().count) times")
         // The third exit is counted a moment after the third launch.
         #expect(eventually(3) { helper.problem != nil })
         helper.stop(grace: 0.5)
+        let t = times()
+        try? #require(t.count >= 3)
+        guard t.count >= 3 else { return }
+        // Waits of 0.3 s, then 0.6 s: the gaps grow (a fixed wait would keep them equal). Timed
+        // from the launches themselves, so a slow process start cannot fail it.
+        let (first, second) = (t[1] - t[0], t[2] - t[1])
+        #expect(first >= 0.28, "first restart after \(first) s")
+        #expect(second >= 0.58, "second restart after \(second) s")
+        // The waits differ by 0.3 s; process starts vary by a little, never by that.
+        #expect(second - first >= 0.15, "gaps \(first) s then \(second) s: no backoff")
     }
 
     @Test func aHelperIsStoppedWithItsChildrenAndItsOrphanIsReapedOnNextStart() {
