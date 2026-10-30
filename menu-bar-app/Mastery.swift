@@ -493,6 +493,7 @@ final class MasteryPresenter {
             }
             var outcome = action
             if action == .opened, !(content.link.map(self.openURL) ?? false) { outcome = .ignored }
+            self.log.info("toast outcome: \(outcome.rawValue) (\(content.runIds.joined(separator: ", ")))\(outcome == .opened ? " -> \(content.link?.absoluteString ?? "")" : "")")
             self.feed.record(content.runIds, outcome)
         }
     }
