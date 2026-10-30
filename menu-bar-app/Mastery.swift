@@ -304,7 +304,9 @@ final class MasteryFeed: Sendable {
             let since = defaults.object(forKey: Key.since) as? Date
             let installed = defaults.object(forKey: Key.installedAt) as? Date ?? (since ?? clock()).addingTimeInterval(-MasteryFeed.overlap)
             defaults.set(installed, forKey: Key.installedAt)
-            return (since ?? clock(), installed)   // since: saved once a query has an answer
+            // No answer yet (offline, no key at first): the first query that gets one still asks
+            // from where showing starts, however long after the install that is.
+            return (since ?? installed.addingTimeInterval(MasteryFeed.overlap), installed)
         }
         // Pages: the server returns the OLDEST `limit` after `since` (newest first within the
         // page, a group with one completedAt never split), so each next page starts at the

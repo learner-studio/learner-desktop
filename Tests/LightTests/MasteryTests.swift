@@ -80,10 +80,15 @@ private final class Install {
     let defaults = ScratchDefaults("mastery")
     let dir = TempDir("mastery")
     let server = MasteryServer()
-    var now = t0
+    /// This Mac's clock; tests move it.
+    let clock = Locked(t0)
+    var now: Date {
+        get { clock.value }
+        set { clock.value = newValue }
+    }
 
     func launch(key: String? = "k", sendAtOnce: Bool = false) -> MasteryFeed {
-        let clock = Locked(now)
+        let clock = self.clock
         return MasteryFeed(rpc: LearnerRPC(baseURL: "https://learner.test/learner-api", transport: server.stub, key: { _ in key }),
                            defaults: defaults, jobName: "mastery-test", stateDir: dir.path, sendFeedbackAtOnce: sendAtOnce,
                            clock: { clock.value })
@@ -213,6 +218,7 @@ struct MasteryFeedTests {
         let install = Install()
         install.server.paged = true
         install.server.notifications = (0..<70).map { wire("h\($0)", "H\($0)", 80, from: 60, at: -800 + Double($0)) }
+            + (0..<5).map { wire("x\($0)", "X\($0)", 80, from: 60, at: -2000 + Double($0)) }
         let feed = install.launch()
         var calls = 0
         let pages = install.server.stub.handler
@@ -222,20 +228,23 @@ struct MasteryFeedTests {
         }
         #expect(describe(feed.runOnce()).hasPrefix("failed"))
         install.server.stub.handler = pages
+        install.now = t0.addingTimeInterval(1800)   // a later launch: the start it saved still holds
         _ = install.launch().runOnce()
         #expect(feed.pending.count == 70, "each once, none lost to the failed page")
         #expect(Set(feed.pending.map(\.runId)).count == 70)
+        #expect(!feed.pending.contains { $0.runId.hasPrefix("x") }, "nothing from before the install's window, on any run")
     }
 
     /// An install from a build without the install time: showing starts at its saved cursor
     /// less the reach-back, so a late commit just before that cursor is still shown.
     @Test func anUpgradedInstallKeepsItsWindow() {
         let install = Install()
-        install.defaults.set(t0, forKey: MasteryFeed.Key.since)
-        install.server.notifications = [wire("late", "Late", 90, from: 70, at: -60), wire("old", "Old", 90, from: 70, at: -1200)]
+        install.defaults.set(t0.addingTimeInterval(-3600), forKey: MasteryFeed.Key.since)
+        install.server.notifications = [wire("late", "Late", 90, from: 70, at: -3660), wire("old", "Old", 90, from: 70, at: -3600 - 1200),
+                                        wire("new", "New", 90, from: 70, at: -60)]
         let feed = install.launch()
         _ = feed.runOnce()
-        #expect(feed.pending.map(\.runId) == ["late"])
+        #expect(feed.pending.map(\.runId) == ["late", "new"], "from the saved cursor less the reach-back, not from now")
     }
 
     /// A row this app cannot read never moves the cursor or counts as seen.
@@ -279,10 +288,15 @@ struct MasteryFeedTests {
         let feed = install.launch()
         _ = feed.runOnce()
         #expect(feed.since == nil)
+        // An hour later the server answers: what went live in that hour is shown, history is not.
+        install.now = t0.addingTimeInterval(3600)
         install.server.masteryStatus = 200
-        _ = feed.runOnce()
-        #expect(feed.pending.isEmpty, "history from before the install is never shown")
-        #expect(feed.since == t0, "the cursor starts at now once the first query has an answer")
+        install.server.notifications += [wire("during", "During", 85, from: 70, at: 600)]
+        _ = install.launch().runOnce()
+        #expect(feed.pending.map(\.runId) == ["during"], "the hour before the first answer is not lost; history never shows")
+        let query = install.server.calls("getMasteryNotifications").last
+        #expect(query?["since"] as? String == iso(t0.addingTimeInterval(-MasteryFeed.overlap)), "asked from where showing starts")
+        #expect(feed.since == t0.addingTimeInterval(600))
     }
 
     /// No device key yet (pairing, a locked Keychain): retried on the backoff, never blocked.
