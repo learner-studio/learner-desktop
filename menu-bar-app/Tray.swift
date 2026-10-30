@@ -22,6 +22,9 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let stallWatch = MainThreadWatch()
     /// Every link and folder the menu opens goes through here (tests watch it).
     var openURL: (URL) -> Bool = { NSWorkspace.shared.open($0) }
+    /// The mastery feed the menu shows and records clicks through (tests give their own, so a
+    /// light test never reaches the live server).
+    var mastery: MasteryFeed = .shared
     /// Where the mastery links go: the web root the server publishes (tests set it).
     var masteryWeb: () -> String? = { PairingLink.shared.held?.web }
     var cuePanels: [CuePhase: (CueSubmenuView, NSMenu)] = [:]
@@ -223,7 +226,7 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // --- Settings ---
         let settings = NSMenu()
         addCoachSettings(to: settings)
-        add("\(MasteryFeed.shared.holdDuringCalls ? "✓" : "○") Mastery: Hold While I'm in a Call",
+        add("\(mastery.holdDuringCalls ? "✓" : "○") Mastery: Hold While I'm in a Call",
             #selector(toggleMasteryCallHold), to: settings)
         let browserMenu = NSMenu()
         for browser in ChromiumBrowser.all {

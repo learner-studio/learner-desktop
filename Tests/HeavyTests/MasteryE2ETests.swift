@@ -16,11 +16,12 @@ import TestSupport
 private final class Recording: HTTPTransport, @unchecked Sendable {
     private let inner = URLSessionTransport()
     private let lock = NSLock()
-    private var log: [(rpc: String, reply: HTTPReply)] = []
+    private var log: [(rpc: String, input: [String: Any]?, reply: HTTPReply)] = []
 
     func send(_ request: URLRequest, timeout: TimeInterval) -> HTTPReply {
         let reply = inner.send(request, timeout: timeout)
-        lock.withLock { log.append((request.url?.lastPathComponent ?? "", reply)) }
+        let input = request.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["data"] as? [String: Any]
+        lock.withLock { log.append((request.url?.lastPathComponent ?? "", input, reply)) }
         return reply
     }
 
@@ -29,8 +30,9 @@ private final class Recording: HTTPTransport, @unchecked Sendable {
     }
 
     /// The `data` of each reply to `rpc`, in order.
-    func replies(_ rpc: String) -> [(status: Int, data: [String: Any]?)] {
-        lock.withLock { log }.filter { $0.rpc == rpc }.map { r in
+    /// `cursorOnly`: only the feed's own queries (a `since` time), not the recent rows' (null).
+    func replies(_ rpc: String, cursorOnly: Bool = false) -> [(status: Int, data: [String: Any]?)] {
+        lock.withLock { log }.filter { $0.rpc == rpc && (!cursorOnly || $0.input?["since"] is String) }.map { r in
             // As LearnerRPC reads it: the `data` envelope when there is one, else the body itself.
             let o = r.reply.body.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
             return (r.reply.status, (o?["data"] as? [String: Any]) ?? o)
@@ -116,7 +118,7 @@ struct MasteryE2ETests {
         _ = again.runOnce()
         #expect(again.pending.isEmpty)
         // And it is the app's own dedupe that holds it back: the server still sent the run.
-        let lastPage = try #require(wire.replies("getMasteryNotifications").last?.data?["notifications"] as? [[String: Any]])
+        let lastPage = try #require(wire.replies("getMasteryNotifications", cursorOnly: true).last?.data?["notifications"] as? [[String: Any]])
         #expect(lastPage.contains { $0["runId"] as? String == runId }, "the restart's query no longer returns the run, so dedupe went untested")
     }
 }

@@ -223,9 +223,9 @@ final class MasteryFeed: Sendable {
                   problemGrace: 1800, quiet: true, stateDir: stateDir) { [weak self] _ in self?.runOnce() ?? .idle }
         // A toast that was up when the app last quit (or crashed) got no click: ignored.
         lock.withLock {
-            let left = defaults.stringArray(forKey: Key.showing) ?? []
-            guard !left.isEmpty else { return }
-            enqueue(left, .ignored)
+            let opened = Set(defaults.stringArray(forKey: Key.openedRuns) ?? [])
+            let left = (defaults.stringArray(forKey: Key.showing) ?? []).filter { !opened.contains($0) }
+            if !left.isEmpty { enqueue(left, .ignored) }
             defaults.removeObject(forKey: Key.showing)
         }
     }
@@ -475,9 +475,12 @@ struct MasteryToastContent: Equatable {
     }
 
     static func summary(_ ns: [MasteryNotification], link: URL?) -> MasteryToastContent {
-        let names = ns.map(\.conceptName)
+        // Concepts, not runs; and neutral, since a first confident reading may sit below an
+        // earlier one (learner-server's rule), so not every item is "progress".
+        var names: [String] = []
+        for n in ns where !names.contains(n.conceptName) { names.append(n.conceptName) }
         let shown = names.prefix(3).joined(separator: ", ") + (names.count > 3 ? " +\(names.count - 3) more" : "")
-        return MasteryToastContent(title: "🎓 Looks like progress on \(ns.count) concept\(ns.count == 1 ? "" : "s")", detail: shown,
+        return MasteryToastContent(title: "🎓 New mastery readings on \(names.count) concept\(names.count == 1 ? "" : "s")", detail: shown,
                                    link: link, runIds: ns.map(\.runId), asksFeedback: false)
     }
 }
@@ -711,12 +714,12 @@ enum MasteryTrayRow {
 extension TrayAppManager {
     /// "🎓 Mastery", after the learner-server lines: the learning baseline, or why it is missing.
     func addMasterySection() {
-        let feed = MasteryFeed.shared
+        let feed = mastery
         header("🎓 Mastery")
         if feed.reachable == .offline { add("   ⏳ waiting for learner-server") }
         add("   " + (feed.baseline?.learningLine ?? "📚 Learning baseline: not available yet"))
         let waiting = feed.pending.count
-        if waiting > 0 { add("   ⏸ \(waiting) gain\(waiting == 1 ? "" : "s") to show\(feed.holdDuringCalls && talkMonitor.activeCallApp != nil ? " after the call" : "")") }
+        if waiting > 0 { add("   ⏸ \(waiting) reading\(waiting == 1 ? "" : "s") to show\(feed.holdDuringCalls && talkMonitor.activeCallApp != nil ? " after the call" : "")") }
         // Recent gains: each opens the concept on the Map (and tells the server it was opened).
         let web = masteryWeb()
         for gain in feed.recent {
@@ -729,7 +732,7 @@ extension TrayAppManager {
 
     @objc func openRecentGain(_ sender: NSMenuItem) {
         guard let ids = sender.representedObject as? [String], ids.count == 2 else { return }
-        _ = MasteryFeed.shared.openRecent(ids[0], conceptId: ids[1], web: masteryWeb(), open: openURL)
+        _ = mastery.openRecent(ids[0], conceptId: ids[1], web: masteryWeb(), open: openURL)
     }
 
     /// The feed job is made here (the Scheduler ticks it); the presenter looks every 2 s.
@@ -741,7 +744,7 @@ extension TrayAppManager {
     }
 
     @objc func toggleMasteryCallHold() {
-        MasteryFeed.shared.holdDuringCalls.toggle()
+        mastery.holdDuringCalls.toggle()
         rebuildMenu()
     }
 }

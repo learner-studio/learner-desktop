@@ -518,7 +518,7 @@ struct MasteryPresenterTests {
         #expect(toast.shown.isEmpty, "no toast during a call")
         inCall.value = false
         presenter.tick()
-        #expect(toast.shown.map(\.title) == ["🎓 Looks like progress on 2 concepts"], "the call's end shows one summary")
+        #expect(toast.shown.map(\.title) == ["🎓 New mastery readings on 2 concepts"], "the call's end shows one summary")
         #expect(toast.shown.first?.asksFeedback == false)
         #expect(feed.pending.isEmpty)
         toast.click(.ignored)
@@ -563,7 +563,7 @@ struct MasteryPresenterTests {
         _ = feed.runOnce()
         inCall.value = false
         presenter.tick()
-        #expect(toast.shown.map(\.title) == ["🎓 Looks like progress on 2 concepts"])
+        #expect(toast.shown.map(\.title) == ["🎓 New mastery readings on 2 concepts"])
     }
 
     /// The real panel: one outcome per toast, the click or the timeout, whichever is first.
@@ -592,31 +592,48 @@ struct MasteryPresenterTests {
         c.panel?.orderOut(nil)
     }
 
-    /// The tray: the mastery section right after the learner-server lines, and the setting.
+    /// The tray: the mastery section right after the learner-server lines, the offline line
+    /// exactly when learner-server does not answer, and the setting. The tray gets its own feed
+    /// on the in-process stand-in, so nothing reaches the live server.
     @Test func theTrayHasTheMasterySectionAfterTheServerLines() throws {
+        let install = Install()
+        install.server.masteryStatus = 503
+        let feed = install.launch()
+        _ = feed.runOnce()
+        #expect(feed.reachable == .offline)
         let tray = TrayAppManager()
+        tray.mastery = feed
         tray.statusMenu = NSMenu()
         tray.rebuildMenu()
         defer { withExtendedLifetime(tray) {} }
-        let titles = tray.statusMenu.items.map(\.title)
-        let server = try #require(titles.firstIndex { $0.hasPrefix("☁️ learner-server") })
-        let mastery = try #require(titles.firstIndex(of: "🎓 Mastery"))
-        #expect(mastery > server)
-        #expect(!titles[server..<mastery].contains("📊 Habit Experiments (GrowthBook)"), "between the server lines and GrowthBook")
-        let section = titles[(mastery + 1)...].prefix { !$0.isEmpty }
-        #expect(section.contains { $0.contains("Learning baseline") }, "\(section)")
-        #expect(section.contains("   ⏳ waiting for learner-server") == (MasteryFeed.shared.reachable == .offline), "\(section)")
+        func section() throws -> ArraySlice<String> {
+            let titles = tray.statusMenu.items.map(\.title)
+            let server = try #require(titles.firstIndex { $0.hasPrefix("☁️ learner-server") })
+            let mastery = try #require(titles.firstIndex(of: "🎓 Mastery"))
+            #expect(mastery > server)
+            #expect(!titles[server..<mastery].contains("📊 Habit Experiments (GrowthBook)"), "between the server lines and GrowthBook")
+            return titles[(mastery + 1)...].prefix { !$0.isEmpty }
+        }
+        let offline = try section()
+        #expect(offline.contains("   ⏳ waiting for learner-server"), "offline: \(offline)")
+        #expect(offline.contains("   📚 Learning baseline: not available yet"))
+        // The server answers: the offline line goes, the baseline comes.
+        install.server.masteryStatus = 200
+        _ = feed.runOnce()
+        tray.rebuildMenu()
+        let online = try section()
+        #expect(!online.contains("   ⏳ waiting for learner-server"), "\(online)")
+        #expect(online.contains { $0.hasPrefix("   📚 Learning baseline: 12/40 concepts") }, "\(online)")
         let settings = try #require(tray.statusMenu.items.first { $0.title == "Settings" }?.submenu)
         #expect(settings.items.contains { $0.title.hasSuffix("Mastery: Hold While I'm in a Call") })
     }
 
-    /// The coach baseline line, at the end of the Speaking Coach section.
     @Test func theCoachBaselineLineIsUnderSpeakingCoach() throws {
-        let feed = MasteryFeed.shared
-        let saved = feed.baseline
-        defer { feed.store(saved) }
-        feed.store(BaselineStatus.parse(MasteryServer().baseline))
+        let install = Install()
+        let feed = install.launch()
+        _ = feed.runOnce()
         let tray = TrayAppManager()
+        tray.mastery = feed
         tray.statusMenu = NSMenu()
         tray.rebuildMenu()
         defer { withExtendedLifetime(tray) {} }
@@ -629,13 +646,12 @@ struct MasteryPresenterTests {
 
     /// The recent rows sit in the Mastery section, after the baseline line.
     @Test func theRecentRowsAreInTheMasterySection() throws {
-        let feed = MasteryFeed.shared
-        let saved = feed.storedRecent
-        let savedFeedback = feed.queuedFeedback
-        defer { feed.storeRecent(saved) }
+        let install = Install()
+        let feed = install.launch(sendAtOnce: false)
         let gain = MasteryNotification.gain(wire("r1", "Opportunity cost of capital", 30, from: 20, at: 0))!
         feed.storeRecent([gain])
         let tray = TrayAppManager()
+        tray.mastery = feed
         tray.statusMenu = NSMenu()
         tray.masteryWeb = { "https://learner.test/learner/" }
         tray.rebuildMenu()
@@ -657,7 +673,7 @@ struct MasteryPresenterTests {
         tray.masteryWeb = { nil }
         tray.rebuildMenu()
         #expect(tray.statusMenu.items.first { $0.title.hasPrefix("   🎓 Opportunity cost of capital") }?.action == nil)
-        _ = savedFeedback
+        #expect(install.server.stub.seen.isEmpty, "a light test sends nothing anywhere")
     }
 
     /// A toast whose gain is opened from the tray goes away, and a call never brings it back.
@@ -707,8 +723,10 @@ struct MasteryPresenterTests {
 
         let (_, _, many, manyPresenter, _, _) = setUp((1...4).map { wire("m\($0)", "Concept \($0)", 70 + $0, from: nil, at: Double($0)) })
         manyPresenter.tick()
-        #expect(many.shown.map(\.title) == ["🎓 Looks like progress on 4 concepts"])
+        #expect(many.shown.map(\.title) == ["🎓 New mastery readings on 4 concepts"])
         #expect(many.shown.first?.detail == "Concept 1, Concept 2, Concept 3 +1 more")
+        let twice = [wire("x1", "Recursion", 80, from: 60, at: 1), wire("x2", "Recursion", 90, from: 80, at: 2)].compactMap(MasteryNotification.gain)
+        #expect(MasteryToastContent.summary(twice, link: nil).title == "🎓 New mastery readings on 1 concept", "concepts, not runs")
     }
 
     /// Nothing the desktop shows for mastery names a drop.
@@ -717,11 +735,16 @@ struct MasteryPresenterTests {
                                                     wire("r2", "C", 60, from: 70, at: 3, kind: "first_clear")])
         presenter.tick()
         let b = BaselineStatus.parse(MasteryServer().baseline)!
-        let text = (toast.shown.flatMap { [$0.title, $0.detail] } + [b.learningLine, b.coachLine ?? ""]).joined(separator: " ")
+        let gains = [wire("r1", "A", 80, from: 65, at: 1), wire("r2", "C", 60, from: nil, at: 3)].compactMap(MasteryNotification.gain)
+        let summary = MasteryToastContent.summary(gains, link: nil)
+        let rows = gains.map { MasteryTrayRow.title($0, now: t0) }
+        let text = (toast.shown.flatMap { [$0.title, $0.detail] } + [summary.title, summary.detail] + rows
+                    + [b.learningLine, b.coachLine ?? ""]).joined(separator: " ")
         for word in ["▼", "down", "drop", "lost", "decline", "-"] { #expect(!text.contains(word), "'\(word)' in: \(text)") }
         #expect(toast.shown.count == 1, "the drop was never queued")
         #expect(!text.contains("70"), "a first clear reading's higher earlier best is never shown")
         #expect(!text.contains("understand"), "a first confident reading never claims understanding")
+        #expect(!summary.title.contains("progress"), "a summary may hold a first confident reading below an earlier one")
     }
 }
 
