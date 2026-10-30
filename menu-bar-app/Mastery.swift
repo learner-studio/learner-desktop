@@ -269,12 +269,13 @@ final class MasteryFeed: Sendable {
 
     /// A recent-gain row clicked: opens the concept on the Map and, once opened, tells the
     /// server (`opened`, sent at once like a toast's click). The URL, or nil when nothing opened.
-    func openRecent(_ runId: String, web: String?, open: (URL) -> Bool) -> URL? {
-        guard let gain = recent.first(where: { $0.runId == runId }) else {
+    func openRecent(_ runId: String, conceptId: String? = nil, web: String?, open: (URL) -> Bool) -> URL? {
+        // The row carries its concept, so a list refreshed while the menu was open still opens it.
+        guard let concept = conceptId ?? recent.first(where: { $0.runId == runId })?.conceptId else {
             log.warn("recent gain \(runId) is no longer in the list; nothing opened")
             return nil
         }
-        guard let url = MasteryLink.url(web: web, conceptId: gain.conceptId) else { return nil }
+        guard let url = MasteryLink.url(web: web, conceptId: concept) else { return nil }
         guard open(url) else {
             log.warn("recent gain \(runId): could not open \(url.absoluteString)")
             return nil
@@ -289,6 +290,9 @@ final class MasteryFeed: Sendable {
         return url
     }
 
+    /// Runs opened from a tray row.
+    var openedRuns: Set<String> { lock.withLock { Set(defaults.stringArray(forKey: Key.openedRuns) ?? []) } }
+
     /// Tests: the recent rows as if fetched.
     func storeRecent(_ rows: [MasteryNotification]?) {
         lock.withLock { if let rows { encode(rows, Key.recent) } else { defaults.removeObject(forKey: Key.recent) } }
@@ -298,6 +302,8 @@ final class MasteryFeed: Sendable {
     /// A toast taken down by a call before any click: back to waiting, first in line.
     func putBack(_ ns: [MasteryNotification]) {
         lock.withLock {
+            let opened = Set(defaults.stringArray(forKey: Key.openedRuns) ?? [])
+            let ns = ns.filter { !opened.contains($0.runId) }   // opened from the tray meanwhile
             let ids = ns.map(\.runId)
             let rest = (decode(Key.pending, [MasteryNotification].self) ?? []).filter { !ids.contains($0.runId) }
             encode(ns + rest, Key.pending)
@@ -383,7 +389,8 @@ final class MasteryFeed: Sendable {
             added += lock.withLock { () -> Int in
                 var seen = defaults.stringArray(forKey: Key.seen) ?? []
                 var pending = decode(Key.pending, [MasteryNotification].self) ?? []
-                let fresh = gains.filter { $0.completedAt > installedAt && !seen.contains($0.runId) }.sorted { $0.completedAt < $1.completedAt }
+                let opened = Set(defaults.stringArray(forKey: Key.openedRuns) ?? [])
+                let fresh = gains.filter { $0.completedAt > installedAt && !seen.contains($0.runId) && !opened.contains($0.runId) }.sorted { $0.completedAt < $1.completedAt }
                 pending += fresh
                 for r in readable where !seen.contains(r.id) { seen.append(r.id) }
                 seen = Array(seen.suffix(MasteryFeed.seenKept))
@@ -405,6 +412,7 @@ final class MasteryFeed: Sendable {
         // they never depend on what this install has seen.
         // A few more than shown, so a row this app drops never leaves a gap.
         let latest = rpc.call("getMasteryNotifications", ["since": NSNull(), "limit": MasteryFeed.recentShown * 4])
+        if latest.kind != .ok { log.noisy("recent gains not refreshed: \(latest.describe)") }
         if latest.kind == .ok {
             let rows = (((latest.body as? [String: Any])?["notifications"] as? [[String: Any]]) ?? []).compactMap(MasteryNotification.gain)
             let newest = rows.sorted { ($0.completedAt, $0.runId) > ($1.completedAt, $1.runId) }
@@ -421,7 +429,6 @@ final class MasteryFeed: Sendable {
     /// Sends queued feedback oldest first. A refused or too-large one is dropped; one the server
     /// cannot take now stays queued, and the rest are still tried (none waits behind it).
     private func sendFeedback() -> String? {
-        var problem: String?
         for f in queuedFeedback {
             let r = rpc.call("recordNotificationFeedback", ["runId": f.runId, "action": f.action.rawValue])
             switch r.kind {
@@ -435,14 +442,16 @@ final class MasteryFeed: Sendable {
                 // The server or the key, not this row: the rest would fail the same way.
                 return "recordNotificationFeedback: \(r.describe)"
             case .unexpected:
-                problem = "recordNotificationFeedback: \(r.describe)"
+                // A server or proxy that cannot place it (404/405): kept and retried each run, but
+                // never fails the run, so gains are not delayed by a backoff on its account.
+                log.noisy("feedback \(f.action.rawValue) for run \(f.runId): \(r.describe); kept for the next run")
                 continue
             }
             lock.withLock {
                 encode((decode(Key.feedback, [Feedback].self) ?? []).filter { $0 != f }, Key.feedback)
             }
         }
-        return problem
+        return nil
     }
 }
 
@@ -519,6 +528,12 @@ final class MasteryPresenter {
     /// Main thread, every couple of seconds: shows what waits, unless a toast is up or a
     /// call holds it.
     func tick() {
+        // Its runs were opened from the tray while it was up: take it down (the open stands;
+        // the timeout's `ignored` is not recorded for an opened run).
+        if toast.isShowing, !onScreen.isEmpty, onScreen.allSatisfy({ feed.openedRuns.contains($0.runId) }) {
+            toast.dismiss()
+            return
+        }
         if feed.holdDuringCalls && inCall() {
             // No toast during a call, not even one shown just before it started.
             if toast.isShowing {
@@ -707,14 +722,14 @@ extension TrayAppManager {
         for gain in feed.recent {
             let item = add("   \(MasteryTrayRow.title(gain, now: Date()))\(web == nil ? "" : "...")",
                            web == nil ? nil : #selector(openRecentGain(_:)))
-            item.representedObject = gain.runId
+            item.representedObject = [gain.runId, gain.conceptId]
         }
         statusMenu.addItem(NSMenuItem.separator())
     }
 
     @objc func openRecentGain(_ sender: NSMenuItem) {
-        guard let runId = sender.representedObject as? String else { return }
-        _ = MasteryFeed.shared.openRecent(runId, web: masteryWeb(), open: openURL)
+        guard let ids = sender.representedObject as? [String], ids.count == 2 else { return }
+        _ = MasteryFeed.shared.openRecent(ids[0], conceptId: ids[1], web: masteryWeb(), open: openURL)
     }
 
     /// The feed job is made here (the Scheduler ticks it); the presenter looks every 2 s.

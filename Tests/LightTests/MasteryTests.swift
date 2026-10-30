@@ -334,8 +334,8 @@ struct MasteryFeedTests {
         install.server.stub.handler = { seen in
             (seen.body?["data"] as? [String: Any])?["runId"] as? String == "stuck" ? StubTransport.status(404) : pass(seen)
         }
-        #expect(describe(feed.runOnce()).hasPrefix("failed: recordNotificationFeedback: HTTP 404"))
-        #expect(feed.queuedFeedback == [.init(runId: "stuck", action: .nice)], "the other row was sent")
+        #expect(!describe(feed.runOnce()).hasPrefix("failed"), "an unplaceable row never fails the run (no backoff for gains)")
+        #expect(feed.queuedFeedback == [.init(runId: "stuck", action: .nice)], "the other row was sent; this one is kept")
         install.server.stub.handler = pass
     }
 
@@ -645,7 +645,7 @@ struct MasteryPresenterTests {
         let section = titles[(mastery + 1)...].prefix { !$0.isEmpty }
         #expect(section.contains { $0.hasPrefix("   🎓 Opportunity cost of capital: ▲ 20% → 30%") }, "\(section)")
         let row = try #require(tray.statusMenu.items.first { $0.title.hasPrefix("   🎓 Opportunity cost of capital") })
-        #expect(row.representedObject as? String == "r1")
+        #expect(row.representedObject as? [String] == ["r1", gain.conceptId])
         // Clicked through the menu: the same link the toast's Open builds, and `opened` queued.
         var opened: [URL] = []
         tray.openURL = { opened.append($0); return true }
@@ -658,6 +658,29 @@ struct MasteryPresenterTests {
         tray.rebuildMenu()
         #expect(tray.statusMenu.items.first { $0.title.hasPrefix("   🎓 Opportunity cost of capital") }?.action == nil)
         _ = savedFeedback
+    }
+
+    /// A toast whose gain is opened from the tray goes away, and a call never brings it back.
+    @Test func aGainOpenedFromTheTrayIsNeverToastedAgain() {
+        let (_, feed, toast, presenter, inCall, _) = setUp([wire("r1", "Recursion", 80, from: 65, at: 10)])
+        presenter.tick()
+        #expect(toast.isShowing)
+        feed.storeRecent(feed.recent.isEmpty ? [MasteryNotification.gain(wire("r1", "Recursion", 80, from: 65, at: 10))!] : feed.recent)
+        _ = feed.openRecent("r1", web: "https://learner.test/learner/", open: { _ in true })
+        presenter.tick()
+        #expect(!toast.isShowing, "taken down: its gain was opened")
+        #expect(feed.queuedFeedback == [.init(runId: "r1", action: .opened)], "no ignored after the open")
+        // The same with a call: what the call takes down is not put back once opened.
+        let (_, feed2, toast2, presenter2, inCall2, _) = setUp([wire("r2", "Sets", 80, from: 60, at: 10)])
+        presenter2.tick()
+        _ = feed2.openRecent("r2", conceptId: "c-Sets", web: "https://learner.test/learner/", open: { _ in true })
+        inCall2.value = true
+        presenter2.tick()
+        inCall2.value = false
+        presenter2.tick()
+        #expect(toast2.shown.count == 1, "never toasted again")
+        #expect(feed2.pending.isEmpty)
+        _ = inCall
     }
 
     @Test func holdingCanBeSwitchedOff() {
