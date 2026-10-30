@@ -1,8 +1,8 @@
 {
   "_comment": "Screenpipe runtime settings this experiment depends on, checked by `learner-desktop tool preflight`. Captured from ~/.screenpipe/store.bin. Secrets redacted - set those in the Screenpipe UI, not here.",
-  "_screenpipe_app_version": "2.7.130",
-  "_screenpipe_engine_version": "0.4.52",
-  "_captured": "2026-10-28",
+  "_screenpipe_app_version": "2.7.132",
+  "_screenpipe_engine_version": "0.4.53",
+  "_captured": "2026-10-30",
   "_why_this_engine": "Measured under continuous two-stream speech on the 16GB box: whisper-large-v3-turbo-quantized fell behind without bound (lag 5s -> 157s in 210s); whisper-tiny recovered but peaked at 38s; whisper-tiny-quantized at 5s chunks ran at 2-6s steady state (median 8.0s, p90 18.1s including warm-up bursts). Accuracy matters little here: live turn durations come from voiced segments, not words.",
   "settings": {
     "audioCaptureMode": "always",
