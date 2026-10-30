@@ -147,7 +147,10 @@ enum MasteryLink {
     static let uriComponent = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.!~*'()")
 
     static func url(web: String?, conceptId: String?) -> URL? {
-        guard let root = web?.trimmingCharacters(in: .whitespaces), !root.isEmpty else { return nil }
+        guard var root = web?.trimmingCharacters(in: .whitespaces), !root.isEmpty else { return nil }
+        // The web root is a folder (learner-server always sends the trailing slash since 6656a17);
+        // without it, URL resolution would replace its last segment.
+        if !root.contains("?") && !root.contains("#") && !root.hasSuffix("/") { root += "/" }
         // As the web app builds it: new URL("osmosis?conceptId=" + encodeURIComponent(id), web).
         let query = conceptId.flatMap { $0.addingPercentEncoding(withAllowedCharacters: MasteryLink.uriComponent) }.map { "?conceptId=\($0)" } ?? ""
         guard let base = URL(string: root), ["http", "https"].contains(base.scheme?.lowercased() ?? ""), base.host != nil else { return nil }
@@ -180,6 +183,10 @@ final class MasteryFeed: Sendable {
         static let pending = "mastery_pending"
         static let feedback = "mastery_feedback"
         static let baseline = "mastery_baseline"
+        /// The newest few gains, as the server last listed them (the tray's recent rows).
+        static let recent = "mastery_recent"
+        /// Runs opened from a tray row: never shown again as a toast, never reported ignored.
+        static let openedRuns = "mastery_opened_runs"
         static let holdDuringCalls = "mastery_hold_during_calls"
         /// Run ids on screen now: a quit before their click is sent as `ignored` at next launch.
         static let showing = "mastery_showing"
@@ -238,6 +245,9 @@ final class MasteryFeed: Sendable {
     var since: Date? { lock.withLock { defaults.object(forKey: Key.since) as? Date } }
     var queuedFeedback: [Feedback] { lock.withLock { decode(Key.feedback, [Feedback].self) ?? [] } }
     var baseline: BaselineStatus? { lock.withLock { decode(Key.baseline, BaselineStatus.self) } }
+    /// The newest gains or first clear readings, newest first (never a drop: `gain` only).
+    var recent: [MasteryNotification] { lock.withLock { decode(Key.recent, [MasteryNotification].self) ?? [] } }
+    static let recentShown = 3
     var reachable: Reach { reach.value }
 
     /// Settings › "Hold while I'm in a call" (on unless switched off).
@@ -257,6 +267,34 @@ final class MasteryFeed: Sendable {
         }
     }
 
+    /// A recent-gain row clicked: opens the concept on the Map and, once opened, tells the
+    /// server (`opened`, sent at once like a toast's click). The URL, or nil when nothing opened.
+    func openRecent(_ runId: String, web: String?, open: (URL) -> Bool) -> URL? {
+        guard let gain = recent.first(where: { $0.runId == runId }) else {
+            log.warn("recent gain \(runId) is no longer in the list; nothing opened")
+            return nil
+        }
+        guard let url = MasteryLink.url(web: web, conceptId: gain.conceptId) else { return nil }
+        guard open(url) else {
+            log.warn("recent gain \(runId): could not open \(url.absoluteString)")
+            return nil
+        }
+        log.info("recent gain opened: \(runId) -> \(url.absoluteString)")
+        lock.withLock {
+            defaults.set(Array(((defaults.stringArray(forKey: Key.openedRuns) ?? []) + [runId]).suffix(200)), forKey: Key.openedRuns)
+            // Opened already: its toast, if still waiting, is not shown.
+            encode((decode(Key.pending, [MasteryNotification].self) ?? []).filter { $0.runId != runId }, Key.pending)
+        }
+        record([runId], .opened)
+        return url
+    }
+
+    /// Tests: the recent rows as if fetched.
+    func storeRecent(_ rows: [MasteryNotification]?) {
+        lock.withLock { if let rows { encode(rows, Key.recent) } else { defaults.removeObject(forKey: Key.recent) } }
+    }
+    var storedRecent: [MasteryNotification]? { lock.withLock { decode(Key.recent, [MasteryNotification].self) } }
+
     /// A toast taken down by a call before any click: back to waiting, first in line.
     func putBack(_ ns: [MasteryNotification]) {
         lock.withLock {
@@ -275,7 +313,9 @@ final class MasteryFeed: Sendable {
     /// Queues a toast's outcome and sends it now; kept until the server has it.
     func record(_ runIds: [String], _ action: MasteryAction) {
         lock.withLock {
-            enqueue(runIds, action)
+            // A toast that timed out for a run already opened from the tray: the open stands.
+            let opened = action == .ignored ? Set(defaults.stringArray(forKey: Key.openedRuns) ?? []) : []
+            enqueue(runIds.filter { !opened.contains($0) }, action)
             defaults.set((defaults.stringArray(forKey: Key.showing) ?? []).filter { !runIds.contains($0) }, forKey: Key.showing)
         }
         if sendFeedbackAtOnce { job.kick("feedback \(action.rawValue)") }
@@ -312,9 +352,12 @@ final class MasteryFeed: Sendable {
         // page, a group with one completedAt never split), so each next page starts at the
         // newest reading of the last one, until a page is not full.
         var since = cursor.addingTimeInterval(-MasteryFeed.overlap)
+        // A next page starts at the newest row's own completedAt, as the server sent it: never
+        // a Date formatted again, so a tie group at a page boundary is never asked for twice.
+        var sinceText = iso.string(from: since)
         var added = 0
         for page in 0..<MasteryFeed.maxPages {
-            let reply = rpc.call("getMasteryNotifications", ["since": iso.string(from: since), "limit": MasteryFeed.pageLimit])
+            let reply = rpc.call("getMasteryNotifications", ["since": sinceText, "limit": MasteryFeed.pageLimit])
             guard reply.kind == .ok else {
                 // Offline is no answer or a server error; any other reply (a key problem, which the
                 // learner-server line reports, or a refused call) means it is there. No key:
@@ -328,9 +371,10 @@ final class MasteryFeed: Sendable {
             let raw = ((reply.body as? [String: Any])?["notifications"] as? [[String: Any]]) ?? []
             // Only rows this app can read move the cursor or count as seen: an unreadable one is
             // logged and asked for again next time (the overlap), never silently skipped.
-            let readable = raw.compactMap { o -> (id: String, at: Date)? in
-                guard let id = MasteryNotification.text(o["runId"]), let at = MasteryNotification.date(o["completedAt"]) else { return nil }
-                return (id, at)
+            let readable = raw.compactMap { o -> (id: String, at: Date, text: String)? in
+                guard let id = MasteryNotification.text(o["runId"]), let text = o["completedAt"] as? String,
+                      let at = MasteryNotification.date(text) else { return nil }
+                return (id, at, text)
             }
             if readable.count < raw.count { log.warn("\(raw.count - readable.count) notification(s) without a runId or completedAt skipped") }
             let gains = raw.compactMap(MasteryNotification.gain)
@@ -350,11 +394,22 @@ final class MasteryFeed: Sendable {
                 else if saved == nil { defaults.set(cursor, forKey: Key.since) }
                 return fresh.count
             }
-            guard raw.count >= MasteryFeed.pageLimit, let n = newest, n > since else { break }
+            guard raw.count >= MasteryFeed.pageLimit, let n = newest, n > since,
+                  let text = readable.first(where: { $0.at == n })?.text else { break }
             if page == MasteryFeed.maxPages - 1 { log.warn("\(MasteryFeed.maxPages) full pages: the rest waits for the next run") }
             since = n
+            sinceText = text
         }
         if added > 0 { log.info("\(added) new gain(s) waiting") }
+        // The tray's recent rows: the server's newest few, read fresh each run (since null), so
+        // they never depend on what this install has seen.
+        // A few more than shown, so a row this app drops never leaves a gap.
+        let latest = rpc.call("getMasteryNotifications", ["since": NSNull(), "limit": MasteryFeed.recentShown * 4])
+        if latest.kind == .ok {
+            let rows = (((latest.body as? [String: Any])?["notifications"] as? [[String: Any]]) ?? []).compactMap(MasteryNotification.gain)
+            let newest = rows.sorted { ($0.completedAt, $0.runId) > ($1.completedAt, $1.runId) }
+            lock.withLock { encode(Array(newest.prefix(MasteryFeed.recentShown)), Key.recent) }
+        }
         let status = rpc.call("getBaselineStatus", [:])
         if status.kind == .ok, let b = BaselineStatus.parse(status.body) {
             lock.withLock { encode(b, Key.baseline) }
@@ -363,8 +418,10 @@ final class MasteryFeed: Sendable {
         return added > 0 ? .ok("\(added) new") : idleOrRecovered(job, "up to date")
     }
 
-    /// Sends queued feedback oldest first; stops at the first that cannot be sent now.
+    /// Sends queued feedback oldest first. A refused or too-large one is dropped; one the server
+    /// cannot take now stays queued, and the rest are still tried (none waits behind it).
     private func sendFeedback() -> String? {
+        var problem: String?
         for f in queuedFeedback {
             let r = rpc.call("recordNotificationFeedback", ["runId": f.runId, "action": f.action.rawValue])
             switch r.kind {
@@ -372,16 +429,20 @@ final class MasteryFeed: Sendable {
                 if (r.body as? [String: Any])?["recorded"] as? Bool == false {
                     log.warn("feedback \(f.action.rawValue) for run \(f.runId): not one of the learner's live readings; dropped")
                 }
-            case .rejected:
+            case .rejected, .tooLarge:
                 log.warn("feedback \(f.action.rawValue) for run \(f.runId) refused: \(r.message ?? r.describe); dropped")
-            default:
+            case .noKey, .auth, .transient:
+                // The server or the key, not this row: the rest would fail the same way.
                 return "recordNotificationFeedback: \(r.describe)"
+            case .unexpected:
+                problem = "recordNotificationFeedback: \(r.describe)"
+                continue
             }
             lock.withLock {
                 encode((decode(Key.feedback, [Feedback].self) ?? []).filter { $0 != f }, Key.feedback)
             }
         }
-        return nil
+        return problem
     }
 }
 
@@ -512,6 +573,7 @@ final class MasteryToastController: NSObject, MasteryToasting {
     private let title = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
     private var feedbackButtons: [NSButton] = []
+    private var openButton: NSButton?
     private(set) var isShowing = false
     private var done: (@MainActor (MasteryAction) -> Void)?
     private var timer: Timer?
@@ -558,7 +620,7 @@ final class MasteryToastController: NSObject, MasteryToasting {
             ve.addSubview(b)
             return b
         }
-        _ = button("Open", 16, #selector(openClicked))
+        openButton = button("Open", 16, #selector(openClicked))
         feedbackButtons = [button("Nice", 122, #selector(niceClicked)), button("Not right", 228, #selector(notRightClicked))]
         [title, detail].forEach(ve.addSubview)
         p.contentView = ve
@@ -571,6 +633,8 @@ final class MasteryToastController: NSObject, MasteryToasting {
         title.stringValue = content.title
         detail.stringValue = content.detail
         feedbackButtons.forEach { $0.isHidden = !content.asksFeedback }
+        // Nowhere to open (no web URL published): no Open, so no click is ever lost as ignored.
+        openButton?.isHidden = content.link == nil
         self.done = done
         let vf = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame ?? .zero
         // Below the coach toast's spot, so the two never cover each other.
@@ -610,6 +674,23 @@ final class MasteryToastController: NSObject, MasteryToasting {
 
 // MARK: - Tray
 
+/// A recent-gain row: the concept, the gain (never a drop), and how long ago.
+enum MasteryTrayRow {
+    static func title(_ n: MasteryNotification, now: Date) -> String {
+        let change = n.previousPercent.map { "▲ \($0)% → \(n.percent)%" } ?? "first clear reading \(n.percent)%"
+        return "🎓 \(n.conceptName): \(change) · \(ago(now.timeIntervalSince(n.completedAt)))"
+    }
+
+    static func ago(_ s: TimeInterval) -> String {
+        switch max(0, s) {
+        case ..<90: return "just now"
+        case ..<5400: return "\(Int((s / 60).rounded())) min ago"
+        case ..<(36 * 3600): return "\(Int((s / 3600).rounded())) h ago"
+        default: return "\(Int((s / 86400).rounded())) d ago"
+        }
+    }
+}
+
 extension TrayAppManager {
     /// "🎓 Mastery", after the learner-server lines: the learning baseline, or why it is missing.
     func addMasterySection() {
@@ -619,7 +700,19 @@ extension TrayAppManager {
         add("   " + (feed.baseline?.learningLine ?? "📚 Learning baseline: not available yet"))
         let waiting = feed.pending.count
         if waiting > 0 { add("   ⏸ \(waiting) gain\(waiting == 1 ? "" : "s") to show\(feed.holdDuringCalls && talkMonitor.activeCallApp != nil ? " after the call" : "")") }
+        // Recent gains: each opens the concept on the Map (and tells the server it was opened).
+        let web = masteryWeb()
+        for gain in feed.recent {
+            let item = add("   \(MasteryTrayRow.title(gain, now: Date()))\(web == nil ? "" : "...")",
+                           web == nil ? nil : #selector(openRecentGain(_:)))
+            item.representedObject = gain.runId
+        }
         statusMenu.addItem(NSMenuItem.separator())
+    }
+
+    @objc func openRecentGain(_ sender: NSMenuItem) {
+        guard let runId = sender.representedObject as? String else { return }
+        _ = MasteryFeed.shared.openRecent(runId, web: masteryWeb(), open: openURL)
     }
 
     /// The feed job is made here (the Scheduler ticks it); the presenter looks every 2 s.

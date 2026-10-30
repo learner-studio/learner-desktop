@@ -70,6 +70,9 @@ private final class MasteryServer: @unchecked Sendable {
         return taken.reversed()
     }
 
+    /// The feed's own queries (a cursor), not the recent rows' (since null).
+    var feedQueries: [[String: Any]] { calls("getMasteryNotifications").filter { $0["since"] is String } }
+
     func calls(_ name: String) -> [[String: Any]] {
         stub.seen.filter { $0.path.hasSuffix("/" + name) }.map { ($0.body?["data"] as? [String: Any]) ?? [:] }
     }
@@ -150,7 +153,7 @@ struct MasteryFeedTests {
         #expect(describe(feed.runOnce()) == "ok: 1 new")
         #expect(feed.pending.map(\.runId) == ["near"], "the first run starts from now less the reach-back, not from history")
         feed.take(["near"])
-        let first = try #require(install.server.calls("getMasteryNotifications").first)
+        let first = try #require(install.server.feedQueries.first)
         #expect(first["since"] as? String == iso(t0.addingTimeInterval(-MasteryFeed.overlap)), "each query reaches back by the overlap")
         #expect(first["limit"] as? Int == MasteryFeed.pageLimit)
 
@@ -168,7 +171,7 @@ struct MasteryFeedTests {
         let again = install.launch()
         #expect(describe(again.runOnce()) == "idle")
         #expect(again.pending.map(\.runId) == ["r2"], "only the one not shown yet is still waiting")
-        let next = try #require(install.server.calls("getMasteryNotifications").last)
+        let next = try #require(install.server.feedQueries.last)
         #expect(next["since"] as? String == iso(t0.addingTimeInterval(120 - MasteryFeed.overlap)))
     }
 
@@ -204,11 +207,11 @@ struct MasteryFeedTests {
         install.server.lock.withLock {
             install.server.notifications += (0..<120).map { wire("b\($0)", "B\($0)", 80, from: 60, at: 100 + Double($0 == 40 ? 39 : $0)) }
         }
-        let before = install.server.calls("getMasteryNotifications").count
+        let before = install.server.feedQueries.count
         #expect(describe(feed.runOnce()) == "ok: 120 new")
         #expect(feed.pending.count == 120, "every gain of the backlog, none twice")
         #expect(Set(feed.pending.map(\.runId)).count == 120)
-        #expect(install.server.calls("getMasteryNotifications").count - before >= 3, "read in pages")
+        #expect(install.server.feedQueries.count - before >= 3, "read in pages")
         #expect(feed.since == t0.addingTimeInterval(219))
     }
 
@@ -245,6 +248,95 @@ struct MasteryFeedTests {
         let feed = install.launch()
         _ = feed.runOnce()
         #expect(feed.pending.map(\.runId) == ["late", "new"], "from the saved cursor less the reach-back, not from now")
+    }
+
+    /// The tray's recent rows: the server's newest gains or first clear readings (a drop
+    /// never), fresh each run, whatever this install has seen; a click opens and records.
+    @Test func recentGainsAreTheNewestThreeAndAClickOpensAndRecords() throws {
+        let install = Install()
+        install.server.paged = true
+        install.server.notifications = [wire("old", "Old", 70, from: 50, at: -5000), wire("a", "A", 80, from: 60, at: -400),
+                                        wire("drop", "Drop", 40, from: 70, at: -300, kind: "gain"),
+                                        wire("b", "B", 72, from: nil, at: -200), wire("c", "Opportunity cost of capital", 30, from: 20, at: -100)]
+        let feed = install.launch()
+        _ = feed.runOnce()
+        #expect(feed.recent.map(\.runId) == ["c", "b", "a"], "newest first, the drop never")
+        let nullQuery = install.server.calls("getMasteryNotifications").first { $0["since"] is NSNull }
+        #expect(nullQuery?["limit"] as? Int == MasteryFeed.recentShown * 4)
+        #expect(MasteryTrayRow.title(feed.recent[0], now: t0) == "🎓 Opportunity cost of capital: ▲ 20% → 30% · 2 min ago")
+        #expect(MasteryTrayRow.title(feed.recent[1], now: t0.addingTimeInterval(7200)) == "🎓 B: first clear reading 72% · 2 h ago")
+
+        var opened: [URL] = []
+        let url = feed.openRecent("c", web: "https://learner.test/learner/", open: { opened.append($0); return true })
+        #expect(url?.absoluteString == "https://learner.test/learner/osmosis?conceptId=c-Opportunity%20cost%20of%20capital")
+        #expect(opened == [url].compactMap { $0 })
+        #expect(feed.queuedFeedback == [.init(runId: "c", action: .opened)])
+        // Nothing opened (no web, or the open failed): nothing recorded.
+        #expect(feed.openRecent("b", web: nil, open: { _ in true }) == nil)
+        #expect(feed.openRecent("b", web: "https://learner.test/learner/", open: { _ in false }) == nil)
+        #expect(feed.queuedFeedback.count == 1)
+    }
+
+    /// More gains than the null query's page: the rows are still the newest three, and the
+    /// extra query never moves the feed's cursor.
+    @Test func recentRowsAreTheNewestOfManyAndLeaveTheCursorAlone() {
+        let install = Install()
+        install.server.paged = true
+        install.server.notifications = (0..<30).map { wire("g\($0)", "G\($0)", 80, from: 60, at: Double($0 * 10)) }
+        let feed = install.launch()
+        _ = feed.runOnce()
+        #expect(feed.recent.map(\.runId) == ["g29", "g28", "g27"])
+        #expect(feed.since == t0.addingTimeInterval(290), "the cursor is the feed's newest reading, nothing else")
+    }
+
+    /// A gain opened from the tray is not shown again as a toast, and its toast timing out
+    /// later does not report it ignored: the open stands.
+    @Test func aTrayOpenWinsOverTheToastForTheSameGain() {
+        let install = Install()
+        install.server.paged = true
+        let feed = install.launch()
+        _ = feed.runOnce()
+        install.server.notifications = [wire("r1", "A", 80, from: 60, at: 10), wire("r2", "B", 70, from: nil, at: 20)]
+        _ = feed.runOnce()
+        #expect(feed.pending.map(\.runId) == ["r1", "r2"])
+        #expect(feed.openRecent("r2", web: "https://learner.test/learner/", open: { _ in true }) != nil)
+        #expect(feed.pending.map(\.runId) == ["r1"], "not toasted after it was opened")
+        feed.take(["r1"])
+        _ = feed.openRecent("r1", web: "https://learner.test/learner/", open: { _ in true })
+        feed.record(["r1"], .ignored)   // the toast's timeout, after the tray open
+        #expect(feed.queuedFeedback == [.init(runId: "r2", action: .opened), .init(runId: "r1", action: .opened)])
+    }
+
+    /// A full page of one millisecond tie group (.123), then newer gains: the next page asks
+    /// from that group's own completedAt string, so the feed moves past it.
+    @Test func aTieGroupAtAMillisecondNeverStallsTheFeed() throws {
+        let install = Install()
+        install.server.paged = true
+        let feed = install.launch()
+        _ = feed.runOnce()
+        let tie = iso(t0.addingTimeInterval(60.123))
+        var rows = (0..<55).map { i -> [String: Any] in var w = wire("t\(i)", "T\(i)", 80, from: 60, at: 60); w["completedAt"] = tie; return w }
+        rows += (0..<5).map { wire("n\($0)", "N\($0)", 80, from: 60, at: 120 + Double($0)) }
+        install.server.notifications = rows
+        _ = feed.runOnce()
+        #expect(feed.pending.count == 60, "the tie group and everything after it")
+        let sinces = install.server.feedQueries.compactMap { $0["since"] as? String }
+        #expect(sinces.contains(tie), "the next page asked from the group's own string: \(sinces)")
+    }
+
+    /// Feedback the server cannot place (a 404 for one row) never holds the rest back.
+    @Test func oneUnplaceableFeedbackDoesNotJamTheQueue() {
+        let install = Install()
+        let feed = install.launch()
+        feed.record(["stuck"], .nice)
+        feed.record(["ok"], .opened)
+        let pass = install.server.stub.handler
+        install.server.stub.handler = { seen in
+            (seen.body?["data"] as? [String: Any])?["runId"] as? String == "stuck" ? StubTransport.status(404) : pass(seen)
+        }
+        #expect(describe(feed.runOnce()).hasPrefix("failed: recordNotificationFeedback: HTTP 404"))
+        #expect(feed.queuedFeedback == [.init(runId: "stuck", action: .nice)], "the other row was sent")
+        install.server.stub.handler = pass
     }
 
     /// A row this app cannot read never moves the cursor or counts as seen.
@@ -294,7 +386,7 @@ struct MasteryFeedTests {
         install.server.notifications += [wire("during", "During", 85, from: 70, at: 600)]
         _ = install.launch().runOnce()
         #expect(feed.pending.map(\.runId) == ["during"], "the hour before the first answer is not lost; history never shows")
-        let query = install.server.calls("getMasteryNotifications").last
+        let query = install.server.feedQueries.last
         #expect(query?["since"] as? String == iso(t0.addingTimeInterval(-MasteryFeed.overlap)), "asked from where showing starts")
         #expect(feed.since == t0.addingTimeInterval(600))
     }
@@ -384,9 +476,9 @@ struct MasteryFeedTests {
                 == "https://dev.biztoolz.app/learner/osmosis?conceptId=c%201%26x%3Dy%2Bz", "encoded as encodeURIComponent does")
         #expect(MasteryLink.url(web: "https://dev.biztoolz.app/learner/", conceptId: nil)?.absoluteString
                 == "https://dev.biztoolz.app/learner/osmosis")
-        // Resolved as JavaScript's URL does: without the trailing slash, osmosis replaces "learner".
+        // The web root is a folder: a missing trailing slash is added, not resolved away.
         #expect(MasteryLink.url(web: "https://dev.biztoolz.app/learner", conceptId: "c1")?.absoluteString
-                == "https://dev.biztoolz.app/osmosis?conceptId=c1")
+                == "https://dev.biztoolz.app/learner/osmosis?conceptId=c1")
         #expect(MasteryLink.url(web: nil, conceptId: "c1") == nil, "no web published: no made-up link")
         #expect(MasteryLink.url(web: "learner/", conceptId: "c1") == nil, "not an absolute web address: no link")
     }
@@ -486,6 +578,8 @@ struct MasteryPresenterTests {
         #expect(c.panel?.sharingType == NSWindow.SharingType.none)
         #expect(c.panel?.styleMask.contains(.nonactivatingPanel) == true)
         #expect(c.panel?.frame.size == NSSize(width: 340, height: 90))
+        let openButton = c.panel?.contentView?.subviews.compactMap { $0 as? NSButton }.first { $0.title == "Open" }
+        #expect(openButton?.isHidden == true, "no link: no Open")
         // The main run loop is shared with other suites: give the 0.1 s timer up to 3 s to fire.
         let deadline = Date().addingTimeInterval(3)
         while outcomes.isEmpty && Date() < deadline { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05)) }
@@ -531,6 +625,39 @@ struct MasteryPresenterTests {
         let section = titles[(coach + 1)...].prefix { !$0.isEmpty }
         #expect(section.last == "   📊 Coach baseline: baseline 60/357 · pavlok 20/357 · ~30 days left", "\(section)")
         #expect(section.count < titles.count - coach - 1, "the coach section ends before the rest of the menu")
+    }
+
+    /// The recent rows sit in the Mastery section, after the baseline line.
+    @Test func theRecentRowsAreInTheMasterySection() throws {
+        let feed = MasteryFeed.shared
+        let saved = feed.storedRecent
+        let savedFeedback = feed.queuedFeedback
+        defer { feed.storeRecent(saved) }
+        let gain = MasteryNotification.gain(wire("r1", "Opportunity cost of capital", 30, from: 20, at: 0))!
+        feed.storeRecent([gain])
+        let tray = TrayAppManager()
+        tray.statusMenu = NSMenu()
+        tray.masteryWeb = { "https://learner.test/learner/" }
+        tray.rebuildMenu()
+        defer { withExtendedLifetime(tray) {} }
+        let titles = tray.statusMenu.items.map(\.title)
+        let mastery = try #require(titles.firstIndex(of: "🎓 Mastery"))
+        let section = titles[(mastery + 1)...].prefix { !$0.isEmpty }
+        #expect(section.contains { $0.hasPrefix("   🎓 Opportunity cost of capital: ▲ 20% → 30%") }, "\(section)")
+        let row = try #require(tray.statusMenu.items.first { $0.title.hasPrefix("   🎓 Opportunity cost of capital") })
+        #expect(row.representedObject as? String == "r1")
+        // Clicked through the menu: the same link the toast's Open builds, and `opened` queued.
+        var opened: [URL] = []
+        tray.openURL = { opened.append($0); return true }
+        (row.target as? NSObject)?.perform(row.action!, with: row)
+        let toastLink = MasteryToastContent.single(gain, link: MasteryLink.url(web: "https://learner.test/learner/", conceptId: gain.conceptId)).link
+        #expect(opened == [toastLink].compactMap { $0 })
+        #expect(feed.queuedFeedback.contains(.init(runId: "r1", action: .opened)))
+        // No web published: the row is a plain line.
+        tray.masteryWeb = { nil }
+        tray.rebuildMenu()
+        #expect(tray.statusMenu.items.first { $0.title.hasPrefix("   🎓 Opportunity cost of capital") }?.action == nil)
+        _ = savedFeedback
     }
 
     @Test func holdingCanBeSwitchedOff() {
@@ -590,7 +717,7 @@ struct MasteryContractTests {
             try #require(!sent.isEmpty, "\(name) was not called")
             for s in sent { #expect(Schema.validate(try Schema.wire(s), Schema.input(name)) == [], "\(name)") }
         }
-        let first = try #require(install.server.calls("getMasteryNotifications").first)
+        let first = try #require(install.server.feedQueries.first)
         #expect((first["limit"] as? Int).map { (1...100).contains($0) } == true)
     }
 

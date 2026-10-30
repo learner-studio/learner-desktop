@@ -40,6 +40,7 @@ struct TrayMenuClickTests {
         "scanPavlokBluetooth": "scans for the wristband",
         "promptPavlokToken": "asks for the cloud token",
         "toggleMasteryCallHold": "switches holding mastery toasts during calls",
+        "openRecentGain:": "opens a recent gain's concept on the Map and records it opened",
     ]
 
     static func allItems(_ menu: NSMenu) -> [NSMenuItem] {

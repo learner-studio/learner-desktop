@@ -86,3 +86,12 @@ Run with the `loop` skill, self-paced (no interval). Minimal, durable and self-h
 - Repo rules win on conventions: push rules, the pre-push hook, secrets never printed, no real names in this public repo.
 - **Pacing:** while waiting on the other repo or a live check, wake every 20 to 30 minutes; otherwise continue immediately.
 - Stop the loop only when every D AC and J1 to J4 are accepted, then send "DONE" with the final status file to the coordinator.
+
+## Corrections from the owner (2026-10-30, evening)
+
+- The coordinator session is retired. Coordinate only with learner server (`session_01SPMjtan22onKA34S16vwNd`); the status file stays the record.
+- **D5 addition: recent gains in the tray.** The 🎓 Mastery section lists the last 3 live gains or first clear readings (positive only, never a drop). Each row opens the same `<web>osmosis?conceptId=` deep link and records `opened` with recordNotificationFeedback. The toast stays as it is.
+- **J2 is accepted** when the owner clicks Open on that row (asked for "Opportunity cost of capital") or on a live toast, and learner server confirms the `opened` row and the landing.
+- **D7:** ask the owner for a window with the Mac free (say how many minutes) before running the tray UI tests.
+- Push all pending commits and re-check J1 against learner server's current contract.json (the 3 mastery entries must stay identical).
+- **Before finishing:** a fresh-context adversarial review of learner server's mastery API as its consumer (origin/main: shapes, cursor, feedback, positive only, the deep link landing), findings sent to learner server; then the final review of all desktop ACs (J3) and J4. Then send learner server "desktop OK" with the final status (it writes the owner's summary) and stop the loop.
