@@ -22,4 +22,6 @@ public extension Tag {
     @Tag static var tools: Self
     @Tag static var scripts: Self
     @Tag static var sessions: Self
+    /// Mastery notifications: the feed job, the toast, the tray lines.
+    @Tag static var mastery: Self
 }

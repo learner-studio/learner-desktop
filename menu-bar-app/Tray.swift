@@ -123,6 +123,7 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         PairingLink.shared.follow(OutboxSender.shared, rpc: .shared) { [weak self] _ in
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.applyTopology() } }
         }
+        startMastery()
         Scheduler.start()
         // The cue panels are slow to build (see cuePanel): ready before the first click.
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
@@ -198,6 +199,8 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         statusMenu.addItem(NSMenuItem.separator())
 
+        addMasterySection()
+
         // --- Habit Experiments & GrowthBook ---
         header("📊 Habit Experiments (GrowthBook)")
         let mode = HabitExperimentManager.shared.currentMode
@@ -218,6 +221,8 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // --- Settings ---
         let settings = NSMenu()
         addCoachSettings(to: settings)
+        add("\(MasteryFeed.shared.holdDuringCalls ? "✓" : "○") Mastery: Hold While I'm in a Call",
+            #selector(toggleMasteryCallHold), to: settings)
         let browserMenu = NSMenu()
         for browser in ChromiumBrowser.all {
             add("\(ChromiumBrowser.selected.id == browser.id ? "✓ " : "   ")\(browser.name)", #selector(selectVaultBrowser(_:)), to: browserMenu).representedObject = browser.id

@@ -1,0 +1,619 @@
+import AppKit
+import Foundation
+
+// Mastery notifications (docs/mastery-notifications.md, D2–D6), one workflow:
+//   learner-server getMasteryNotifications(since:) every 5 min -> new gains kept in
+//   UserDefaults (the cursor, the run ids seen, the pending toasts) -> on the main thread,
+//   one toast, or one summary when more than two wait or a call held them -> the click
+//   (or none in 8 s) queued as recordNotificationFeedback and sent by the same job.
+// Positive only: a reading that is not above the one before is never shown, and nothing on
+// the desktop ever names a drop. Every step is idempotent: a restart resumes from what is
+// saved, never shows a toast twice, and resends feedback the server may already have.
+
+// MARK: - Wire shapes
+
+/// One gain: a concept's first clear reading, or a rise of at least +10 (the server's rule).
+struct MasteryNotification: Codable, Equatable, Sendable {
+    let runId: String
+    let conceptId: String
+    let conceptName: String
+    let percent: Int
+    /// The best earlier reading for a gain; nil for a first clear reading (whose own best
+    /// earlier reading, which may be higher, is never shown).
+    let previousPercent: Int?
+    let completedAt: Date
+    /// The learner's own words from the reading, when it has some.
+    var quote: String? = nil
+
+    /// The toast's line. Gains only, so there is no wording for a drop.
+    var line: String {
+        previousPercent.map { "▲ \($0)% → \(percent)%" } ?? "First clear reading: \(percent)%"
+    }
+
+    /// A gain, or nil for anything else (a drop or no change is never shown, whatever the
+    /// server sends).
+    static func gain(_ o: [String: Any]) -> MasteryNotification? {
+        guard let runId = text(o["runId"]), let conceptId = text(o["conceptId"]),
+              let percent = number(o["percent"]), let at = MasteryNotification.date(o["completedAt"]) else { return nil }
+        // The contract's two kinds (learner-server packages/contract/src/learning/mastery.ts);
+        // anything else is not a gain. A first clear reading is shown as such even when its best
+        // earlier reading (previousPercent) was higher: that number is never shown.
+        let previous: Int?
+        switch o["kind"] as? String {
+        case "first_clear": previous = nil
+        case "gain":
+            guard let p = number(o["previousPercent"]), let delta = (o["delta"] as? NSNumber)?.doubleValue, delta > 0,
+                  percent > p else { return nil }
+            previous = p
+        default: return nil
+        }
+        let quote = text(o["quote"])?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return MasteryNotification(runId: runId, conceptId: conceptId,
+                                   conceptName: text(o["conceptName"]) ?? conceptId, percent: percent,
+                                   previousPercent: previous, completedAt: at, quote: quote?.isEmpty == false ? quote : nil)
+    }
+
+    static func text(_ v: Any?) -> String? {
+        if let s = v as? String, !s.isEmpty { return s }
+        if let n = v as? NSNumber, !MasteryNotification.isBool(n) { return n.stringValue }
+        return nil
+    }
+
+    static func isBool(_ n: NSNumber) -> Bool { CFGetTypeID(n) == CFBooleanGetTypeID() }
+
+    static func number(_ v: Any?) -> Int? {
+        guard let n = v as? NSNumber, !MasteryNotification.isBool(n) else { return nil }
+        return Int(n.doubleValue.rounded())
+    }
+
+    static func date(_ v: Any?) -> Date? {
+        guard let s = v as? String else { return nil }
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = f.date(from: s) { return d }
+        f.formatOptions = [.withInternetDateTime]
+        return f.date(from: s)
+    }
+}
+
+/// getBaselineStatus: how far each baseline is from enough data.
+struct BaselineStatus: Codable, Equatable, Sendable {
+    struct Count: Codable, Equatable, Sendable {
+        let have: Int
+        let need: Int
+    }
+    struct Arm: Codable, Equatable, Sendable {
+        let arm: String
+        let count: Count
+    }
+
+    var learning: Count?
+    var learningDaysLeft: Int?
+    var arms: [Arm] = []
+    var coachDaysLeft: Int?
+
+    static func parse(_ body: Any?) -> BaselineStatus? {
+        guard let o = body as? [String: Any] else { return nil }
+        func count(_ v: Any?) -> Count? {
+            guard let c = v as? [String: Any], let have = MasteryNotification.number(c["have"]),
+                  let need = MasteryNotification.number(c["need"]) else { return nil }
+            return Count(have: max(0, have), need: max(0, need))
+        }
+        func days(_ v: Any?) -> Int? { (v as? NSNumber).map { Int(ceil($0.doubleValue)) } }
+        let learning = o["learning"] as? [String: Any]
+        let coach = o["coach"] as? [String: Any]
+        let arms = (coach?["arms"] as? [[String: Any]] ?? []).compactMap { a -> Arm? in
+            guard let name = MasteryNotification.text(a["arm"]), let c = count(a) else { return nil }
+            return Arm(arm: name, count: c)
+        }
+        return BaselineStatus(learning: learning.flatMap(count), learningDaysLeft: days(learning?["daysLeft"]),
+                              arms: arms, coachDaysLeft: days(coach?["daysLeft"]))
+    }
+
+    static func pace(_ c: Count, _ days: Int?, unit: String) -> String {
+        if c.need == 0 { return "no \(unit) yet" }
+        if c.have >= c.need { return "✓ set (\(c.have)/\(c.need) \(unit))" }
+        return "\(c.have)/\(c.need) \(unit) · " + (days.map { "~\($0) day\($0 == 1 ? "" : "s") left" } ?? "estimating your pace")
+    }
+
+    /// The tray's learning baseline line.
+    var learningLine: String {
+        "📚 Learning baseline: " + (learning.map { BaselineStatus.pace($0, learningDaysLeft, unit: "concepts") } ?? "no concepts yet")
+    }
+
+    /// The tray's coach baseline line, from the slowest arm; nil when the server sent no arms.
+    var coachLine: String? {
+        guard let slowest = arms.min(by: { Double($0.count.have) / Double(max(1, $0.count.need)) < Double($1.count.have) / Double(max(1, $1.count.need)) })
+        else { return nil }
+        let per = arms.map { "\($0.arm) \($0.count.have)/\($0.count.need)" }.joined(separator: " · ")
+        let pace = slowest.count.have >= slowest.count.need ? "✓ set"
+            : coachDaysLeft.map { "~\($0) day\($0 == 1 ? "" : "s") left" } ?? "estimating your pace"
+        return "📊 Coach baseline: \(per) · \(pace)"
+    }
+}
+
+/// What a toast's click (or no click) tells the server.
+enum MasteryAction: String, Codable, Sendable, CaseIterable {
+    case opened, nice
+    case notRight = "not_right"
+    case ignored
+}
+
+/// Where Open goes: `<web>osmosis?conceptId=<id>`, with `<web>` the Learner web root the
+/// server advertises (…/learner/). A server that publishes none has no link (as the tray's
+/// "Open Learner" line): Open then opens nothing and counts as ignored.
+enum MasteryLink {
+    /// What JavaScript's encodeURIComponent leaves as is.
+    static let uriComponent = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.!~*'()")
+
+    static func url(web: String?, conceptId: String?) -> URL? {
+        guard let root = web?.trimmingCharacters(in: .whitespaces), !root.isEmpty else { return nil }
+        // As the web app builds it: new URL("osmosis?conceptId=" + encodeURIComponent(id), web).
+        let query = conceptId.flatMap { $0.addingPercentEncoding(withAllowedCharacters: MasteryLink.uriComponent) }.map { "?conceptId=\($0)" } ?? ""
+        guard let base = URL(string: root), ["http", "https"].contains(base.scheme?.lowercased() ?? ""), base.host != nil else { return nil }
+        return URL(string: "osmosis" + query, relativeTo: base)?.absoluteURL
+    }
+}
+
+// MARK: - Feed job
+
+/// The 5-minute job and everything it keeps. Everything mutable is in UserDefaults, read and
+/// written under one lock, so the job's queue and the main thread never interleave a change.
+final class MasteryFeed: Sendable {
+    static let shared = MasteryFeed()
+
+    static let period: TimeInterval = 300
+    /// Newest first from the server; a wider page than any 5 minutes produces. A fuller
+    /// backlog (days offline) shows as one summary of the newest 50: S2 has no paging.
+    static let pageLimit = 50
+    /// Each query reaches back this far before the cursor (the seen run ids dedupe it), so a
+    /// run committed after a newer one, or a server clock behind this Mac's, is not missed.
+    static let overlap: TimeInterval = 900
+    /// Run ids remembered (beyond the cursor) so a reading at the cursor's own instant is
+    /// never shown twice.
+    static let seenKept = 500
+
+    enum Key {
+        static let since = "mastery_since"
+        static let seen = "mastery_seen_runs"
+        static let pending = "mastery_pending"
+        static let feedback = "mastery_feedback"
+        static let baseline = "mastery_baseline"
+        static let holdDuringCalls = "mastery_hold_during_calls"
+        /// Run ids on screen now: a quit before their click is sent as `ignored` at next launch.
+        static let showing = "mastery_showing"
+    }
+
+    struct Feedback: Codable, Equatable, Sendable {
+        let runId: String
+        let action: MasteryAction
+    }
+
+    /// The last answer: nil before the first, false while learner-server does not answer.
+    enum Reach: Sendable { case unknown, online, offline }
+
+    let rpc: LearnerRPC
+    // nonisolated(unsafe): UserDefaults is thread-safe; every read-modify-write is under `lock`.
+    nonisolated(unsafe) private let defaults: UserDefaults
+    private let lock = NSLock()
+    private let clock: @Sendable () -> Date
+    private let reach = Locked(Reach.unknown)
+    // nonisolated(unsafe): assigned once at the end of init (its body needs `self`); only read after.
+    nonisolated(unsafe) private(set) var job: Job!
+    private let log = Log("Mastery")
+    /// Whether a click sends its feedback at once (tests send it by running the job).
+    private let sendFeedbackAtOnce: Bool
+
+    init(rpc: LearnerRPC = .shared, defaults: UserDefaults = .standard, jobName: String = "Mastery",
+         firstRun: TimeInterval = 20, stateDir: String = Job.stateDir, sendFeedbackAtOnce: Bool = true,
+         clock: @escaping @Sendable () -> Date = Date.init) {
+        self.rpc = rpc
+        self.sendFeedbackAtOnce = sendFeedbackAtOnce
+        self.defaults = defaults
+        self.clock = clock
+        job = Job(jobName, period: MasteryFeed.period, firstRun: firstRun, backoff: Backoff(base: 60, max: 1800),
+                  problemGrace: 1800, quiet: true, stateDir: stateDir) { [weak self] _ in self?.runOnce() ?? .idle }
+        // A toast that was up when the app last quit (or crashed) got no click: ignored.
+        lock.withLock {
+            let left = defaults.stringArray(forKey: Key.showing) ?? []
+            guard !left.isEmpty else { return }
+            enqueue(left, .ignored)
+            defaults.removeObject(forKey: Key.showing)
+        }
+    }
+
+    // MARK: Saved state
+
+    private func decode<T: Decodable>(_ key: String, _ type: T.Type) -> T? {
+        defaults.data(forKey: key).flatMap { try? JSONDecoder().decode(T.self, from: $0) }
+    }
+
+    private func encode<T: Encodable>(_ value: T, _ key: String) {
+        defaults.set(try? JSONEncoder().encode(value), forKey: key)
+    }
+
+    /// Gains not shown yet, oldest first.
+    var pending: [MasteryNotification] { lock.withLock { decode(Key.pending, [MasteryNotification].self) ?? [] } }
+    var since: Date? { lock.withLock { defaults.object(forKey: Key.since) as? Date } }
+    var queuedFeedback: [Feedback] { lock.withLock { decode(Key.feedback, [Feedback].self) ?? [] } }
+    var baseline: BaselineStatus? { lock.withLock { decode(Key.baseline, BaselineStatus.self) } }
+    var reachable: Reach { reach.value }
+
+    /// Settings › "Hold while I'm in a call" (on unless switched off).
+    var holdDuringCalls: Bool {
+        get { defaults.object(forKey: Key.holdDuringCalls) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: Key.holdDuringCalls) }
+    }
+
+    /// Moves these from pending to on screen as they are shown: from here on a restart never
+    /// shows them, and one that quits before the click reports them ignored.
+    func take(_ runIds: [String]) {
+        lock.withLock {
+            let left = (decode(Key.pending, [MasteryNotification].self) ?? []).filter { !runIds.contains($0.runId) }
+            encode(left, Key.pending)
+            let showing = defaults.stringArray(forKey: Key.showing) ?? []
+            defaults.set(showing + runIds.filter { !showing.contains($0) }, forKey: Key.showing)
+        }
+    }
+
+    /// A toast taken down by a call before any click: back to waiting, first in line.
+    func putBack(_ ns: [MasteryNotification]) {
+        lock.withLock {
+            let ids = ns.map(\.runId)
+            let rest = (decode(Key.pending, [MasteryNotification].self) ?? []).filter { !ids.contains($0.runId) }
+            encode(ns + rest, Key.pending)
+            defaults.set((defaults.stringArray(forKey: Key.showing) ?? []).filter { !ids.contains($0) }, forKey: Key.showing)
+        }
+    }
+
+    /// The baseline as last fetched (tests set it).
+    func store(_ b: BaselineStatus?) {
+        lock.withLock { if let b { encode(b, Key.baseline) } else { defaults.removeObject(forKey: Key.baseline) } }
+    }
+
+    /// Queues a toast's outcome and sends it now; kept until the server has it.
+    func record(_ runIds: [String], _ action: MasteryAction) {
+        lock.withLock {
+            enqueue(runIds, action)
+            defaults.set((defaults.stringArray(forKey: Key.showing) ?? []).filter { !runIds.contains($0) }, forKey: Key.showing)
+        }
+        if sendFeedbackAtOnce { job.kick("feedback \(action.rawValue)") }
+    }
+
+    /// Under `lock`.
+    private func enqueue(_ runIds: [String], _ action: MasteryAction) {
+        var q = decode(Key.feedback, [Feedback].self) ?? []
+        for id in runIds where !q.contains(Feedback(runId: id, action: action)) { q.append(Feedback(runId: id, action: action)) }
+        encode(q, Key.feedback)
+    }
+
+    // MARK: Run
+
+    /// One run: send queued feedback, fetch new gains, refresh the baselines.
+    func runOnce() -> Job.Outcome {
+        let feedbackProblem = sendFeedback()
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        // First run ever: start from now, so an install does not replay old history (what the
+        // overlap brings back on that run is only remembered as seen).
+        let (cursor, firstRun) = lock.withLock { () -> (Date, Bool) in
+            if let d = defaults.object(forKey: Key.since) as? Date { return (d, false) }
+            return (clock(), true)   // saved once this first query has an answer
+        }
+        let reply = rpc.call("getMasteryNotifications", ["since": iso.string(from: cursor.addingTimeInterval(-MasteryFeed.overlap)),
+                                                         "limit": MasteryFeed.pageLimit])
+        guard reply.kind == .ok else {
+            // Offline is no answer or a server error; any other reply (a key problem, which the
+            // learner-server line reports, or a refused call) means it is there.
+            // No key: nothing was asked, so nothing is known about the server.
+            reach.value = reply.kind == .noKey ? .unknown : reply.status == 0 || reply.status >= 500 ? .offline : .online
+            let why = "getMasteryNotifications: \(reply.describe)\(reply.message.map { " (\($0))" } ?? "")"
+            // No key is not a block: pairing or an unlocked Keychain fixes it without a click,
+            // so it is retried on the backoff like any other failure.
+            return .failed(why)
+        }
+        reach.value = .online
+        let raw = ((reply.body as? [String: Any])?["notifications"] as? [[String: Any]]) ?? []
+        // Only rows this app can read move the cursor or count as seen: an unreadable one is
+        // logged and asked for again next time (the overlap), never silently skipped.
+        let readable = raw.compactMap { o -> (id: String, at: Date)? in
+            guard let id = MasteryNotification.text(o["runId"]), let at = MasteryNotification.date(o["completedAt"]) else { return nil }
+            return (id, at)
+        }
+        if readable.count < raw.count { log.warn("\(raw.count - readable.count) notification(s) without a runId or completedAt skipped") }
+        if raw.count >= MasteryFeed.pageLimit { log.warn("a full page of \(raw.count): older gains in this backlog are not fetched") }
+        let gains = raw.compactMap(MasteryNotification.gain)
+        if gains.count < readable.count { log.noisy("\(readable.count - gains.count) reading(s) not shown: not a first clear reading or a gain") }
+        let added: Int = lock.withLock {
+            var seen = defaults.stringArray(forKey: Key.seen) ?? []
+            var pending = decode(Key.pending, [MasteryNotification].self) ?? []
+            let fresh = firstRun ? [] : gains.filter { !seen.contains($0.runId) }.sorted { $0.completedAt < $1.completedAt }
+            pending += fresh
+            for r in readable where !seen.contains(r.id) { seen.append(r.id) }
+            seen = Array(seen.suffix(MasteryFeed.seenKept))
+            encode(pending, Key.pending)
+            defaults.set(seen, forKey: Key.seen)
+            if let n = readable.map(\.at).max(), n > cursor { defaults.set(n, forKey: Key.since) }
+            else if firstRun { defaults.set(cursor, forKey: Key.since) }
+            return fresh.count
+        }
+        if added > 0 { log.info("\(added) new gain(s) waiting") }
+        let status = rpc.call("getBaselineStatus", [:])
+        if status.kind == .ok, let b = BaselineStatus.parse(status.body) {
+            lock.withLock { encode(b, Key.baseline) }
+        }
+        if let problem = feedbackProblem { return .failed(problem) }
+        return added > 0 ? .ok("\(added) new") : idleOrRecovered(job, "up to date")
+    }
+
+    /// Sends queued feedback oldest first; stops at the first that cannot be sent now.
+    private func sendFeedback() -> String? {
+        for f in queuedFeedback {
+            let r = rpc.call("recordNotificationFeedback", ["runId": f.runId, "action": f.action.rawValue])
+            switch r.kind {
+            case .ok:
+                if (r.body as? [String: Any])?["recorded"] as? Bool == false {
+                    log.warn("feedback \(f.action.rawValue) for run \(f.runId): not one of the learner's live readings; dropped")
+                }
+            case .rejected:
+                log.warn("feedback \(f.action.rawValue) for run \(f.runId) refused: \(r.message ?? r.describe); dropped")
+            default:
+                return "recordNotificationFeedback: \(r.describe)"
+            }
+            lock.withLock {
+                encode((decode(Key.feedback, [Feedback].self) ?? []).filter { $0 != f }, Key.feedback)
+            }
+        }
+        return nil
+    }
+}
+
+// MARK: - Presenter
+
+/// What one toast shows.
+struct MasteryToastContent: Equatable {
+    let title: String
+    let detail: String
+    let link: URL?
+    let runIds: [String]
+    /// Nice / Not right: for a single gain only.
+    let asksFeedback: Bool
+
+    static func single(_ n: MasteryNotification, link: URL?) -> MasteryToastContent {
+        // Tentative: a +10 is often within grader noise (learner-server's replay, S0).
+        MasteryToastContent(title: "🎓 Looks like you\(n.previousPercent == nil ? " understand" : "'ve improved at") \(n.conceptName)", detail: n.line + (n.quote.map { " · “\($0)”" } ?? ""),
+                            link: link, runIds: [n.runId], asksFeedback: true)
+    }
+
+    static func summary(_ ns: [MasteryNotification], link: URL?) -> MasteryToastContent {
+        let names = ns.map(\.conceptName)
+        let shown = names.prefix(3).joined(separator: ", ") + (names.count > 3 ? " +\(names.count - 3) more" : "")
+        return MasteryToastContent(title: "🎓 Looks like progress on \(ns.count) concept\(ns.count == 1 ? "" : "s")", detail: shown,
+                                   link: link, runIds: ns.map(\.runId), asksFeedback: false)
+    }
+}
+
+@MainActor
+protocol MasteryToasting: AnyObject {
+    var isShowing: Bool { get }
+    /// Shows it; `done` is called once, with the click or `.ignored` after the timeout.
+    func show(_ content: MasteryToastContent, done: @escaping @MainActor (MasteryAction) -> Void)
+    /// Takes it down unclicked (`done(.ignored)`): a call started.
+    func dismiss()
+}
+
+/// Shows waiting gains when no call holds them: one at a time, or one summary.
+@MainActor
+final class MasteryPresenter {
+    enum Plan: Equatable { case single, summary }
+
+    /// More than two at once is one summary; after a call, anything more than one is.
+    static func plan(count: Int, afterCall: Bool) -> Plan {
+        count > 2 || (afterCall && count > 1) ? .summary : .single
+    }
+
+    let feed: MasteryFeed
+    let toast: MasteryToasting
+    var inCall: () -> Bool
+    var openURL: (URL) -> Bool
+    var web: () -> String?
+    private var heldByCall = false
+    /// What the toast on screen shows, until its outcome.
+    private var onScreen: [MasteryNotification] = []
+    private var takenDownByCall = false
+    private let log = Log("Mastery")
+
+    init(feed: MasteryFeed, toast: MasteryToasting, inCall: @escaping () -> Bool, openURL: @escaping (URL) -> Bool,
+         web: @escaping () -> String? = { PairingLink.shared.held?.web }) {
+        self.feed = feed
+        self.toast = toast
+        self.inCall = inCall
+        self.openURL = openURL
+        self.web = web
+    }
+
+    private func link(_ conceptId: String?) -> URL? {
+        MasteryLink.url(web: web(), conceptId: conceptId)
+    }
+
+    /// Main thread, every couple of seconds: shows what waits, unless a toast is up or a
+    /// call holds it.
+    func tick() {
+        if feed.holdDuringCalls && inCall() {
+            // No toast during a call, not even one shown just before it started.
+            if toast.isShowing {
+                takenDownByCall = true
+                toast.dismiss()
+            }
+            if !heldByCall { log.info("call: mastery toasts held") }
+            heldByCall = true
+            return
+        }
+        guard !toast.isShowing else { return }
+        let waiting = feed.pending
+        guard !waiting.isEmpty else { heldByCall = false; return }
+        let content: MasteryToastContent
+        switch MasteryPresenter.plan(count: waiting.count, afterCall: heldByCall) {
+        case .single:
+            content = .single(waiting[0], link: link(waiting[0].conceptId))
+            onScreen = [waiting[0]]
+        case .summary:
+            content = .summary(waiting, link: link(nil))
+            onScreen = waiting
+        }
+        heldByCall = false
+        feed.take(content.runIds)
+        log.info("showing \(content.runIds.count == 1 ? "a toast" : "a summary of \(content.runIds.count)")")
+        toast.show(content) { [weak self] action in
+            guard let self else { return }
+            let shown = self.onScreen
+            self.onScreen = []
+            if self.takenDownByCall {
+                // Not seen long enough to count: shown again after the call.
+                self.takenDownByCall = false
+                self.feed.putBack(shown)
+                return
+            }
+            var outcome = action
+            if action == .opened, !(content.link.map(self.openURL) ?? false) { outcome = .ignored }
+            self.feed.record(content.runIds, outcome)
+        }
+    }
+}
+
+// MARK: - Toast
+
+/// The coach toast's panel (MonologueToastController), with Open, Nice and Not right.
+@MainActor
+final class MasteryToastController: NSObject, MasteryToasting {
+    static let shared = MasteryToastController()
+    /// No click in this long is `ignored`.
+    var timeout: TimeInterval = 8
+
+    private(set) var panel: NSPanel?
+    private let title = NSTextField(labelWithString: "")
+    private let detail = NSTextField(labelWithString: "")
+    private var feedbackButtons: [NSButton] = []
+    private(set) var isShowing = false
+    private var done: (@MainActor (MasteryAction) -> Void)?
+    private var timer: Timer?
+    private let size = NSSize(width: 340, height: 90)
+
+    private func makePanel() -> NSPanel {
+        let p = NSPanel(contentRect: NSRect(origin: .zero, size: size), styleMask: [.nonactivatingPanel, .borderless],
+                        backing: .buffered, defer: false)
+        p.isFloatingPanel = true
+        p.level = .floating
+        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        p.isOpaque = false
+        p.backgroundColor = .clear
+        p.hasShadow = true
+        // Hidden from screen sharing and recording.
+        p.sharingType = .none
+
+        let ve = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
+        ve.material = .hudWindow
+        ve.blendingMode = .behindWindow
+        ve.state = .active
+        ve.wantsLayer = true
+        ve.layer?.cornerRadius = 18
+        ve.layer?.masksToBounds = true
+        ve.layer?.borderWidth = 1
+        ve.layer?.borderColor = NSColor(calibratedRed: 0.3, green: 0.8, blue: 0.45, alpha: 0.5).cgColor
+        let w = size.width, h = size.height
+        title.frame = NSRect(x: 16, y: h - 30, width: w - 32, height: 18)
+        title.font = .boldSystemFont(ofSize: 13)
+        title.textColor = .white
+        title.lineBreakMode = .byTruncatingTail
+        detail.frame = NSRect(x: 16, y: h - 50, width: w - 32, height: 16)
+        detail.font = .systemFont(ofSize: 12)
+        detail.textColor = NSColor(white: 0.9, alpha: 1)
+        detail.lineBreakMode = .byTruncatingTail
+        func button(_ label: String, _ x: CGFloat, _ action: Selector) -> NSButton {
+            let b = NSButton(frame: NSRect(x: x, y: 10, width: 96, height: 24))
+            b.title = label
+            b.bezelStyle = .rounded
+            b.controlSize = .small
+            b.font = .systemFont(ofSize: 11)
+            b.target = self
+            b.action = action
+            ve.addSubview(b)
+            return b
+        }
+        _ = button("Open", 16, #selector(openClicked))
+        feedbackButtons = [button("Nice", 122, #selector(niceClicked)), button("Not right", 228, #selector(notRightClicked))]
+        [title, detail].forEach(ve.addSubview)
+        p.contentView = ve
+        return p
+    }
+
+    func show(_ content: MasteryToastContent, done: @escaping @MainActor (MasteryAction) -> Void) {
+        let p = panel ?? makePanel()
+        panel = p
+        title.stringValue = content.title
+        detail.stringValue = content.detail
+        feedbackButtons.forEach { $0.isHidden = !content.asksFeedback }
+        self.done = done
+        let vf = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame ?? .zero
+        // Below the coach toast's spot, so the two never cover each other.
+        p.setFrameOrigin(NSPoint(x: max(20, vf.maxX - size.width - 24), y: max(20, vf.maxY - 2 * size.height - 36)))
+        isShowing = true
+        p.alphaValue = 0
+        p.orderFrontRegardless()
+        NSAnimationContext.runAnimationGroup { $0.duration = 0.25; p.animator().alphaValue = 1 }
+        timer?.invalidate()
+        let t = Timer(timeInterval: timeout, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.finish(.ignored) }
+        }
+        // Common modes: it also runs while the tray menu is open.
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+    }
+
+    func dismiss() { finish(.ignored) }
+
+    @objc func openClicked() { finish(.opened) }
+    @objc func niceClicked() { finish(.nice) }
+    @objc func notRightClicked() { finish(.notRight) }
+
+    /// Once per toast: the first click or the timeout.
+    func finish(_ action: MasteryAction) {
+        guard isShowing, let p = panel else { return }
+        isShowing = false
+        timer?.invalidate()
+        timer = nil
+        let report = done
+        done = nil
+        report?(action)
+        NSAnimationContext.runAnimationGroup({ $0.duration = 0.2; p.animator().alphaValue = 0 },
+                                             completionHandler: { [weak self] in MainActor.assumeIsolated { if self?.isShowing == false { self?.panel?.orderOut(nil) } } })
+    }
+}
+
+// MARK: - Tray
+
+extension TrayAppManager {
+    /// "🎓 Mastery", after the learner-server lines: the learning baseline, or why it is missing.
+    func addMasterySection() {
+        let feed = MasteryFeed.shared
+        header("🎓 Mastery")
+        if feed.reachable == .offline { add("   ⏳ waiting for learner-server") }
+        add("   " + (feed.baseline?.learningLine ?? "📚 Learning baseline: not available yet"))
+        let waiting = feed.pending.count
+        if waiting > 0 { add("   ⏸ \(waiting) gain\(waiting == 1 ? "" : "s") to show\(feed.holdDuringCalls && talkMonitor.activeCallApp != nil ? " after the call" : "")") }
+        statusMenu.addItem(NSMenuItem.separator())
+    }
+
+    /// The feed job is made here (the Scheduler ticks it); the presenter looks every 2 s.
+    func startMastery() {
+        let presenter = MasteryPresenter(feed: .shared, toast: MasteryToastController.shared,
+                                         inCall: { [weak self] in self?.talkMonitor.activeCallApp != nil },
+                                         openURL: { [weak self] in self?.openURL($0) ?? false })
+        Scheduler.every(2, "mastery") { presenter.tick() }
+    }
+
+    @objc func toggleMasteryCallHold() {
+        MasteryFeed.shared.holdDuringCalls.toggle()
+        rebuildMenu()
+    }
+}

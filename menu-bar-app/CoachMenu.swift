@@ -251,6 +251,7 @@ extension TrayAppManager {
         if coach.currentStreak > 0 {
             add("   ↺ Reset Speaking Streak (\(coach.formattedDuration))", #selector(resetStreakAction))
         }
+        if let line = MasteryFeed.shared.baseline?.coachLine { add("   \(line)") }
         statusMenu.addItem(NSMenuItem.separator())
     }
 

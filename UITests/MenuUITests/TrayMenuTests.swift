@@ -100,6 +100,7 @@ final class TrayMenuTests: XCTestCase {
             (["Pavlok", "30s"], "Modalities"),
             (["Pavlok", "60s"], "Modalities"),
             (["Settings"], "Alert"),
+            (["Settings"], "Hold While I'm in a Call"),
             (["Settings", "Sign AI Vault In From"], "Brave"),
             (["Settings", "Select Active Intervention Condition"], "✓"),
             (["Troubleshooting"], "View App Log"),
@@ -141,6 +142,17 @@ final class TrayMenuTests: XCTestCase {
             XCTAssertEqual(line(learner, text).title, was, "'\(text)' is not back as it was")
             close(learner)
         }
+    }
+
+    /// The mastery section is in the real menu, with its baseline line or why it is missing.
+    @MainActor
+    func testTheMasterySectionShows() throws {
+        let learner = XCUIApplication(bundleIdentifier: Self.bundleId)
+        open(learner, trayItem(learner))
+        defer { close(learner) }
+        XCTAssertTrue(line(learner, "🎓 Mastery").exists, "no 🎓 Mastery section")
+        XCTAssertTrue(line(learner, "Learning baseline").exists || line(learner, "waiting for learner-server").exists,
+                      "the mastery section has neither its baseline line nor the offline line")
     }
 
     /// The real menu names the learner-server host its GrowthBook line opens, or has none.
