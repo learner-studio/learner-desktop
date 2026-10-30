@@ -125,8 +125,8 @@ struct MasteryFeedTests {
         // A first clear reading whose best earlier reading was higher: shown as a first clear
         // reading, the higher number never.
         let firstAfterLow = MasteryNotification.gain(wire("r1b", "Graphs", 70, from: 75, at: 0, kind: "first_clear"))
-        #expect(firstAfterLow?.line == "First clear reading: 70%")
-        #expect(MasteryNotification.gain(wire("r2", "Closures", 72, from: nil, at: 0))?.line == "First clear reading: 72%")
+        #expect(firstAfterLow?.line == "First confident reading: 70%")
+        #expect(MasteryNotification.gain(wire("r2", "Closures", 72, from: nil, at: 0))?.line == "First confident reading: 72%")
         #expect(MasteryNotification.gain(wire("r3", "Monads", 60, from: 75, at: 0, kind: "gain")) == nil, "a drop is never shown")
         #expect(MasteryNotification.gain(wire("r4", "Monads", 75, from: 75, at: 0, kind: "gain")) == nil, "no change is never shown")
         #expect(MasteryNotification.gain(["runId": "r5", "percent": 50]) == nil, "incomplete rows are skipped")
@@ -264,7 +264,7 @@ struct MasteryFeedTests {
         let nullQuery = install.server.calls("getMasteryNotifications").first { $0["since"] is NSNull }
         #expect(nullQuery?["limit"] as? Int == MasteryFeed.recentShown * 4)
         #expect(MasteryTrayRow.title(feed.recent[0], now: t0) == "🎓 Opportunity cost of capital: ▲ 20% → 30% · 2 min ago")
-        #expect(MasteryTrayRow.title(feed.recent[1], now: t0.addingTimeInterval(7200)) == "🎓 B: first clear reading 72% · 2 h ago")
+        #expect(MasteryTrayRow.title(feed.recent[1], now: t0.addingTimeInterval(7200)) == "🎓 B: first confident reading 72% · 2 h ago")
 
         var opened: [URL] = []
         let url = feed.openRecent("c", web: "https://learner.test/learner/", open: { opened.append($0); return true })
@@ -677,7 +677,8 @@ struct MasteryPresenterTests {
         toast.click(.opened)
         #expect(opened.value.map(\.absoluteString) == ["https://learner.test/learner/osmosis?conceptId=c-Recursion"])
         presenter.tick()
-        #expect(toast.shown.map(\.detail) == ["▲ 65% → 80% · “a function that calls itself”", "First clear reading: 72%"])
+        #expect(toast.shown.map(\.detail) == ["▲ 65% → 80% · “a function that calls itself”", "First confident reading: 72%"])
+        #expect(toast.shown.map(\.title) == ["🎓 Looks like you've improved at Recursion", "🎓 First confident reading of Closures"])
         toast.click(.notRight)
         #expect(feed.queuedFeedback == [.init(runId: "r1", action: .opened), .init(runId: "r2", action: .notRight)])
 
@@ -697,6 +698,7 @@ struct MasteryPresenterTests {
         for word in ["▼", "down", "drop", "lost", "decline", "-"] { #expect(!text.contains(word), "'\(word)' in: \(text)") }
         #expect(toast.shown.count == 1, "the drop was never queued")
         #expect(!text.contains("70"), "a first clear reading's higher earlier best is never shown")
+        #expect(!text.contains("understand"), "a first confident reading never claims understanding")
     }
 }
 

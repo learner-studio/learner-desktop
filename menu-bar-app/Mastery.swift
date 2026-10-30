@@ -27,7 +27,7 @@ struct MasteryNotification: Codable, Equatable, Sendable {
 
     /// The toast's line. Gains only, so there is no wording for a drop.
     var line: String {
-        previousPercent.map { "▲ \($0)% → \(percent)%" } ?? "First clear reading: \(percent)%"
+        previousPercent.map { "▲ \($0)% → \(percent)%" } ?? "First confident reading: \(percent)%"
     }
 
     /// A gain, or nil for anything else (a drop or no change is never shown, whatever the
@@ -459,7 +459,9 @@ struct MasteryToastContent: Equatable {
 
     static func single(_ n: MasteryNotification, link: URL?) -> MasteryToastContent {
         // Tentative: a +10 is often within grader noise (learner-server's replay, S0).
-        MasteryToastContent(title: "🎓 Looks like you\(n.previousPercent == nil ? " understand" : "'ve improved at") \(n.conceptName)", detail: n.line + (n.quote.map { " · “\($0)”" } ?? ""),
+        // A first clear reading is the grader's first confident one, not mastery (a confident 10%
+        // is one too): named for what it is, never "you understand".
+        MasteryToastContent(title: n.previousPercent == nil ? "🎓 First confident reading of \(n.conceptName)" : "🎓 Looks like you've improved at \(n.conceptName)", detail: n.line + (n.quote.map { " · “\($0)”" } ?? ""),
                             link: link, runIds: [n.runId], asksFeedback: true)
     }
 
@@ -677,7 +679,7 @@ final class MasteryToastController: NSObject, MasteryToasting {
 /// A recent-gain row: the concept, the gain (never a drop), and how long ago.
 enum MasteryTrayRow {
     static func title(_ n: MasteryNotification, now: Date) -> String {
-        let change = n.previousPercent.map { "▲ \($0)% → \(n.percent)%" } ?? "first clear reading \(n.percent)%"
+        let change = n.previousPercent.map { "▲ \($0)% → \(n.percent)%" } ?? "first confident reading \(n.percent)%"
         return "🎓 \(n.conceptName): \(change) · \(ago(now.timeIntervalSince(n.completedAt)))"
     }
 
