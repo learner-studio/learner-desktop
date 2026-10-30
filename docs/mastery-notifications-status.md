@@ -14,7 +14,7 @@ Contract pinned: learner-server `02fec3f400a652c19521364efe7372fd61667f07` (S1â€
 | D6 Positive only | accepted | 0a483d7 MasteryNotification.gain: only first_clear and gain with delta > 0; a first clear never shows its earlier best. Tests: gainsOnlyNeverADropOrNoChange, noWordingForADrop, baselineLinesSayHowFarAndNeverADrop. Reviewed: no findings 2026-10-30 | 2026-10-30 |
 | D7 Tests | building | all lanes green at 182b022 (MasteryTests: 3 suites; backlog paging, install window with a moving clock); flaky medium aHelperThatCrashesIsRestartedWithBackoff fixed (timed from launches, 10/10). Left: tray UI test `testTheMasterySectionShows` and the Settings check need the Mac free | 2026-10-30 |
 | D8 Live | building | 182b022 installed on the owner's Mac 2026-10-30 18:18Z; first poll ok (cursor 18:18:56Z, start 18:03:56Z); live getBaselineStatus: learning 83/1155, 243 days; coach arms 124/105/30/48 of 232, 39 days. Waiting for a qualifying reading from learner-server | 2026-10-30 |
-| J1 Contract parity | todo | | 2026-10-30 |
+| J1 Contract parity | accepted | Pinned contract/contract.json is byte-identical to learner-server 02fec3f; the three mastery RPC entries equal learner-server origin/main (6c3a8a9) exactly. Changes since the pin touch only getLearningGraph (optional conceptId) and the web-only getMasteryProgress; none of the seven RPCs the desktop calls changed. Learner-server's status file records the same parity. Reviewed: no findings 2026-10-30 | 2026-10-30 |
 | J2 Live end to end | todo | | 2026-10-30 |
 | J3 Adversarial review | todo | | 2026-10-30 |
 | J4 Status files accepted | todo | | 2026-10-30 |
