@@ -163,18 +163,19 @@ final class MasteryFeed: Sendable {
     static let shared = MasteryFeed()
 
     static let period: TimeInterval = 300
-    /// Newest first from the server; a wider page than any 5 minutes produces. A fuller
-    /// backlog (days offline) shows as one summary of the newest 50: S2 has no paging.
+    /// Per page; a backlog (days offline) is read page after page, up to `maxPages` a run.
     static let pageLimit = 50
+    static let maxPages = 20
     /// Each query reaches back this far before the cursor (the seen run ids dedupe it), so a
     /// run committed after a newer one, or a server clock behind this Mac's, is not missed.
     static let overlap: TimeInterval = 900
     /// Run ids remembered (beyond the cursor) so a reading at the cursor's own instant is
     /// never shown twice.
-    static let seenKept = 500
+    static let seenKept = 3000
 
     enum Key {
         static let since = "mastery_since"
+        static let installedAt = "mastery_installed_at"
         static let seen = "mastery_seen_runs"
         static let pending = "mastery_pending"
         static let feedback = "mastery_feedback"
@@ -294,48 +295,62 @@ final class MasteryFeed: Sendable {
         let feedbackProblem = sendFeedback()
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        // First run ever: start from now, so an install does not replay old history (what the
-        // overlap brings back on that run is only remembered as seen).
-        let (cursor, firstRun) = lock.withLock { () -> (Date, Bool) in
-            if let d = defaults.object(forKey: Key.since) as? Date { return (d, false) }
-            return (clock(), true)   // saved once this first query has an answer
+        // The first run starts from now, so an install does not replay old history.
+        // Where showing starts, kept for good: the install (or, for an install from before this
+        // key, its saved cursor) less the reach-back, so a server clock behind this Mac's or a
+        // late commit near the install is still shown; nothing older ever is, however many runs
+        // reading that window takes.
+        let (cursor, installedAt) = lock.withLock { () -> (Date, Date) in
+            let since = defaults.object(forKey: Key.since) as? Date
+            let installed = defaults.object(forKey: Key.installedAt) as? Date ?? (since ?? clock()).addingTimeInterval(-MasteryFeed.overlap)
+            defaults.set(installed, forKey: Key.installedAt)
+            return (since ?? clock(), installed)   // since: saved once a query has an answer
         }
-        let reply = rpc.call("getMasteryNotifications", ["since": iso.string(from: cursor.addingTimeInterval(-MasteryFeed.overlap)),
-                                                         "limit": MasteryFeed.pageLimit])
-        guard reply.kind == .ok else {
-            // Offline is no answer or a server error; any other reply (a key problem, which the
-            // learner-server line reports, or a refused call) means it is there.
-            // No key: nothing was asked, so nothing is known about the server.
-            reach.value = reply.kind == .noKey ? .unknown : reply.status == 0 || reply.status >= 500 ? .offline : .online
-            let why = "getMasteryNotifications: \(reply.describe)\(reply.message.map { " (\($0))" } ?? "")"
-            // No key is not a block: pairing or an unlocked Keychain fixes it without a click,
-            // so it is retried on the backoff like any other failure.
-            return .failed(why)
-        }
-        reach.value = .online
-        let raw = ((reply.body as? [String: Any])?["notifications"] as? [[String: Any]]) ?? []
-        // Only rows this app can read move the cursor or count as seen: an unreadable one is
-        // logged and asked for again next time (the overlap), never silently skipped.
-        let readable = raw.compactMap { o -> (id: String, at: Date)? in
-            guard let id = MasteryNotification.text(o["runId"]), let at = MasteryNotification.date(o["completedAt"]) else { return nil }
-            return (id, at)
-        }
-        if readable.count < raw.count { log.warn("\(raw.count - readable.count) notification(s) without a runId or completedAt skipped") }
-        if raw.count >= MasteryFeed.pageLimit { log.warn("a full page of \(raw.count): older gains in this backlog are not fetched") }
-        let gains = raw.compactMap(MasteryNotification.gain)
-        if gains.count < readable.count { log.noisy("\(readable.count - gains.count) reading(s) not shown: not a first clear reading or a gain") }
-        let added: Int = lock.withLock {
-            var seen = defaults.stringArray(forKey: Key.seen) ?? []
-            var pending = decode(Key.pending, [MasteryNotification].self) ?? []
-            let fresh = firstRun ? [] : gains.filter { !seen.contains($0.runId) }.sorted { $0.completedAt < $1.completedAt }
-            pending += fresh
-            for r in readable where !seen.contains(r.id) { seen.append(r.id) }
-            seen = Array(seen.suffix(MasteryFeed.seenKept))
-            encode(pending, Key.pending)
-            defaults.set(seen, forKey: Key.seen)
-            if let n = readable.map(\.at).max(), n > cursor { defaults.set(n, forKey: Key.since) }
-            else if firstRun { defaults.set(cursor, forKey: Key.since) }
-            return fresh.count
+        // Pages: the server returns the OLDEST `limit` after `since` (newest first within the
+        // page, a group with one completedAt never split), so each next page starts at the
+        // newest reading of the last one, until a page is not full.
+        var since = cursor.addingTimeInterval(-MasteryFeed.overlap)
+        var added = 0
+        for page in 0..<MasteryFeed.maxPages {
+            let reply = rpc.call("getMasteryNotifications", ["since": iso.string(from: since), "limit": MasteryFeed.pageLimit])
+            guard reply.kind == .ok else {
+                // Offline is no answer or a server error; any other reply (a key problem, which the
+                // learner-server line reports, or a refused call) means it is there. No key:
+                // nothing was asked, so nothing is known about the server.
+                reach.value = reply.kind == .noKey ? .unknown : reply.status == 0 || reply.status >= 500 ? .offline : .online
+                // No key is not a block: pairing or an unlocked Keychain fixes it without a click,
+                // so it is retried on the backoff like any other failure. Pages already taken are kept.
+                return .failed("getMasteryNotifications: \(reply.describe)\(reply.message.map { " (\($0))" } ?? "")")
+            }
+            reach.value = .online
+            let raw = ((reply.body as? [String: Any])?["notifications"] as? [[String: Any]]) ?? []
+            // Only rows this app can read move the cursor or count as seen: an unreadable one is
+            // logged and asked for again next time (the overlap), never silently skipped.
+            let readable = raw.compactMap { o -> (id: String, at: Date)? in
+                guard let id = MasteryNotification.text(o["runId"]), let at = MasteryNotification.date(o["completedAt"]) else { return nil }
+                return (id, at)
+            }
+            if readable.count < raw.count { log.warn("\(raw.count - readable.count) notification(s) without a runId or completedAt skipped") }
+            let gains = raw.compactMap(MasteryNotification.gain)
+            if gains.count < readable.count { log.noisy("\(readable.count - gains.count) reading(s) not shown: not a first clear reading or a gain") }
+            let newest = readable.map(\.at).max()
+            added += lock.withLock { () -> Int in
+                var seen = defaults.stringArray(forKey: Key.seen) ?? []
+                var pending = decode(Key.pending, [MasteryNotification].self) ?? []
+                let fresh = gains.filter { $0.completedAt > installedAt && !seen.contains($0.runId) }.sorted { $0.completedAt < $1.completedAt }
+                pending += fresh
+                for r in readable where !seen.contains(r.id) { seen.append(r.id) }
+                seen = Array(seen.suffix(MasteryFeed.seenKept))
+                encode(pending, Key.pending)
+                defaults.set(seen, forKey: Key.seen)
+                let saved = defaults.object(forKey: Key.since) as? Date
+                if let n = newest, n > (saved ?? cursor) { defaults.set(n, forKey: Key.since) }
+                else if saved == nil { defaults.set(cursor, forKey: Key.since) }
+                return fresh.count
+            }
+            guard raw.count >= MasteryFeed.pageLimit, let n = newest, n > since else { break }
+            if page == MasteryFeed.maxPages - 1 { log.warn("\(MasteryFeed.maxPages) full pages: the rest waits for the next run") }
+            since = n
         }
         if added > 0 { log.info("\(added) new gain(s) waiting") }
         let status = rpc.call("getBaselineStatus", [:])

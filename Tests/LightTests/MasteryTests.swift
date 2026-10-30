@@ -32,6 +32,9 @@ private func wire(_ run: String, _ concept: String, _ percent: Int, from previou
 private final class MasteryServer: @unchecked Sendable {
     let lock = NSLock()
     var notifications: [[String: Any]] = []
+    /// Answer as learner-server 1f96f44 does: the OLDEST `limit` strictly after `since`, newest
+    /// first, a group with one completedAt never split. Off: return `notifications` as is.
+    var paged = false
     var feedbackStatus = 200
     var masteryStatus = 200
     var baseline: [String: Any] = ["learning": ["have": 12, "need": 40, "daysLeft": 9, "pacePerDay": 3.4],
@@ -44,13 +47,27 @@ private final class MasteryServer: @unchecked Sendable {
         return self.lock.withLock {
             switch seen.path.split(separator: "/").last.map(String.init) {
             case "getMasteryNotifications":
-                return masteryStatus == 200 ? StubTransport.json(200, ["data": ["notifications": notifications]]) : StubTransport.status(masteryStatus)
+                guard masteryStatus == 200 else { return StubTransport.status(masteryStatus) }
+                return StubTransport.json(200, ["data": ["notifications": paged ? page(seen.body?["data"] as? [String: Any]) : notifications]])
             case "getBaselineStatus": return StubTransport.json(200, ["data": baseline])
             case "recordNotificationFeedback":
                 return feedbackStatus == 200 ? StubTransport.json(200, ["data": ["recorded": true, "at": iso(t0)]]) : StubTransport.status(feedbackStatus)
             default: return StubTransport.status(404)
             }
         }
+    }
+
+    private func page(_ input: [String: Any]?) -> [[String: Any]] {
+        let since = MasteryNotification.date(input?["since"])
+        let limit = input?["limit"] as? Int ?? 20
+        let sorted = notifications.sorted { MasteryNotification.date($0["completedAt"])! < MasteryNotification.date($1["completedAt"])! }
+        guard let since else { return Array(sorted.suffix(limit).reversed()) }   // null: the newest `limit`
+        let after = sorted.filter { MasteryNotification.date($0["completedAt"])! > since }
+        var taken = Array(after.prefix(limit))
+        if let last = taken.last?["completedAt"] as? String {
+            taken += after.dropFirst(taken.count).prefix { $0["completedAt"] as? String == last }
+        }
+        return taken.reversed()
     }
 
     func calls(_ name: String) -> [[String: Any]] {
@@ -121,11 +138,13 @@ struct MasteryFeedTests {
 
     @Test func theFirstRunStartsNowAndARestartNeverShowsAGainTwice() throws {
         let install = Install()
-        // Something from before this install: remembered on the first run, never shown.
-        install.server.notifications = [wire("old", "History", 90, from: 70, at: -300)]
+        // From before this install (beyond the reach-back): never shown. Within the reach-back
+        // (a server clock behind, a late commit): shown.
+        install.server.notifications = [wire("old", "History", 90, from: 70, at: -1200), wire("near", "Near", 90, from: 70, at: -300)]
         let feed = install.launch()
-        #expect(describe(feed.runOnce()) == "idle")
-        #expect(feed.pending.isEmpty, "the first run starts from now, not from history")
+        #expect(describe(feed.runOnce()) == "ok: 1 new")
+        #expect(feed.pending.map(\.runId) == ["near"], "the first run starts from now less the reach-back, not from history")
+        feed.take(["near"])
         let first = try #require(install.server.calls("getMasteryNotifications").first)
         #expect(first["since"] as? String == iso(t0.addingTimeInterval(-MasteryFeed.overlap)), "each query reaches back by the overlap")
         #expect(first["limit"] as? Int == MasteryFeed.pageLimit)
@@ -160,6 +179,63 @@ struct MasteryFeedTests {
         }
         #expect(describe(feed.runOnce()) == "ok: 1 new")
         #expect(feed.pending.map(\.runId) == ["r2", "r1"])
+    }
+
+    /// A backlog bigger than a page is read page after page in one run, nothing skipped, even
+    /// when more than a page sits inside the reach-back window before the cursor.
+    @Test func aBacklogIsReadPageByPage() {
+        let install = Install()
+        install.server.paged = true
+        let feed = install.launch()
+        _ = feed.runOnce()
+        // 60 already seen just before the cursor's next position, then 120 new ones; b39 and b40 share a
+        // time and fall on a page boundary (the server sends the pair together, over the limit).
+        install.server.lock.withLock {
+            install.server.notifications = (0..<60).map { wire("a\($0)", "A\($0)", 80, from: 60, at: 1 + Double($0)) }
+        }
+        _ = feed.runOnce()
+        #expect(feed.pending.count == 60)
+        feed.take(feed.pending.map(\.runId))
+        install.server.lock.withLock {
+            install.server.notifications += (0..<120).map { wire("b\($0)", "B\($0)", 80, from: 60, at: 100 + Double($0 == 40 ? 39 : $0)) }
+        }
+        let before = install.server.calls("getMasteryNotifications").count
+        #expect(describe(feed.runOnce()) == "ok: 120 new")
+        #expect(feed.pending.count == 120, "every gain of the backlog, none twice")
+        #expect(Set(feed.pending.map(\.runId)).count == 120)
+        #expect(install.server.calls("getMasteryNotifications").count - before >= 3, "read in pages")
+        #expect(feed.since == t0.addingTimeInterval(219))
+    }
+
+    /// More than a page went live in the reach-back window, and the first run fails after its
+    /// first page: each is still shown exactly once.
+    @Test func historyBeforeTheInstallIsNeverShownEvenAcrossRuns() {
+        let install = Install()
+        install.server.paged = true
+        install.server.notifications = (0..<70).map { wire("h\($0)", "H\($0)", 80, from: 60, at: -800 + Double($0)) }
+        let feed = install.launch()
+        var calls = 0
+        let pages = install.server.stub.handler
+        install.server.stub.handler = { seen in
+            calls += 1
+            return calls == 2 && seen.path.hasSuffix("getMasteryNotifications") ? StubTransport.status(503) : pages(seen)
+        }
+        #expect(describe(feed.runOnce()).hasPrefix("failed"))
+        install.server.stub.handler = pages
+        _ = install.launch().runOnce()
+        #expect(feed.pending.count == 70, "each once, none lost to the failed page")
+        #expect(Set(feed.pending.map(\.runId)).count == 70)
+    }
+
+    /// An install from a build without the install time: showing starts at its saved cursor
+    /// less the reach-back, so a late commit just before that cursor is still shown.
+    @Test func anUpgradedInstallKeepsItsWindow() {
+        let install = Install()
+        install.defaults.set(t0, forKey: MasteryFeed.Key.since)
+        install.server.notifications = [wire("late", "Late", 90, from: 70, at: -60), wire("old", "Old", 90, from: 70, at: -1200)]
+        let feed = install.launch()
+        _ = feed.runOnce()
+        #expect(feed.pending.map(\.runId) == ["late"])
     }
 
     /// A row this app cannot read never moves the cursor or counts as seen.
@@ -199,7 +275,7 @@ struct MasteryFeedTests {
     @Test func aFailedFirstRunStillStartsFromNow() {
         let install = Install()
         install.server.masteryStatus = 503
-        install.server.notifications = [wire("old", "History", 90, from: 70, at: -300)]
+        install.server.notifications = [wire("old", "History", 90, from: 70, at: -1200)]
         let feed = install.launch()
         _ = feed.runOnce()
         #expect(feed.since == nil)
@@ -396,7 +472,9 @@ struct MasteryPresenterTests {
         #expect(c.panel?.sharingType == NSWindow.SharingType.none)
         #expect(c.panel?.styleMask.contains(.nonactivatingPanel) == true)
         #expect(c.panel?.frame.size == NSSize(width: 340, height: 90))
-        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+        // The main run loop is shared with other suites: give the 0.1 s timer up to 3 s to fire.
+        let deadline = Date().addingTimeInterval(3)
+        while outcomes.isEmpty && Date() < deadline { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05)) }
         #expect(outcomes == [.ignored])
         c.show(content) { outcomes.append($0) }
         c.openClicked()
