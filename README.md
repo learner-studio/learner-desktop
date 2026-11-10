@@ -82,6 +82,7 @@ Requires macOS 14+, Xcode (Swift 6), screenpipe, and for chats the `ai-vault` CL
 
 ```bash
 security add-generic-password -s learner-server -a ben-mbp -w   # store the device key (prompts)
+scripts/fetch-voice-id.sh                                       # sherpa-onnx + Voice ID's model (pinned, SHA-checked; not in git)
 scripts/install-hooks.sh                                        # test lanes on commit and push
 scripts/build-app.sh                                            # build and install Learner Desktop
 ```
@@ -89,6 +90,14 @@ scripts/build-app.sh                                            # build and inst
 `build-app.sh` builds with `swift build -c release`, installs `~/Applications/Learner
 Desktop.app` and its LaunchAgent (`com.benpollack.learner-desktop`), then restarts it.
 `BUNDLE_ONLY=1 OUT_DIR=<dir>` builds and signs the bundle without installing it.
+
+**Voice ID** (`menu-bar-app/VoiceID.swift`, tray 🎙 Voice ID) shows a small pill, "am I
+talking?", from the coach's own microphone frames: while Silero hears speech, a 1.5 s window is
+embedded every 0.5 s with sherpa-onnx (3D-Speaker CAM++, VoxCeleb, on its own queue) and scored
+against a voiceprint enrolled from about 60 s of the owner's speech (saved under
+`~/Library/Application Support/Learner Desktop/voice-id/`). The owner's voice versus not; nothing
+about other speakers. `scripts/fetch-voice-id.sh` fetches sherpa-onnx v2.0.1 (static, linked into
+the binary) and the model from k2-fsa's GitHub releases; licenses in `third_party/sherpa-onnx/NOTICE`.
 
 ### One app, one login item
 

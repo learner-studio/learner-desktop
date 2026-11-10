@@ -41,6 +41,8 @@ struct TrayMenuClickTests {
         "promptPavlokToken": "asks for the cloud token",
         "toggleMasteryCallHold": "switches holding mastery toasts during calls",
         "openRecentGain:": "opens a recent gain's concept on the Map and records it opened",
+        "enrollVoice": "opens the Voice ID enrollment panel (listening starts on its Start button)",
+        "toggleVoiceIndicator": "shows or hides the 'am I talking?' pill",
     ]
 
     static func allItems(_ menu: NSMenu) -> [NSMenuItem] {
@@ -97,7 +99,8 @@ struct TrayMenuClickTests {
 
     /// The test process's own defaults (not the app's) hold these settings; each click below
     /// is undone, and the values are put back whatever happens.
-    static let settingKeys = CoachSettings.Key.allCases.map(\.rawValue) + [ChromiumBrowser.defaultsKey, MasteryFeed.Key.holdDuringCalls]
+    static let settingKeys = CoachSettings.Key.allCases.map(\.rawValue) + [ChromiumBrowser.defaultsKey, MasteryFeed.Key.holdDuringCalls,
+                                                                         VoiceIDController.indicatorKey]
 
     func preservingSettings(_ body: () throws -> Void) rethrows {
         let d = UserDefaults.standard
@@ -127,6 +130,7 @@ struct TrayMenuClickTests {
                 ("togglePavlokEnabled", { s.wearableEnabled }),
                 ("togglePavlokConnection", { s.keepConnected }),
                 ("toggleMasteryCallHold", { MasteryFeed.shared.holdDuringCalls }),
+                ("toggleVoiceIndicator", { VoiceIDController.shared.indicatorShown }),
             ]
             for (action, value) in toggles {
                 let before = value()

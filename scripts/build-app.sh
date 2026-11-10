@@ -9,6 +9,14 @@ OUT_DIR="${OUT_DIR:-${PROJECT_DIR}/menu-bar-app}"
 BUNDLE_DIR="${OUT_DIR}/${APP_NAME}"
 TARGET_APP="/Users/benpollack/Applications/${APP_NAME}"
 
+# Voice ID's speaker model, and (to compile) sherpa-onnx's static libraries: both come from
+# scripts/fetch-voice-id.sh, not git. Checked first, so a missing one fails before the build.
+VOICE_MODEL="${PROJECT_DIR}/menu-bar-app/Models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx"
+if [ ! -f "${VOICE_MODEL}" ] || { [ -z "${LEARNER_BINARY:-}" ] && [ ! -d "${PROJECT_DIR}/third_party/sherpa-onnx/artifacts/sherpa-onnx.xcframework" ]; }; then
+  echo "Voice ID's model or sherpa-onnx is missing: run scripts/fetch-voice-id.sh first" >&2
+  exit 1
+fi
+
 # LEARNER_BINARY: package an already-built binary instead of compiling (the heavy test
 # lane uses the debug build, so checking the bundle takes seconds, not a release build).
 if [ -n "${LEARNER_BINARY:-}" ]; then
@@ -29,6 +37,12 @@ chmod +x "${BUNDLE_DIR}/Contents/MacOS/learner-desktop"
 
 # The on-device speech detector's model (Silero VAD, Core ML).
 cp -R "${PROJECT_DIR}/menu-bar-app/Models/silero-vad.mlmodelc" "${BUNDLE_DIR}/Contents/Resources/silero-vad.mlmodelc"
+
+# Voice ID: the speaker model and sherpa-onnx's notices. sherpa-onnx and ONNX Runtime are
+# linked statically into the binary: no framework to embed or sign.
+cp "${VOICE_MODEL}" "${BUNDLE_DIR}/Contents/Resources/"
+cp "${PROJECT_DIR}/third_party/sherpa-onnx/NOTICE" "${BUNDLE_DIR}/Contents/Resources/sherpa-onnx-NOTICE.txt"
+cp "${PROJECT_DIR}/third_party/sherpa-onnx/LICENSE" "${BUNDLE_DIR}/Contents/Resources/sherpa-onnx-LICENSE.txt"
 
 # CFBundleIdentifier deliberately keeps its pre-rename value: TCC grants (Bluetooth) and
 # the saved Pavlok settings in UserDefaults are keyed to it.
@@ -56,7 +70,7 @@ cat << 'EOF' > "${BUNDLE_DIR}/Contents/Info.plist"
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Learner Desktop listens for your own speech on the microphone, on this Mac only (no audio is stored or sent), to time how long you have been talking.</string>
+    <string>Learner Desktop listens for your own speech on the microphone, on this Mac only (no audio is stored or sent), to time how long you have been talking and, with Voice ID on, to tell your voice from others'.</string>
     <key>NSBluetoothAlwaysUsageDescription</key>
     <string>Learner Desktop connects directly to your Pavlok wearable wristband over Bluetooth Low Energy for instant, sub-15ms physical speech coaching feedback.</string>
     <key>NSBluetoothPeripheralUsageDescription</key>

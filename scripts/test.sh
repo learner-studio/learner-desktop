@@ -41,6 +41,10 @@ run_lane() {
   local target
   target="$(tr '[:lower:]' '[:upper:]' <<< "${lane:0:1}")${lane:1}Tests"
   printf '\n\033[1m==> %s lane (%s)\033[0m\n' "$lane" "$target"
+  # Voice ID links sherpa-onnx from local binaries git does not hold.
+  if [ ! -d third_party/sherpa-onnx/artifacts/sherpa-onnx.xcframework ]; then
+    echo "sherpa-onnx is not fetched: run scripts/fetch-voice-id.sh once (it also fetches Voice ID's model)"; return 1
+  fi
   # Build first so the budget measures the tests, not the compiler.
   swift build --build-tests >/dev/null || { echo "build failed"; swift build --build-tests 2>&1 | grep -E "error" | head -20; return 1; }
   local start end took status

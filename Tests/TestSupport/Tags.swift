@@ -24,4 +24,6 @@ public extension Tag {
     @Tag static var sessions: Self
     /// Mastery notifications: the feed job, the toast, the tray lines.
     @Tag static var mastery: Self
+    /// Voice ID: "am I talking?" from the coach's microphone frames.
+    @Tag static var voiceID: Self
 }

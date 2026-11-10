@@ -143,6 +143,8 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.applyTopology() } }
         }
         startMastery()
+        // After the coach: Voice ID listens to the coach's microphone frames.
+        VoiceIDController.shared.start()
         // Mastery, the wristband and the update check have no callback into the tray: an
         // open menu looks again each second (nothing when it is closed).
         Scheduler.every(1, "menu") { [weak self] in self?.refreshOpenMenu() }
@@ -272,6 +274,7 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         statusMenu.addItem(NSMenuItem.separator())
 
+        statusMenu.addItem(voiceIDMenuItem())
         statusMenu.addItem(pavlokMenuItem())
 
         // --- Settings ---

@@ -1,0 +1,11 @@
+sherpa-onnx (https://github.com/k2-fsa/sherpa-onnx), Copyright (c) 2022-2026 Xiaomi Corporation
+and contributors, Apache-2.0 (LICENSE here). swift/SherpaOnnx.swift is upstream's
+swift-api-examples/SherpaOnnx.swift at tag v2.0.1 (commit af2d8d81dbfa61c4cea4c568da78f3982edca005),
+unmodified, SHA-256 559bdc1485aecba960ca057b95e5bfd93ce7dc772d779a6c768b51ea5bcc1197.
+
+Fetched by scripts/fetch-voice-id.sh, not in git:
+- sherpa-onnx v2.0.1 macOS static xcframework (SherpaOnnxC), Apache-2.0.
+- ONNX Runtime 1.28.2 static library, from the same sherpa-onnx release, MIT
+  (https://github.com/microsoft/onnxruntime).
+- Speaker-embedding model 3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx (CAM++, trained on
+  VoxCeleb by the 3D-Speaker project, https://github.com/modelscope/3D-Speaker), Apache-2.0.

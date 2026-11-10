@@ -51,11 +51,20 @@ final class SileroVAD: @unchecked Sendable {
         pending = []
     }
 
+    /// One scored frame: its 512 samples and their speech probability.
+    struct Frame: Sendable {
+        let samples: [Float]
+        let probability: Float
+    }
+
     /// Feeds 16 kHz mono samples; returns the speech probability of each whole frame they
     /// complete (leftover samples wait for the next call).
-    func process(_ samples: [Float]) throws -> [Float] {
+    func process(_ samples: [Float]) throws -> [Float] { try frames(samples).map(\.probability) }
+
+    /// As `process`, with each frame's samples (Voice ID reads exactly what Silero scored).
+    func frames(_ samples: [Float]) throws -> [Frame] {
         pending += samples
-        var out: [Float] = []
+        var out: [Frame] = []
         while pending.count >= SileroVAD.frame {
             let frame = Array(pending.prefix(SileroVAD.frame))
             pending.removeFirst(SileroVAD.frame)
@@ -71,7 +80,7 @@ final class SileroVAD: @unchecked Sendable {
             hidden = h
             cell = c
             tail = Array(frame.suffix(SileroVAD.context))
-            out.append(p[0].floatValue)
+            out.append(Frame(samples: frame, probability: p[0].floatValue))
         }
         return out
     }
@@ -267,6 +276,9 @@ final class MicSpeechSource: SpeechSource {
     /// The Silero model, touched only on the VAD queue (set and reset there too).
     final class VADModel: @unchecked Sendable {
         var vad: SileroVAD?
+        /// Voice ID's feed, called on the VAD queue with each batch of scored frames; it must
+        /// return at once (nil: nobody listening, nothing extra done).
+        var listener: (@Sendable ([SileroVAD.Frame]) -> Void)?
         init(_ vad: SileroVAD? = nil) { self.vad = vad }
     }
 
@@ -423,7 +435,8 @@ final class MicSpeechSource: SpeechSource {
                 guard let vad = model.vad else { return }
                 do {
                     // Inference outside the lock: the main thread never waits on it.
-                    let probs = try vad.process(samples)
+                    let frames = try vad.frames(samples)
+                    let probs = frames.map(\.probability)
                     // Frames run back from the newest sample; good to a few ms.
                     let newest = heard.addingTimeInterval(Double(samples.count) / SileroVAD.sampleRate)
                     state.withLock { s in
@@ -434,6 +447,7 @@ final class MicSpeechSource: SpeechSource {
                         }
                         s.lastError = nil
                     }
+                    if !frames.isEmpty { model.listener?(frames) }
                 } catch {
                     let why = error.localizedDescription
                     let first = state.withLock { s -> Bool in
@@ -447,6 +461,13 @@ final class MicSpeechSource: SpeechSource {
     }
 
     var framesScored: Int { state.withLock { $0.frames } }
+
+    /// Voice ID listens to the same frames (no second tap on the microphone); nil stops it.
+    /// While a Bluetooth call holds the mic, no frames come.
+    func listen(_ listener: (@Sendable ([SileroVAD.Frame]) -> Void)?) {
+        let model = self.model
+        queue.async { model.listener = listener }
+    }
 
     func stop() {
         guard started else { return }

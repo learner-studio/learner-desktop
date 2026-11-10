@@ -45,6 +45,8 @@ enum Paths {
     static let vault = env["AI_VAULT_DATA"] ?? real(NSHomeDirectory() + "/ai-vault-data", "ai-vault-data")
     /// ai-vault's logins and settings.
     static let aiVaultConfig = env["AI_VAULT_CONFIG"] ?? real(NSHomeDirectory() + "/.ai-vault/config.json", "ai-vault-config.json")
+    /// The app's own files in Application Support (Voice ID's voiceprint).
+    static let appSupport = env["LEARNER_APP_SUPPORT"] ?? real(NSHomeDirectory() + "/Library/Application Support/Learner Desktop", "app-support")
 }
 
 // MARK: - Logging

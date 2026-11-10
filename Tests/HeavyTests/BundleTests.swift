@@ -31,6 +31,11 @@ struct BundleTests {
         // The speech detector: its model ships in the bundle, and macOS can ask for the mic.
         #expect((info["NSMicrophoneUsageDescription"] as? String)?.isEmpty == false)
         #expect(FileManager.default.fileExists(atPath: app + "/Contents/Resources/silero-vad.mlmodelc/model.mil"))
+        // Voice ID: its model and sherpa-onnx's notices ship; sherpa-onnx is linked in statically.
+        #expect(FileManager.default.fileExists(atPath: app + "/Contents/Resources/" + VoiceID.modelFile))
+        #expect(FileManager.default.fileExists(atPath: app + "/Contents/Resources/sherpa-onnx-NOTICE.txt"))
+        let linked = ChildProcess.run("/usr/bin/otool", ["-L", exe], timeout: 30).output
+        #expect(!linked.lowercased().contains("sherpa") && !linked.lowercased().contains("onnxruntime"), "\(linked)")
         #expect(ChildProcess.run("/usr/bin/codesign", ["--verify", "--strict", app], timeout: 30).status == 0)
         // The microphone + Silero, started from the signed bundle exactly as the app does: a
         // callback that traps on AVAudio's thread (10-27) fails here, not in the owner's tray.

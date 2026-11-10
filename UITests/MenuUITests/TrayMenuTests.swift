@@ -104,6 +104,7 @@ final class TrayMenuTests: XCTestCase {
             (["Settings", "Sign AI Vault In From"], "Brave"),
             (["Settings", "Select Active Intervention Condition"], "✓"),
             (["Troubleshooting"], "View App Log"),
+            (["Voice ID"], "Am I Talking?"),
         ]
         for (path, shows) in submenus {
             for (i, step) in path.enumerated() {
