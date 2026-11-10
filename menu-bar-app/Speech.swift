@@ -294,7 +294,7 @@ final class MicSpeechSource: SpeechSource {
 
     private func open(now: Date) -> Bool {
         guard !started, !opening else { return true }
-        if inCall && inputIsBluetooth() { return false }
+        if inputIsBluetooth() { return false }
         // Loaded once (from disk, on this thread); a reopen only clears its memory of the last audio.
         do {
             let model = self.model
@@ -346,7 +346,7 @@ final class MicSpeechSource: SpeechSource {
         switch result {
         case .listening(let input):
             // A Bluetooth call began while it was starting: leave the mic to the call.
-            guard wanted, !(inCall && inputIsBluetooth()) else {
+            guard wanted, !inputIsBluetooth() else {
                 let mic = self.mic
                 mic.queue.async { mic.close() }
                 return
@@ -372,24 +372,28 @@ final class MicSpeechSource: SpeechSource {
 
     enum MicAction: Equatable { case none, open, release }
 
-    /// What the mic should do on this poll.
+    /// What the mic should do on this poll. A Bluetooth mic is never held, call or not: opening
+    /// a headset's mic switches it to its call profile (AirPods at 24 kHz) for every app on the
+    /// Mac, so Slack, Meet or music all get call-quality audio while this app listens (11-10:
+    /// Slack's mic broke, and a Slack call it did not detect was not covered by the call rule).
+    /// Timing then comes from screenpipe, as during a call.
     nonisolated static func decide(running: Bool, wanted: Bool, inCall: Bool, bluetooth: Bool, retryDue: Bool) -> MicAction {
-        let leaveToCall = inCall && bluetooth
+        let leaveToCall = bluetooth
         if running { return leaveToCall ? .release : .none }
         return wanted && !leaveToCall && retryDue ? .open : .none
     }
 
     private func manage(now: Date) {
-        let bluetooth = inCall && inputIsBluetooth()
+        let bluetooth = inputIsBluetooth()
         switch MicSpeechSource.decide(running: started, wanted: wanted, inCall: inCall, bluetooth: bluetooth, retryDue: now >= retryAt) {
         case .none: break
         case .release:
-            log.info("a call is on with a Bluetooth microphone: leaving it to the call, timing from screenpipe until it ends")
+            log.info("the microphone is Bluetooth: leaving it alone (holding it forces the headset's call profile on every app); timing from screenpipe")
             stop()
             stall = StallWatch()
             heldForCall = true
         case .open:
-            if heldForCall { log.info(inCall ? "the call moved off Bluetooth: taking the microphone back" : "call over: taking the microphone back") }
+            if heldForCall { log.info("the microphone is no longer Bluetooth: listening again") }
             heldForCall = false
             _ = open(now: now)
         }

@@ -91,8 +91,7 @@ struct StallWatchTests {
     }
 }
 
-// Who holds the microphone: during a call on a Bluetooth input (AirPods) Learner leaves it
-// to the call app; otherwise a mic that is not running (a failed restart mid-switch, as on
+// Who holds the microphone: a Bluetooth input (AirPods) is never held, call or not; otherwise a mic that is not running (a failed restart mid-switch, as on
 // 10-27) is opened again once its retry is due, never left off for good.
 @MainActor
 @Suite("Microphone hand-off", .tags(.light, .coach))
@@ -109,6 +108,19 @@ struct MicHandOffTests {
         #expect(M.decide(running: false, wanted: true, inCall: true, bluetooth: true, retryDue: true) == .none)
         #expect(M.decide(running: false, wanted: true, inCall: false, bluetooth: false, retryDue: false) == .none)
         #expect(M.decide(running: false, wanted: false, inCall: false, bluetooth: false, retryDue: true) == .none)
+        // A Bluetooth mic is never held, call or not (11-10: holding the AirPods mic forced their
+        // call profile on Slack): released if running, never opened.
+        #expect(M.decide(running: true, wanted: true, inCall: false, bluetooth: true, retryDue: true) == .release)
+        #expect(M.decide(running: false, wanted: true, inCall: false, bluetooth: true, retryDue: true) == .none)
+    }
+
+    @Test func startingOnABluetoothMicOutsideACallDoesNotTouchIt() {
+        let mic = MicSpeechSource(screenpipe: QuietSpeech())
+        mic.inCall = false
+        mic.inputIsBluetooth = { true }
+        #expect(mic.start() == false)
+        #expect(mic.problem == nil, "leaving a headset mic alone is not a problem")
+        #expect(mic.framesScored == 0)
     }
 
     @Test func startingDuringABluetoothCallDoesNotTouchTheMic() {
