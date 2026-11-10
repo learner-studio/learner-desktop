@@ -497,6 +497,15 @@ final class VoiceIDEngine: @unchecked Sendable {
 
     /// For tests: waits until the model queue has done what was handed to it.
     func drain() { queue.sync {} }
+
+    /// At quit: waits (bounded) for model work already handed to the queue. A model load still
+    /// running when the process exits races onnxruntime's static destructors and segfaults.
+    @discardableResult
+    func waitIdle(timeout: TimeInterval) -> Bool {
+        let done = DispatchSemaphore(value: 0)
+        queue.async { done.signal() }
+        return done.wait(timeout: .now() + timeout) == .success
+    }
 }
 
 // MARK: - What the indicator shows (pure)

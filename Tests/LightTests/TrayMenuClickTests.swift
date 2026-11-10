@@ -122,6 +122,10 @@ struct TrayMenuClickTests {
     @Test func everySettingClickChangesItAndCanBeUndone() throws {
         let (tray, _) = builtMenu()
         defer { withExtendedLifetime(tray) {} }
+        // Showing the pill warms up Voice ID's real model on its own queue, and hiding it
+        // does not stop that. Waited for: a load still running when the test process exits
+        // races onnxruntime's static destructors (11-10: signal 11 after the run had passed).
+        defer { VoiceIDController.shared.engine.queue.sync {} }
         let s = CoachSettings.shared
         try preservingSettings {
             let toggles: [(String, () -> Bool)] = [

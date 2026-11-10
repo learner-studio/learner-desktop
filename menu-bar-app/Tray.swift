@@ -555,6 +555,8 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // avoids the .terminateLater/reply handshake, which was seen to finish the work and
         // then never exit. What is left unsent stays in SQLite for the next launch.
         Scheduler.stop()
+        // Voice ID's model work finishes before exit (a load mid-flight would crash the exit).
+        if !VoiceIDController.shared.engine.waitIdle(timeout: 3) { log.warn("Voice ID still busy after 3 s; quitting anyway") }
         let (coach, uploader) = (talkMonitor, self.uploader)
         Shutdown.run(TrayAppManager.shutdownSteps(
             // Runs on the calling thread, which is main.
