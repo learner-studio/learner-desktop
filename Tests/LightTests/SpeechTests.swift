@@ -140,3 +140,33 @@ struct MicHandOffTests {
 private final class QuietSpeech: SpeechSource {
     func poll(now: Date, deliver: @escaping @MainActor ([SpeechSpan]) -> Void) {}
 }
+
+// The Bluetooth check the coach reads each second is a cached Bool: the slow Core Audio read
+// happens on the watcher's own queue, never in the reader (11-10: it held the main thread).
+@Suite("Bluetooth input watch", .tags(.light, .coach))
+struct BluetoothInputWatchTests {
+    @Test func readersGetTheCachedAnswerAndNeverWaitOnTheRead() {
+        let device = Locked(true)
+        let reads = Locked(0)
+        let gate = DispatchSemaphore(value: 0)
+        let watch = BluetoothInputWatch(read: {
+            reads.withLock { $0 += 1 }
+            gate.wait()   // a coreaudiod that takes its time
+            return device.value
+        }, listen: false)
+        // The first read is in flight and stuck: readers still answer at once (the default, false).
+        let started = Date()
+        for _ in 0..<100 { _ = watch.isBluetooth }
+        #expect(Date().timeIntervalSince(started) < 0.05, "a reader waited on the read")
+        #expect(watch.isBluetooth == false)
+        gate.signal()
+        watch.settle()
+        #expect(watch.isBluetooth == true, "the read's answer is cached")
+        #expect(reads.value == 1, "reading the cache does not read the device")
+        // The device changes: the next refresh (a listener or the period) picks it up.
+        device.value = false
+        gate.signal()
+        watch.refresh()
+        #expect(watch.isBluetooth == false)
+    }
+}

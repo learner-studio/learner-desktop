@@ -262,7 +262,10 @@ final class MicSpeechSource: SpeechSource {
     /// trips its switching. The coach times the owner from screenpipe meanwhile.
     var inCall = false
     private var heldForCall = false
-    var inputIsBluetooth: () -> Bool = { MicSpeechSource.defaultInputIsBluetooth() }
+    /// Read every coach tick on the main thread, so never a Core Audio call: a cached answer
+    /// (BluetoothInputWatch). 11-10: asking coreaudiod synchronously each second held the main
+    /// thread for seconds while it was busy, and the tray menu took that long to open.
+    var inputIsBluetooth: () -> Bool = { BluetoothInputWatch.shared.isBluetooth }
 
     /// What the main thread reads each second. Small and quick under its lock: the model
     /// runs outside it (`VADModel`), or every coach tick waits on CoreML (10-28: seconds).
@@ -399,7 +402,9 @@ final class MicSpeechSource: SpeechSource {
         }
     }
 
-    /// Whether the system's default input is Bluetooth (AirPods and other headsets).
+    /// Whether the system's default input is Bluetooth (AirPods and other headsets). A
+    /// synchronous round trip to coreaudiod, which can take seconds when it is busy: never on
+    /// the main thread (BluetoothInputWatch calls it on its own queue).
     nonisolated static func defaultInputIsBluetooth() -> Bool {
         var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice,
                                                  mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
@@ -518,6 +523,46 @@ final class MicSpeechSource: SpeechSource {
                 words.wordsOnly = true
                 return words
             })
+        }
+    }
+}
+
+
+/// The default input's transport, kept current off the main thread: re-read on its own queue
+/// when the default input changes (a Core Audio listener) and every few seconds besides, so
+/// readers get a Bool at once. A wrong answer lasts at most `period`.
+final class BluetoothInputWatch: Sendable {
+    static let shared = BluetoothInputWatch()
+    static let period: TimeInterval = 5
+
+    private let queue = DispatchQueue(label: "learner.bluetooth-input", qos: .utility)
+    private let state = Locked(false)
+    private let read: @Sendable () -> Bool
+
+    init(read: @escaping @Sendable () -> Bool = MicSpeechSource.defaultInputIsBluetooth, listen: Bool = true) {
+        self.read = read
+        queue.async { [self] in refresh() }
+        guard listen else { return }
+        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice,
+                                                 mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, queue) { [weak self] _, _ in
+            self?.refresh()
+        }
+        schedule()
+    }
+
+    var isBluetooth: Bool { state.value }
+
+    /// On `queue`.
+    func refresh() { state.value = read() }
+
+    /// Waits until the reads handed to the queue so far are done (tests).
+    func settle() { queue.sync {} }
+
+    private func schedule() {
+        queue.asyncAfter(deadline: .now() + Self.period) { [weak self] in
+            self?.refresh()
+            self?.schedule()
         }
     }
 }
