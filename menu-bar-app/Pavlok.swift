@@ -162,6 +162,10 @@ final class PavlokController: NSObject, Wearable, @preconcurrency CBCentralManag
 
     /// Consecutive failed connects to the remembered wristband before scanning afresh.
     static let rememberedAttempts = 3
+    /// How long one open scan runs before it stops and waits for the reconnect backoff. An
+    /// unfiltered scan that never ends kept BTLEServer at 60-100% CPU all day while the
+    /// wristband was away (11-10), which slowed the whole Mac, the tray menu included.
+    static let scanWindow: TimeInterval = 30
     static let connectTimeout: TimeInterval = 20
     static let ackTimeout: TimeInterval = 5
 
@@ -192,6 +196,9 @@ final class PavlokController: NSObject, Wearable, @preconcurrency CBCentralManag
     private(set) var radioAnswered = false
     private(set) var cloudAnswered = false
     private var reconnect = Backoff(base: 2, max: 60)
+    /// Between open scans that found nothing: 1 min doubling to 10 (the radio rests while the
+    /// wristband is away), reset once one connects.
+    private var scanPause = Backoff(base: 60, max: 600)
     private var reconnectWork: DispatchWorkItem?
     /// Consecutive connects that never became usable.
     private var failedConnects = 0
@@ -323,6 +330,21 @@ final class PavlokController: NSObject, Wearable, @preconcurrency CBCentralManag
             }
             isBleScanning = true
             central.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
+            // In bursts: nothing found within the window, stop and try again after the backoff.
+            let stop = DispatchWorkItem { [weak self] in
+                guard let self, self.isBleScanning, !self.isBleConnected else { return }
+                self.central?.stopScan()
+                self.isBleScanning = false
+                let wait = self.scanPause.failed()
+                self.log.noisy("no wristband found in \(Int(PavlokController.scanWindow)) s; scanning again in \(Job.describe(wait))")
+                self.statusChanged()
+                guard self.connectionRequested else { return }
+                let again = DispatchWorkItem { [weak self] in self?.startBleScan(force: true) }
+                self.reconnectWork = again
+                DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: again)
+            }
+            reconnectWork = stop
+            DispatchQueue.main.asyncAfter(deadline: .now() + PavlokController.scanWindow, execute: stop)
         }
         statusChanged()
     }
@@ -498,6 +520,7 @@ final class PavlokController: NSObject, Wearable, @preconcurrency CBCentralManag
         if !wasUsable && !characteristics.isEmpty {
             failedConnects = 0
             reconnect.succeeded()
+            scanPause.succeeded()
             log.info("ready: \(characteristics.keys.map(\.rawValue).sorted().joined(separator: ", "))")
         }
         statusChanged()

@@ -180,7 +180,8 @@ struct TrayLoadingTests {
         }
         let first = launch()
         first.job.kick("test")
-        #expect(waitFor(5) { first.job.snapshot.failures > 0 })
+        // hasRun is set once the outcome is saved: relaunching before that reads the old state.
+        #expect(waitFor(5) { first.job.snapshot.failures > 0 && first.job.hasRun })
         let relaunched = launch()
         #expect(relaunched.job.snapshot.failures > 0, "the backoff survives the restart")
         #expect(!relaunched.job.hasRun)
