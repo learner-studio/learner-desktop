@@ -311,3 +311,69 @@ struct VoiceIDTests {
         #expect(!pill.intersects(coach) && !pill.intersects(mastery))
     }
 }
+
+// "Enroll My Voice…" from the tray: the window opens and stays open while the app is not the
+// active one (11-11: it vanished as the menu closed, and on a click on another screen), and an
+// existing voiceprint is only replaced on the owner's word.
+@MainActor
+@Suite("Voice ID enrollment window", .tags(.light, .voiceID), .timeLimit(.minutes(1)), .quietLog, .serialized)
+struct VoiceEnrollWindowTests {
+    static func controller(voiceprint: Voiceprint?) -> VoiceIDController {
+        _ = NSApplication.shared   // NSApp, which the window and alert use, whichever test runs first
+        return VoiceIDController(mic: nil, engine: VoiceIDEngine(modelName: "fake.onnx", makeEmbedder: { VoiceIDTests.FakeEmbedder() }, save: { _ in }),
+                          defaults: ScratchDefaults("voice-enroll"), modelPresent: true, voiceprint: voiceprint)
+    }
+
+    static let enrolled = Voiceprint(vector: [1, 0], model: "fake.onnx", enrolledAt: Date(timeIntervalSince1970: 1_800_000_000),
+                                     segments: 8, speechSeconds: 60, calibration: "test")
+
+    @Test func theWindowOpensAndStaysUpWhenTheAppIsNotActive() throws {
+        let c = Self.controller(voiceprint: nil)
+        var asked = 0
+        c.confirmReplace = { _ in asked += 1; return true }
+        c.showEnrollment()
+        let w = try #require(c.panel?.window)
+        defer { w.orderOut(nil) }
+        #expect(asked == 0, "nothing to replace: no question")
+        #expect(w.isVisible)
+        #expect(w.hidesOnDeactivate == false, "a menu-bar app is rarely active: the window must not hide with it")
+        #expect(w.collectionBehavior.contains(.moveToActiveSpace))
+    }
+
+    @Test func anEnrolledVoiceIsReplacedOnlyOnTheOwnersWord() throws {
+        let kept = Self.controller(voiceprint: Self.enrolled)
+        var shownTo: [Voiceprint] = []
+        kept.confirmReplace = { shownTo.append($0); return false }
+        kept.showEnrollment()
+        #expect(shownTo == [Self.enrolled], "asked once, about the saved voiceprint")
+        #expect(kept.panel?.window?.isVisible != true, "kept: no enrollment window")
+        #expect(kept.voiceprint == Self.enrolled)
+
+        let replaced = Self.controller(voiceprint: Self.enrolled)
+        replaced.confirmReplace = { _ in true }
+        replaced.showEnrollment()
+        let w = try #require(replaced.panel?.window)
+        defer { w.orderOut(nil) }
+        #expect(w.isVisible, "replace: the enrollment window opens")
+        // Chosen again while it is open: brought forward, not asked again.
+        var askedAgain = 0
+        replaced.confirmReplace = { _ in askedAgain += 1; return false }
+        replaced.showEnrollment()
+        #expect(askedAgain == 0)
+        #expect(w.isVisible, "a Cancel elsewhere never closes the open window")
+    }
+
+    @Test func aBluetoothMicSaysWhatToDo() {
+        let mic = MicSpeechSource(screenpipe: SilentSpeech())
+        mic.inputIsBluetooth = { true }
+        let c = VoiceIDController(mic: mic, engine: VoiceIDEngine(modelName: "fake.onnx", makeEmbedder: { VoiceIDTests.FakeEmbedder() }, save: { _ in }),
+                                  defaults: ScratchDefaults("voice-enroll"), modelPresent: true, voiceprint: nil)
+        #expect(c.enrollmentBlocker()?.contains("Bluetooth headset") == true)
+        #expect(c.enrollmentBlocker()?.contains("Sound › Input") == true)
+    }
+}
+
+@MainActor
+private final class SilentSpeech: SpeechSource {
+    func poll(now: Date, deliver: @escaping @MainActor ([SpeechSpan]) -> Void) {}
+}

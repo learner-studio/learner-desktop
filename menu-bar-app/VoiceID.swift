@@ -645,7 +645,9 @@ final class VoiceEnrollPanel: NSObject, NSWindowDelegate {
         if !underway { ready() }
         w.center()
         NSApp.activate()
-        w.makeKeyAndOrderFront(nil)
+        // Front even when activation is refused (macOS's cooperative activation).
+        w.orderFrontRegardless()
+        w.makeKey()
     }
 
     private func make() -> NSPanel {
@@ -655,6 +657,10 @@ final class VoiceEnrollPanel: NSObject, NSWindowDelegate {
         w.title = "Enroll My Voice"
         w.isReleasedWhenClosed = false
         w.level = .floating
+        // A menu-bar app is rarely the active app: an NSPanel's default hides it whenever the app
+        // is not, so it vanished as the menu closed or on a click on another screen (11-11).
+        w.hidesOnDeactivate = false
+        w.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         w.delegate = self
         let v = NSView(frame: NSRect(origin: .zero, size: size))
         message.frame = NSRect(x: 20, y: 92, width: size.width - 40, height: 60)
@@ -746,7 +752,7 @@ final class VoiceIDController {
     let modelPresent: Bool
     private var timer: Timer?
     private var listening = false
-    private var panel: VoiceEnrollPanel?
+    private(set) var panel: VoiceEnrollPanel?
     private let log = Log("VoiceID")
 
     init(mic: MicSpeechSource?, engine: VoiceIDEngine = VoiceIDEngine(), defaults: UserDefaults = .standard,
@@ -824,18 +830,56 @@ final class VoiceIDController {
 
     // MARK: Enrollment
 
+    /// Asks before an enrollment replaces the saved voiceprint (tests answer for the owner).
+    var confirmReplace: @MainActor (Voiceprint) -> Bool = { existing in
+        let alert = NSAlert()
+        alert.messageText = "A voice is already enrolled"
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        alert.informativeText = "This Mac has a voiceprint from \(f.string(from: existing.enrolledAt)) "
+            + "(\(existing.segments) segments, \(Int(existing.speechSeconds)) s of speech). Enrolling again replaces it."
+        alert.addButton(withTitle: "Replace It")
+        alert.addButton(withTitle: "Cancel")
+        // Like the enrollment window: an inactive menu-bar app would hide it, and a hidden modal
+        // alert blocks the whole app with no Dock icon to bring it back.
+        alert.window.hidesOnDeactivate = false
+        alert.window.level = .floating
+        NSApp.activate()
+        alert.window.orderFrontRegardless()
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
     func showEnrollment() {
+        // Already open: bring it forward (its own Start is the decision; no second question).
+        if let w = panel?.window, w.isVisible {
+            NSApp.activate()
+            w.orderFrontRegardless()
+            return
+        }
+        let underway = engine.enrollmentUnderway
+        if !underway, let existing = voiceprint {
+            guard confirmReplace(existing) else {
+                log.info("enrollment not started: the owner kept the voiceprint from \(existing.enrolledAt)")
+                return
+            }
+            log.info("enrolling again: the owner chose to replace the voiceprint from \(existing.enrolledAt)")
+        }
+        log.info(underway ? "enrollment window shown (enrollment under way)" : "enrollment window shown")
         let p = panel ?? VoiceEnrollPanel()
         panel = p
         p.onStart = { [weak self] in self?.beginEnrollment() }
         p.onCancel = { [weak self] in self?.cancelEnrollment() }
-        p.show(underway: engine.enrollmentUnderway)
+        p.show(underway: underway)
     }
 
     /// Why enrollment cannot start now, or nil.
     func enrollmentBlocker() -> String? {
         if !modelPresent { return "the voice model is missing (run scripts/fetch-voice-id.sh, then rebuild the app)" }
         guard let mic else { return "the microphone is not available" }
+        if mic.inputIsBluetooth() {
+            return "your microphone is a Bluetooth headset, which this app leaves alone: choose the MacBook's microphone (or a wired one) in System Settings › Sound › Input, then try again"
+        }
         if !mic.isListening { return "the microphone is not available" + (mic.problem.map { ": \($0)" } ?? " (it is not running)") }
         return nil
     }
