@@ -251,7 +251,9 @@ extension TrayAppManager {
         if coach.currentStreak > 0 {
             add("   ↺ Reset Speaking Streak (\(coach.formattedDuration))", #selector(resetStreakAction))
         }
-        if let line = mastery.baseline?.coachLine { add("   \(line)") }
+        if mastery.baseline?.coachLine != nil || masteryLoading {
+            live { t in t.mastery.baseline?.coachLine.map { "   \($0)" } ?? (t.masteryLoading ? "   📊 Coach baseline: \(Self.loading)" : nil) }
+        }
         statusMenu.addItem(NSMenuItem.separator())
     }
 
@@ -259,7 +261,7 @@ extension TrayAppManager {
         let pavlok = PavlokController.shared
         let settings = CoachSettings.shared
         let menu = NSMenu()
-        add("Connection: \(pavlok.connectionStatusText)", to: menu).image =
+        live(to: menu) { _ in "Connection: \(pavlok.connectionStatusText)" }.image =
             PavlokDogIcon.image(connected: pavlok.isBleConnected, isScanning: pavlok.isBleScanning)
         add(settings.wearableEnabled ? "✓ Wearable Operant Feedback Enabled" : "○ Wearable Feedback Disabled (Safe Default)",
             #selector(togglePavlokEnabled), to: menu)
@@ -299,10 +301,10 @@ extension TrayAppManager {
         add("🔍 Scan & Connect via Bluetooth", #selector(scanPavlokBluetooth), to: menu)
         add(settings.apiToken.isEmpty ? "🔑 Configure Cloud Backup Token (Optional)..." : "🔑 Change Cloud Backup Token (Configured)...",
             #selector(promptPavlokToken), to: menu)
-        let state = !settings.wearableEnabled ? "⚪ Disabled" : (pavlok.isBleConnected ? "🟢 Connected" : "🟡 Not connected")
-        let parent = NSMenuItem(title: "⚡ Pavlok: \(state)", action: nil, keyEquivalent: "")
+        let state = { "⚡ Pavlok: \(PavlokController.summary(pavlok.link, enabled: settings.wearableEnabled))" }
+        let parent = NSMenuItem(title: state(), action: nil, keyEquivalent: "")
         parent.submenu = menu
-        return parent
+        return track(parent) { _ in state() }
     }
 
     /// One phase's cue panel in its submenu, built once and kept: on this macOS each of its

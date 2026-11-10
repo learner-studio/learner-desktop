@@ -109,6 +109,9 @@ func settle(_ condition: () -> Bool = { false }, within seconds: Double = 1) asy
         #expect(ScreenpipeSpeechSource.parseDate("2026-10-21T16:10:12-04:00") != nil)
         #expect(ScreenpipeSpeechSource.parseDate("2026-10-21T15:12:11.241-04:00") != nil)
         #expect(ScreenpipeSpeechSource.parseDate("2026-10-21 15:12:11") == nil)
+        // The instant itself, offset and fraction included (rows are timed by it).
+        #expect(ScreenpipeSpeechSource.parseDate("2026-10-21T16:10:12-04:00")?.timeIntervalSince1970 == 1_792_613_412)
+        #expect(abs((ScreenpipeSpeechSource.parseDate("2026-10-21T19:12:11.241Z")?.timeIntervalSince1970 ?? 0) - 1_792_609_931.241) < 0.0005)
         #expect(!ScreenpipeSpeechSource.isSpeech("Sous-titrage ST' 501"))
         #expect(!ScreenpipeSpeechSource.isSpeech("[music] (laughs) ok"))
         #expect(ScreenpipeSpeechSource.isSpeech("we should ship it"))

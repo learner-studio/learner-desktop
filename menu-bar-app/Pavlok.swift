@@ -187,6 +187,10 @@ final class PavlokController: NSObject, Wearable, @preconcurrency CBCentralManag
     private(set) var bleDeviceName: String?
     /// The cloud relay accepts the token.
     private(set) var isOnline = false
+    /// The radio has reported its state once; the relay has answered for the current token.
+    /// Until then the menu says loading rather than "disconnected".
+    private(set) var radioAnswered = false
+    private(set) var cloudAnswered = false
     private var reconnect = Backoff(base: 2, max: 60)
     private var reconnectWork: DispatchWorkItem?
     /// Consecutive connects that never became usable.
@@ -209,7 +213,9 @@ final class PavlokController: NSObject, Wearable, @preconcurrency CBCentralManag
             guard let self = self else { return }
             switch key {
             case .wearableEnabled, .keepConnected: self.applyConnectionWish()
-            case .apiToken: self.updateConnectionStatus()
+            case .apiToken:
+                self.cloudAnswered = false
+                self.updateConnectionStatus()
             default: self.statusChanged()
             }
         }
@@ -225,21 +231,57 @@ final class PavlokController: NSObject, Wearable, @preconcurrency CBCentralManag
         updateConnectionStatus()
     }
 
-    var connectionStatusText: String {
-        if !connectionRequested { return "⚪ Disabled (Safe Default)" }
-        if isBleConnected {
-            let battery = batteryLevel.map { " • \($0)% 🔋" } ?? ""
-            return "🟢 Connected (\(bleDeviceName ?? "Pavlok 3") via Bluetooth\(battery) • <15ms)"
+    /// What the menu knows of the link now (no I/O).
+    struct Link: Equatable {
+        var requested = false
+        var radioAnswered = true
+        var connected = false
+        var connecting = false
+        var scanning = false
+        var name: String?
+        var battery: Int?
+        var token = false
+        var cloudAnswered = true
+        var online = false
+    }
+
+    var link: Link {
+        Link(requested: connectionRequested, radioAnswered: central == nil || radioAnswered, connected: isBleConnected,
+             connecting: peripheral?.state == .connecting, scanning: isBleScanning, name: bleDeviceName, battery: batteryLevel,
+             token: !settings.apiToken.isEmpty, cloudAnswered: cloudAnswered, online: isOnline)
+    }
+
+    var connectionStatusText: String { PavlokController.connectionText(link) }
+
+    static func connectionText(_ l: Link) -> String {
+        if !l.requested { return "⚪ Disabled (Safe Default)" }
+        if l.connected {
+            let battery = l.battery.map { " • \($0)% 🔋" } ?? ""
+            return "🟢 Connected (\(l.name ?? "Pavlok 3") via Bluetooth\(battery) • <15ms)"
         }
-        if isBleScanning { return "🔵 Searching for Bluetooth Wristband..." }
-        if !settings.apiToken.isEmpty { return isOnline ? "🟡 Online (Cloud Relay Backup • ~400ms)" : "🟡 Cloud Configured (Bluetooth Disconnected)" }
+        if !l.radioAnswered { return TrayAppManager.loading }
+        if l.connecting { return "🔵 Connecting to \(l.name ?? "Pavlok 3")..." }
+        if l.scanning { return "🔵 Searching for Bluetooth Wristband..." }
+        if l.token {
+            if !l.cloudAnswered { return "🟡 Cloud relay: \(TrayAppManager.loading)" }
+            return l.online ? "🟡 Online (Cloud Relay Backup • ~400ms)" : "🟡 Cloud Configured (Bluetooth Disconnected)"
+        }
         return "🔴 Bluetooth Disconnected (Turn on Pavlok)"
+    }
+
+    /// The "⚡ Pavlok:" line's state.
+    static func summary(_ l: Link, enabled: Bool) -> String {
+        if !enabled { return "⚪ Disabled" }
+        if l.connected { return "🟢 Connected" }
+        return l.requested && !l.radioAnswered ? TrayAppManager.loading : "🟡 Not connected"
     }
 
     /// Re-checks the cloud token (menu open, token change).
     func updateConnectionStatus() {
         guard isEnabled, !settings.apiToken.isEmpty else {
+            // Not asked: nothing to wait for.
             isOnline = false
+            cloudAnswered = true
             statusChanged()
             return
         }
@@ -247,6 +289,7 @@ final class PavlokController: NSObject, Wearable, @preconcurrency CBCentralManag
             guard let self = self else { return }
             if ok != self.isOnline { self.log.info("cloud relay \(ok ? "accepts" : "rejects") the token") }
             self.isOnline = ok
+            self.cloudAnswered = true
             self.statusChanged()
         }
     }
@@ -362,6 +405,7 @@ final class PavlokController: NSObject, Wearable, @preconcurrency CBCentralManag
         @unknown default: auth = "unknown"
         }
         log.info("radio state: \(state) • permission: \(auth)")
+        radioAnswered = true
         if central.state == .poweredOn {
             startBleScan(force: true)
         } else {

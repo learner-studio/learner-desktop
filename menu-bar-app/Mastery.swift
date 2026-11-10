@@ -712,12 +712,22 @@ enum MasteryTrayRow {
 }
 
 extension TrayAppManager {
+    /// No baseline yet and the feed's first run since launch is still to finish: its lines say
+    /// loading. Not while offline (that says waiting), and not when that run is held back by a
+    /// failure saved from the last session (a backoff of up to 30 min: nothing is loading).
+    var masteryLoading: Bool {
+        mastery.baseline == nil && !mastery.job.hasRun && mastery.reachable != .offline && mastery.job.snapshot.failures == 0
+    }
+
     /// "🎓 Mastery", after the learner-server lines: the learning baseline, or why it is missing.
     func addMasterySection() {
         let feed = mastery
         header("🎓 Mastery")
         if feed.reachable == .offline { add("   ⏳ waiting for learner-server") }
-        add("   " + (feed.baseline?.learningLine ?? "📚 Learning baseline: not available yet"))
+        live { t in
+            "   " + (t.mastery.baseline?.learningLine
+                     ?? "📚 Learning baseline: \(t.masteryLoading ? Self.loading : "not available yet")")
+        }
         let waiting = feed.pending.count
         if waiting > 0 { add("   ⏸ \(waiting) reading\(waiting == 1 ? "" : "s") to show\(feed.holdDuringCalls && talkMonitor.activeCallApp != nil ? " after the call" : "")") }
         // Recent gains: each opens the concept on the Map (and tells the server it was opened).

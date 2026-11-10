@@ -13,6 +13,8 @@ struct AppStatus: Equatable {
         case degraded(String)
         case stopped(String)
     }
+    /// Filled by a collection: until the first, the menu shows its lines as loading.
+    var loaded = false
     var capture: Capture = .unknown
     /// Assumed until checked, so a launch does not flash red.
     var serverReachable = true
@@ -27,6 +29,8 @@ struct AppStatus: Equatable {
     var cliSessions: String?
     /// Lasting problems from jobs, helpers and the trial database.
     var problems: [Problem] = []
+    /// The screenpipe update check's last run-index line (read from disk, so not by the menu).
+    var lastUpdateCheck: String?
 
     var chats: Int { chatgptChats + claudeChats }
 }
@@ -171,6 +175,7 @@ enum StatusProbe {
     static func collect(previous: AppStatus, helpers: [ManagedHelper], appAgentPlist: String,
                         uploaderActive: Bool = false, extraProblems: [Problem] = []) -> AppStatus {
         var s = AppStatus()
+        s.loaded = true
         s.capture = screenpipe()
         let server = HTTPProbe.get(serverHealthURL)
         s.serverReachable = server.status == 200

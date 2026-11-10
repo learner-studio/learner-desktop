@@ -402,8 +402,15 @@ final class Job: Sendable {
         var backoff: Backoff
         var running = false
         var rerun = false
+        /// A run has finished since launch (the tray shows "loading…" until then).
+        var finished = false
+        /// Numbers each state to save, so saves made outside `live` never land out of order.
+        var saveSeq = 0
     }
     private let live: Mutex<Live>
+    /// Held while the state file is written. Not `live`: the main thread ticks every job
+    /// each second and reads `snapshot` for the menu, and must never wait on a disk.
+    private let saving = Mutex(0)
 
     init(_ name: String, period: TimeInterval, firstRun: TimeInterval = 0, backoff: Backoff,
          problemGrace: TimeInterval = 0, quiet: Bool = false, stateDir: String = Job.stateDir,
@@ -436,6 +443,8 @@ final class Job: Sendable {
     }
 
     var snapshot: State { live.withLock { $0.state } }
+    /// A run has finished since launch.
+    var hasRun: Bool { live.withLock { $0.finished } }
 
     /// What the tray shows: blocked, or failing for longer than `problemGrace`.
     var problem: String? {
@@ -480,15 +489,15 @@ final class Job: Sendable {
         let started = Date()
         let outcome = body(self)
         let took = String(format: "%.1f s", Date().timeIntervalSince(started))
-        let again: Bool = live.withLock { l in
-            defer { l.running = false; l.rerun = false }
-            let again = l.rerun
+        // Still `running` while the state is saved: a kick meanwhile queues a rerun as before.
+        // `lastRun` is set only after the save, so whoever sees the run done sees it saved.
+        let (ranAt, toSave): (Date?, (seq: Int, state: State)?) = live.withLock { l in
             let now = Date()
             switch outcome {
             case .idle:
                 if !quiet { log.info("nothing to do (\(took))") }
                 l.state.nextRun = now.addingTimeInterval(period)
-                return again
+                return (nil, nil)
             case let .ok(summary, next):
                 if l.state.problemSince != nil { log.info("recovered: \(summary)") }
                 else if !quiet { log.info("ok in \(took): \(summary)") }
@@ -529,18 +538,29 @@ final class Job: Sendable {
                 l.state.summary = summary
             }
             let routine = quiet && l.state.failures == 0 && l.state.problemSince == nil && !l.state.blocked
-            l.state.lastRun = now
-            // Under the lock, so two saves can never land out of order.
-            if !routine { save(l.state) }
-            return again
+            guard !routine else { return (now, nil) }
+            l.saveSeq += 1
+            var saved = l.state
+            saved.lastRun = now
+            return (now, (l.saveSeq, saved))
+        }
+        if let toSave { save(toSave.state, seq: toSave.seq) }
+        let again: Bool = live.withLock { l in
+            defer { l.running = false; l.rerun = false; l.finished = true }
+            if let ranAt { l.state.lastRun = ranAt }
+            return l.rerun
         }
         if again { start(reason: "queued while running") }
     }
 
-    private func save(_ state: State) {
-        guard let data = try? JSONEncoder().encode(state) else { return }
-        do { try data.write(to: URL(fileURLWithPath: statePath), options: .atomic) }
-        catch { log.warn("cannot save job state: \(error.localizedDescription)") }
+    /// Outside `live`; a state older than one already written is dropped.
+    private func save(_ state: State, seq: Int) {
+        saving.withLock { written in
+            guard seq > written, let data = try? JSONEncoder().encode(state) else { return }
+            written = seq
+            do { try data.write(to: URL(fileURLWithPath: statePath), options: .atomic) }
+            catch { log.warn("cannot save job state: \(error.localizedDescription)") }
+        }
     }
 
     static func describe(_ t: TimeInterval) -> String {
@@ -596,13 +616,19 @@ enum Scheduler {
         for job in Job.all { guarded(job.name, job.tick) }
     }
 
+    /// A tick that holds the main thread this long is logged: a click waits behind it.
+    static let slowTick: TimeInterval = 0.25
+
     /// An Objective-C exception raised in one task stops that tick of it, never the clock:
     /// one escaping the timer leaves it marked as firing and it never fires again (10-28:
     /// the coach, the tray and every job stood still for an hour behind a red tray).
     static func guarded(_ name: String, _ run: () -> Void) {
+        let started = ProcessInfo.processInfo.systemUptime
         if let raised = LDCatchException(run) {
             Log("Scheduler").error("\(name) raised \(raised.name.rawValue): \(raised.reason ?? "no reason"); the clock keeps running")
         }
+        let took = ProcessInfo.processInfo.systemUptime - started
+        if took >= slowTick { Log("Scheduler").warn("\(name) held the main thread for \(Int(took * 1000)) ms") }
     }
 }
 

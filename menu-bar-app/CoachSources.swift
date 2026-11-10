@@ -259,21 +259,14 @@ final class ScreenpipeSpeechSource: SpeechSource {
         return text.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }.count >= 2
     }
 
-    // screenpipe writes both "…T16:10:12-04:00" and "…T15:12:11.241-04:00"; one formatter
-    // handles only one of them. nonisolated(unsafe): ISO8601DateFormatter is thread-safe and
-    // these two are never changed after setup.
-    nonisolated(unsafe) private static let plain: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime]
-        return f
-    }()
-    nonisolated(unsafe) private static let fractional: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f
-    }()
+    // screenpipe writes both "…T16:10:12-04:00" and "…T15:12:11.241-04:00"; one style
+    // parses only one of them. Format styles, not ISO8601DateFormatter: that one copies an
+    // ICU formatter on every call (~80 µs, measured 11-10), and each row is parsed on the
+    // main thread; these parse in ~2 µs.
+    nonisolated private static let plain = Date.ISO8601FormatStyle()
+    nonisolated private static let fractional = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
 
-    nonisolated static func parseDate(_ value: String) -> Date? { fractional.date(from: value) ?? plain.date(from: value) }
+    nonisolated static func parseDate(_ value: String) -> Date? { (try? fractional.parse(value)) ?? (try? plain.parse(value)) }
 }
 
 // MARK: - screenpipe calls

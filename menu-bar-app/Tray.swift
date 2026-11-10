@@ -28,20 +28,34 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Where the mastery links go: the web root the server publishes (tests set it).
     var masteryWeb: () -> String? = { PairingLink.shared.held?.web }
     var cuePanels: [CuePhase: (CueSubmenuView, NSMenu)] = [:]
+    /// What a line whose data arrives later says until it does (the Status job's first
+    /// collection, the mastery feed's first run, the wristband's radio and relay).
+    nonisolated static let loading = "loading…"
+    /// Lines whose data can arrive while the menu is open: retitled in place when it does
+    /// (nil hides one). Set by each build.
+    private var liveLines: [(item: NSMenuItem, title: @MainActor (TrayAppManager) -> String?)] = []
+    /// Between menuWillOpen and menuDidClose (tests set it).
+    var menuIsOpen = false
+    /// The open being timed (by when its build ended), until its menu is on screen.
+    private var openTiming: (built: TimeInterval, timing: MenuOpenTiming)?
     private lazy var statusJob = Job("Status", period: 8, backoff: Backoff(base: 8, max: 60), quiet: true) { [weak self] _ in
         guard let self = self else { return .idle }
         let (previous, helpers, uploaderActive, speechProblem) = DispatchQueue.main.sync {
             (self.status, self.uploader.map { [$0] } ?? [], self.uploader != nil,
              (self.talkMonitor.speech as? MicSpeechSource)?.problem)
         }
-        let next = StatusProbe.collect(previous: previous, helpers: helpers, appAgentPlist: self.appAgentPlist,
+        var next = StatusProbe.collect(previous: previous, helpers: helpers, appAgentPlist: self.appAgentPlist,
                                        uploaderActive: uploaderActive, extraProblems: speechProblem.map { [Problem(source: "Speech", text: $0)] } ?? [])
+        // Disk and LaunchServices reads here, off the main thread, not in the menu or the tray.
+        next.lastUpdateCheck = ScreenpipeUpdateCheck.shared.lastRunSummary
+        let screenpipe = NSRunningApplication.runningApplications(withBundleIdentifier: "screenpi.pe").first?.processIdentifier
         if let appVersion = ScreenpipeUpdateCheck.installedAppVersion() {
             CaptureEnvironment.screenpipeAppVersion = appVersion
         }
+        let collected = next
         DispatchQueue.main.async {
-            self.ensureScreenpipeSkipsSignIn()
-            self.apply(next)
+            self.ensureScreenpipeSkipsSignIn(pid: screenpipe)
+            self.apply(collected)
         }
         return .ok("collected")
     }
@@ -129,6 +143,9 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.applyTopology() } }
         }
         startMastery()
+        // Mastery, the wristband and the update check have no callback into the tray: an
+        // open menu looks again each second (nothing when it is closed).
+        Scheduler.every(1, "menu") { [weak self] in self?.refreshOpenMenu() }
         Scheduler.start()
         // The cue panels are slow to build (see cuePanel): ready before the first click.
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
@@ -136,30 +153,63 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// Main thread: swap in a fresh status and redraw the tray.
+    /// Main thread: swap in a fresh status and redraw the tray (and an open menu's lines).
     func apply(_ next: AppStatus) {
         status = next
         updateTrayButton()
+        refreshOpenMenu()
     }
 
-    /// Draws from the last status snapshot (no I/O), then refreshes it in the background.
+    /// Draws from the last snapshots (no I/O; what has not arrived yet says loading), then
+    /// refreshes them in the background. Timed from the click to the menu on screen, and
+    /// logged when slow with what the main thread did meanwhile, so a slow open says
+    /// whether it was this app.
     func menuWillOpen(_ menu: NSMenu) {
+        let asked = ProcessInfo.processInfo.systemUptime
+        let click = NSApp.currentEvent?.timestamp ?? asked
+        let before = stallWatch.before(click: click, now: asked)
         stallWatch.menu(open: true)
-        // How long the click waited before AppKit asked for the menu, then the build.
-        let waited = NSApp.currentEvent.map { ProcessInfo.processInfo.systemUptime - $0.timestamp } ?? 0
-        let started = Date()
+        menuIsOpen = true
         rebuildMenu()
-        let ms = Int(Date().timeIntervalSince(started) * 1000)
-        if ms > 100 || waited > 0.3 { log.warn("menu opened \(Int(waited * 1000)) ms after the click, built in \(ms) ms") }
+        let built = ProcessInfo.processInfo.systemUptime
+        openTiming = (built, MenuOpenTiming(waited: asked - click, build: built - asked, mainCPU: before.cpu, mainBlocked: before.blocked))
+        // The first pass of the menu's own loop: the menu is on screen. (One that never ran
+        // runs in a later menu's loop: `built` tells it is not that menu's.)
+        RunLoop.main.perform(inModes: [.eventTracking]) { [weak self] in
+            MainActor.assumeIsolated { self?.menuShown(built: built, after: ProcessInfo.processInfo.systemUptime - built) }
+        }
         statusJob.kick("menu opened")
         PavlokController.shared.updateConnectionStatus()
     }
 
-    func menuDidClose(_ menu: NSMenu) { stallWatch.menu(open: false) }
+    private func menuShown(built: TimeInterval?, after: TimeInterval?) {
+        guard let open = openTiming, built == nil || built == open.built else { return }
+        var timing = open.timing
+        openTiming = nil
+        timing.shown = after
+        if timing.slow { log.warn(timing.line) }
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        menuShown(built: nil, after: nil)   // closed before its loop ran: logged without it
+        menuIsOpen = false
+        stallWatch.menu(open: false)
+    }
+
+    /// Retitles the open menu's live lines from what has arrived since it was built.
+    func refreshOpenMenu() {
+        guard menuIsOpen else { return }
+        for line in liveLines {
+            let title = line.title(self)
+            if let title, line.item.title != title { line.item.title = title }
+            if line.item.isHidden != (title == nil) { line.item.isHidden = title == nil }
+        }
+    }
 
     // MARK: - Menu Bar Tray Dropdown Menu
     func rebuildMenu() {
         statusMenu.removeAllItems()
+        liveLines = []
 
         header("Learner Desktop", size: 13)
         statusMenu.addItem(NSMenuItem.separator())
@@ -167,15 +217,11 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         addSpeakingCoachSection()
 
         // --- Capture, chats, server ---
-        let capture: String
-        switch status.capture {
-        case .unknown: capture = "… checking"
-        case .recording: capture = "🟢 Recording"
-        case let .degraded(why): capture = "🟡 Degraded — \(why)"
-        case let .stopped(why): capture = "🔴 Stopped — \(why)"
+        live { "📹 Screenpipe: \($0.captureText)" }
+        live { t in
+            let s = t.status
+            return "🗄️ AI Vault: " + (s.loaded ? "\(s.chats) Archived (ChatGPT \(s.chatgptChats) · Claude \(s.claudeChats))" : Self.loading)
         }
-        add("📹 Screenpipe: \(capture)")
-        add("🗄️ AI Vault: \(status.chats) Archived (ChatGPT \(status.chatgptChats) · Claude \(status.claudeChats))")
         let export = VaultExport.shared
         _ = add("   └─ Last export: " + (export.lastRun.map { DateFormatter.localizedString(from: $0, dateStyle: .none, timeStyle: .short) + " — " } ?? "") + export.lastSummary)
         for provider in export.expiredLogins.sorted() {
@@ -188,15 +234,20 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         _ = add("   📥 Pull Latest Chats (Incremental Sweep)", #selector(pullVaultChats))
 
         let outbox = OutboxSender.shared
-        let serverState = !status.serverReachable ? "🔴 unreachable" : outbox.keyProblem ? "🔑 no working device key" : "🟢 reachable"
-        add("☁️ learner-server: \(serverState)")
+        live { t in
+            "☁️ learner-server: " + (!t.status.loaded ? Self.loading : !t.status.serverReachable ? "🔴 unreachable"
+                                     : outbox.keyProblem ? "🔑 no working device key" : "🟢 reachable")
+        }
         if let moved = PairingLink.shared.moved {
             add("   ⚠️ learner-server says its API moved to \(moved)")
             _ = add("   Switch to \(URL(string: moved)?.host ?? moved)...", #selector(switchToAdvertisedServer))
         }
-        add("   └─ 📤 \(status.outboxDepth) queued | last: \(outbox.lastStatus)")
+        live { t in "   └─ 📤 \(t.status.loaded ? "\(t.status.outboxDepth) queued" : Self.loading) | last: \(outbox.lastStatus)" }
         if status.archiveParked > 0 { add("   ⚠️ \(status.archiveParked) chat(s) refused by the server (see menubar.log)") }
-        add(status.cliSessions.map { "💻 CLI sessions (uploader): \($0)" } ?? "💻 CLI sessions: read by learner-server on this Mac")
+        live { t in
+            t.status.cliSessions.map { "💻 CLI sessions (uploader): \($0)" }
+                ?? (t.uploader != nil && !t.status.loaded ? "💻 CLI sessions (uploader): \(Self.loading)" : "💻 CLI sessions: read by learner-server on this Mac")
+        }
         for p in status.problems { add("   \(p.waiting ? "⏳" : "⚠️") \(p.source): \(p.text)") }
         add("   ⚡ Send Queued Trials Now", #selector(triggerHabitSync))
         if status.loginItemBlocked {
@@ -211,7 +262,7 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let mode = HabitExperimentManager.shared.currentMode
         let assignedArm = HabitExperimentManager.shared.resolveArm(for: talkMonitor.activeSessionId)
         _ = add("   🎯 Condition: \(mode.shortTag) [Active: \(assignedArm)]")
-        add("   📈 Recorded Trials: \(status.trialCount)")
+        live { t in "   📈 Recorded Trials: \(t.status.loaded ? "\(t.status.trialCount)" : Self.loading)" }
         // Links the server advertises; a missing one has no line.
         if let growthbook = GrowthBookLink.current {
             _ = add("   🌐 Open GrowthBook Dashboard (\(growthbook.host ?? growthbook.absoluteString))...", #selector(openGrowthBookDashboard))
@@ -256,8 +307,8 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let checking = ScreenpipeUpdateCheck.shared.isRunning
         _ = add(checking ? "🔄 Update check running..." : "🔄 Run screenpipe Update Check Now",
                 checking ? nil : #selector(runScreenpipeUpdateCheck), to: trouble)
-        if let last = ScreenpipeUpdateCheck.shared.lastRunSummary {
-            _ = add("   └─ Last check: \(last)", to: trouble)
+        if !status.loaded || status.lastUpdateCheck != nil {
+            live(to: trouble) { t in "   └─ Last check: \(t.status.loaded ? t.status.lastUpdateCheck ?? "none yet" : Self.loading)" }
         }
         if uploader != nil { _ = add("Restart CLI Uploader", #selector(restartUploader), to: trouble) }
         let troubleParent = NSMenuItem(title: "Troubleshooting", action: nil, keyEquivalent: "")
@@ -323,14 +374,14 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// At login screenpipe can start before this app has set the flag. Such a screenpipe
     /// waits for a sign-in and never records, so quit it and start it again with the flag.
-    func ensureScreenpipeSkipsSignIn() {
-        guard let screenpipe = NSRunningApplication.runningApplications(withBundleIdentifier: "screenpi.pe").first,
-              screenpipe.processIdentifier != screenpipeFlagCheckedPid else { return }
-        let pid = screenpipe.processIdentifier
+    /// `pid` is the running screenpipe's, looked up by the Status job off the main thread.
+    func ensureScreenpipeSkipsSignIn(pid: pid_t?) {
+        guard let pid, pid != screenpipeFlagCheckedPid else { return }
         screenpipeFlagCheckedPid = pid
         let log = self.log
         DispatchQueue.global(qos: .utility).async {
-            guard let started = ChildProcess.commandLine(pid, includeEnvironment: true),
+            guard let screenpipe = NSRunningApplication(processIdentifier: pid),
+                  let started = ChildProcess.commandLine(pid, includeEnvironment: true),
                   !started.contains("SCREENPIPE_SKIP_ONBOARDING=1"),
                   // Signed out, screenpipe never starts its server. One that answers is (or
                   // can be) recording, and quitting it would only drop it to search-only.
@@ -354,6 +405,16 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if let error = error { log.error("screenpipe relaunch failed: \(error.localizedDescription)") }
                 else { log.info("screenpipe relaunched with SCREENPIPE_SKIP_ONBOARDING") }
             }
+        }
+    }
+
+    /// The Screenpipe line's state.
+    var captureText: String {
+        switch status.capture {
+        case .unknown: return Self.loading
+        case .recording: return "🟢 Recording"
+        case let .degraded(why): return "🟡 Degraded — \(why)"
+        case let .stopped(why): return "🔴 Stopped — \(why)"
         }
     }
 
@@ -533,9 +594,51 @@ extension TrayAppManager {
         return item
     }
 
+    /// A status line whose data can arrive while the menu is open (see refreshOpenMenu).
+    @discardableResult
+    func live(to menu: NSMenu? = nil, _ title: @escaping @MainActor (TrayAppManager) -> String?) -> NSMenuItem {
+        let now = title(self)
+        let item = add(now ?? "", to: menu)
+        item.isHidden = now == nil
+        return track(item, title)
+    }
+
+    /// Keeps `item` retitled by `title` while the menu is open.
+    @discardableResult
+    func track(_ item: NSMenuItem, _ title: @escaping @MainActor (TrayAppManager) -> String?) -> NSMenuItem {
+        liveLines.append((item, title))
+        return item
+    }
+
     func header(_ title: String, size: CGFloat = 12) {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         item.attributedTitle = NSAttributedString(string: title, attributes: [.font: NSFont.boldSystemFont(ofSize: size)])
         statusMenu.addItem(item)
+    }
+}
+
+/// One menu open: the click to AppKit asking for the menu, the build, the menu reaching the
+/// screen, and what the main thread did between the click and the ask. Logged when slow,
+/// saying whose the wait was.
+struct MenuOpenTiming: Equatable {
+    var waited: TimeInterval
+    var build: TimeInterval
+    /// From the build to the menu's own loop running (nil: closed first).
+    var shown: TimeInterval?
+    /// The main thread's CPU seconds from the click to the ask (nil: unknown).
+    var mainCPU: TimeInterval?
+    /// The longest stretch of that the main thread did not answer.
+    var mainBlocked: TimeInterval
+
+    var slow: Bool { waited > 0.3 || build > 0.1 || (shown ?? 0) > 0.3 }
+
+    var line: String {
+        let ms = { (t: TimeInterval) in "\(Int((t * 1000).rounded())) ms" }
+        let whose: String
+        if let cpu = mainCPU, cpu >= waited / 2 { whose = "the app: its main thread was busy" }
+        else if mainBlocked >= waited / 2 { whose = "the app's main thread was held up (waiting, or starved of CPU)" }
+        else { whose = "not the app: its main thread was free (the system, the menu bar, load)" }
+        return "menu opened \(ms(waited)) after the click (main thread ran \(mainCPU.map(ms) ?? "?"), longest block \(ms(mainBlocked)): \(whose)); "
+            + "built in \(ms(build)), on screen \(shown.map(ms) ?? "?") later"
     }
 }
