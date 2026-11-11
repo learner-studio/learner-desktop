@@ -885,6 +885,16 @@ final class VoiceEnrollPanel: NSObject, NSWindowDelegate {
 
     func failed(_ why: String) { finished(.failed(why)) }
 
+    /// Start was pressed but cannot begin yet (a Bluetooth mic, no mic): the window stays ready
+    /// with Start, says why, and the controller starts on its own once the cause clears.
+    func blocked(_ why: String) {
+        running = false
+        show(.start)
+        progress.doubleValue = 0
+        button.title = "Start"
+        status.stringValue = "Waiting to start: \(why)"
+    }
+
     /// The current sentence, its words styled, and the pills. Once all are read the last
     /// sentence stays, green.
     private func show(_ at: Snapshot) {
@@ -1024,6 +1034,8 @@ final class VoiceIDController {
     private(set) var readingMode = ReadingMode.off
     /// Bumped by every Start and Cancel: a permission answer for an older Start is ignored.
     private var attempt = 0
+    /// Start was pressed but blocked: begins by itself once the blocker clears, window open.
+    private(set) var startWhenReady = false
     var now: () -> Date = Date.init
 
     init(mic: MicSpeechSource?, engine: VoiceIDEngine = VoiceIDEngine(), defaults: UserDefaults = .standard,
@@ -1061,7 +1073,8 @@ final class VoiceIDController {
     private func apply() {
         if indicatorShown { indicator.show() } else { indicator.hide() }
         engine.setLive(indicatorShown && voiceprint != nil)
-        listen(indicatorShown || engine.enrolling)
+        // A start waiting on the mic keeps the 4-a-second tick that notices it is usable.
+        listen(indicatorShown || engine.enrolling || startWhenReady)
     }
 
     /// Subscribes to (or leaves) the mic's frames, and runs the 4-a-second redraw meanwhile.
@@ -1088,6 +1101,14 @@ final class VoiceIDController {
 
     /// Main thread, at most 4 times a second: the pill and the enrollment panel.
     func tick() {
+        // Pressed Start while blocked: begin once the cause clears, if the window is still open.
+        if startWhenReady {
+            if panel?.window?.isVisible != true { startWhenReady = false; apply() }
+            else if (blocker ?? enrollmentBlocker)() == nil {
+                log.info("enrollment starting: the microphone is usable now")
+                beginEnrollment()
+            }
+        }
         let out = engine.output.value
         let micOn = mic?.isListening ?? false
         if indicatorShown {
@@ -1170,10 +1191,13 @@ final class VoiceIDController {
     private func beginEnrollment() {
         attempt += 1
         if let why = (blocker ?? enrollmentBlocker)() {
-            log.warn("enrollment not started: \(why)")
-            panel?.failed(why)
+            if !startWhenReady { log.warn("enrollment waiting to start: \(why)") }
+            startWhenReady = true
+            panel?.blocked(why)
+            apply()
             return
         }
+        startWhenReady = false
         let mine = attempt
         panel?.preparing()
         tracker.recognizer.prepare { [weak self] availability in
@@ -1265,6 +1289,7 @@ final class VoiceIDController {
     }
 
     private func cancelEnrollment() {
+        startWhenReady = false
         attempt += 1
         tracker.stop()
         readingMode = .off

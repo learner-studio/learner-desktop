@@ -407,6 +407,41 @@ struct VoiceEnrollReadingWindowTests {
         #expect(panel.stepsText.contains("All 12 sentences read") && !panel.stepsText.contains("○"))
     }
 
+    /// Start pressed while the mic is a Bluetooth headset (11-11: the owner then switched mics
+    /// and read, but the window still showed the refusal): it waits with Start and the reason,
+    /// and begins by itself once the mic is usable; a closed window drops the wait.
+    @Test func aStartBlockedByTheMicBeginsOnceTheMicIsUsable() throws {
+        let fake = Fake()
+        let c = Self.controller(fake)
+        let why = Locked<String?>("your microphone is a Bluetooth headset")
+        c.blocker = { why.value }
+        c.showEnrollment()
+        defer { c.panel?.window?.orderOut(nil) }
+        let panel = try #require(c.panel)
+        panel.press()
+        #expect(c.startWhenReady && !c.engine.enrolling)
+        #expect(panel.buttonTitle == "Start", "still ready, not a dead end")
+        #expect(panel.statusText.hasPrefix("Waiting to start") && panel.statusText.contains("Bluetooth"))
+        c.tick()
+        #expect(!c.engine.enrolling, "still blocked")
+        why.value = nil   // the owner picked the MacBook mic
+        c.tick()
+        #expect(c.engine.enrolling && !c.startWhenReady, "began by itself")
+        #expect(c.readingMode == .tracked && fake.starts == 1)
+
+        // Blocked again, then the window closed: no start behind the owner's back.
+        let c2 = Self.controller(Fake())
+        let why2 = Locked<String?>("no mic")
+        c2.blocker = { why2.value }
+        c2.showEnrollment()
+        try #require(c2.panel).press()
+        c2.panel?.window?.orderOut(nil)
+        c2.tick()
+        why2.value = nil
+        c2.tick()
+        #expect(!c2.engine.enrolling && !c2.startWhenReady)
+    }
+
     @Test func aGuidedReadingWithEnoughSpeechEnrolls() throws {
         let fake = Fake()
         let saved = Locked(0)
