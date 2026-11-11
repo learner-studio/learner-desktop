@@ -27,7 +27,12 @@ struct VoiceEnrollReadingTests {
         @MainActor func start(_ events: @escaping @MainActor @Sendable (ReadingRecognizerEvent) -> Void) { starts += 1; self.events = events }
         func append(_ frames: [SileroVAD.Frame]) { appended.withLock { $0 += frames.count } }
         @MainActor func stop() { stops += 1; events = nil }
-        @MainActor func hear(_ text: String) { events?(.transcript(text)) }
+        /// A result with no word times (as some partial results come).
+        @MainActor func hear(_ text: String) { events?(.transcript(text.split(separator: " ").map { ReadingSegment(word: String($0)) })) }
+        /// A result whose words were heard at these times (seconds into the request's audio).
+        @MainActor func hear(_ words: [(String, Double)]) {
+            events?(.transcript(words.map { ReadingSegment(word: $0.0, start: $0.1, duration: 0.3) }))
+        }
         @MainActor func end(_ why: String? = nil) { events?(.ended(why)) }
     }
 
@@ -137,6 +142,67 @@ struct VoiceEnrollReadingTests {
         #expect(t.failure == nil && t.running && t.reached == 13)
         t.stop()
         #expect(!t.running && fake.stops == 1)
+    }
+
+    /// `text`'s words at 0.4 s apart from `at`, as a recognizer times them.
+    static func timed(_ text: String, at: Double) -> [(String, Double)] {
+        text.split(separator: " ").enumerated().map { (String($1), at + Double($0) * 0.4) }
+    }
+
+    // 11-12, the owner's first real reading: sentence 1 went green, then sentence 2 never moved.
+    // A real recognizer revises its transcript (words merge, it starts afresh after a pause);
+    // what was followed is kept by when it was heard, not by a word count.
+
+    @MainActor @Test func aTranscriptThatShrinksAfterAMoveStillFollowsNewWords() {
+        let (t, fake) = Self.tracker()
+        t.start()
+        // Sentence 1 with "rain drops" split and "rainbow" missed; the owner pauses, and the
+        // reading moves past the missed word.
+        let first = Self.timed("When the sunlight strikes rain drops in the air, they act as a prism and form a", at: 0)
+        fake.hear(first)
+        #expect(t.reached == 16)
+        t.move(to: 17)
+        // The recognizer merges "rain drops" (one word fewer) and hears sentence 2 begin.
+        var revised = first
+        revised.replaceSubrange(4...5, with: [("raindrops", 1.6)])
+        fake.hear(revised + Self.timed("The rainbow is a division", at: 8))
+        #expect(t.reached == 22, "new words after a shrunken transcript were dropped: reached \(t.reached)")
+        #expect(t.matched.isSuperset(of: 17..<22))
+    }
+
+    @MainActor @Test func aTranscriptThatStartsAfreshAfterAPauseStillFollows() {
+        // Timed results.
+        let (t, fake) = Self.tracker()
+        t.start()
+        fake.hear(Self.timed(VoiceEnrollReadingTests.text(0..<17), at: 0))
+        #expect(t.reached == 17)
+        fake.hear(Self.timed("The rainbow is a division", at: 9))
+        #expect(t.reached == 22, "timed: reached \(t.reached)")
+        fake.hear(Self.timed("The rainbow is a division of white light", at: 9))
+        #expect(t.reached == 25)
+        // Untimed results (no word times): the same.
+        let (u, fake2) = Self.tracker()
+        u.start()
+        fake2.hear(VoiceEnrollReadingTests.text(0..<17))
+        #expect(u.reached == 17)
+        fake2.hear("The rainbow is a division")
+        #expect(u.reached == 22, "untimed: reached \(u.reached)")
+        fake2.hear("The rainbow is a division of white light")
+        #expect(u.reached == 25)
+    }
+
+    @MainActor @Test func aFinalResultWithoutAnErrorStartsAnotherRequest() {
+        let (t, fake) = Self.tracker()
+        t.start()
+        fake.hear(Self.timed(VoiceEnrollReadingTests.text(0..<17), at: 0))
+        let lines = capturingLog {
+            fake.end(nil)   // isFinal, no error: the adapter's .ended(nil)
+        }
+        #expect(fake.starts == 2 && t.running)
+        #expect(lines.contains { $0.contains("recognition request ended at word 17 of 182 (final result); starting another") }, "\(lines)")
+        // The new request's times start again from 0.
+        fake.hear(Self.timed("The rainbow is a division", at: 0.5))
+        #expect(t.reached == 22)
     }
 
     @MainActor @Test func recognitionThatKeepsFailingAtOnceGivesUpAndSaysWhy() {
@@ -561,6 +627,72 @@ struct VoiceEnrollReadingWindowTests {
         c.engine.frames(Self.frames(30))
         #expect(!c.engine.enrolling, "60 s in all: done on time")
         c.engine.drain()
+    }
+
+    @Test func aRequestThatGoesQuietWhileTheOwnerTalksIsReplaced() throws {
+        let fake = Fake()
+        let c = Self.controller(fake)
+        c.showEnrollment()
+        defer { c.panel?.window?.orderOut(nil) }
+        c.panel?.press()
+        c.engine.frames(Self.frames(3))
+        fake.hear("when the sunlight")
+        c.tick()
+        #expect(fake.starts == 1)
+        let lines = capturingLog {
+            for _ in 0..<9 { c.engine.frames(Self.frames(1)); c.tick() }
+        }
+        #expect(fake.starts == 2, "no result in 8 s of speech: a new request")
+        #expect(lines.contains { $0.contains("recognition request ended at word 3 of 182 (no results in 8 s of speech); starting another") }, "\(lines)")
+        #expect(c.readingMode == .tracked)
+    }
+
+    @Test func theLogSaysWhereTheReadingIsInCountsOnly() throws {
+        let fake = Fake()
+        let c = Self.controller(fake)
+        c.showEnrollment()
+        defer { c.panel?.window?.orderOut(nil) }
+        var clock = Date()
+        c.now = { clock }
+        let lines = capturingLog {
+            c.panel?.press()   // the first line, at the start
+            c.engine.frames(Self.frames(4))
+            fake.hear(VoiceEnrollReadingTests.text(0..<17))
+            c.tick()           // within 5 s: none
+            clock += 6
+            c.tick()
+            clock += 1
+            c.tick()           // within 5 s: none
+        }
+        let reading = lines.filter { $0.contains("reading: transcript") }
+        #expect(reading.count == 2, "\(reading)")
+        #expect(reading.last?.contains("transcript 17 words") == true && reading.last?.contains("word 17/182") == true
+                && reading.last?.contains("sentence 2/12") == true, "\(reading)")
+        #expect(reading.allSatisfy { $0.contains("restarts") && $0.contains("last result") && $0.contains("sentence") })
+        #expect(lines.contains { $0.contains("sentence 1 complete (matched 17/17") }, "\(lines)")
+        // Counts only: none of the words read.
+        #expect(!lines.contains { $0.localizedCaseInsensitiveContains("sunlight") || $0.contains("raindrops") })
+    }
+
+    @Test func theWindowSaysWhichMicrophoneIsInUse() throws {
+        var device: InputDevice? = InputDevice(name: "MacBook Pro Microphone", bluetooth: false)
+        let panel = VoiceEnrollPanel(inputDevice: { device })
+        panel.show()
+        defer { panel.window?.orderOut(nil) }
+        #expect(panel.micHeaderText.hasPrefix("Use your MacBook's microphone\n"))
+        #expect(panel.micHeaderText.contains("Choose MacBook Pro Microphone in System Settings › Sound › Input. Bluetooth headsets (AirPods) are not used"))
+        #expect(panel.micLineText == "Input now: MacBook Pro Microphone ✓")
+        device = InputDevice(name: "AirPods Pro", bluetooth: true)
+        panel.refreshInput()
+        #expect(panel.micLineText == "⚠︎ AirPods Pro is Bluetooth: switch to the MacBook microphone")
+        device = nil
+        panel.refreshInput()
+        #expect(panel.micLineText == "Input now: checking…")
+        #expect(VoiceEnrollPanel.size.height >= 500)
+        // The watch reads on its own queue and keeps the answer.
+        let watch = InputDeviceWatch(read: { InputDevice(name: "USB Mic", bluetooth: false) }, listen: false)
+        watch.settle()
+        #expect(watch.device == InputDevice(name: "USB Mic", bluetooth: false))
     }
 
     @Test func enrollmentSpeechIsCappedAtThreeMinutes() throws {

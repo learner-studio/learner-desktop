@@ -57,8 +57,12 @@ struct VoiceEnrollReadingE2ETests {
             guard let events else { return }
             let now = consumed.value
             let upTo = heardWords(at: now)
-            let text = (requestWordFrom..<max(requestWordFrom, upTo)).filter { !missed.contains($0) }.map { words[$0] }.joined(separator: " ")
-            if !text.isEmpty { events(.transcript(text)) }
+            // Each word at its time in this request's audio, as SFSpeechRecognizer reports them.
+            let span = Double(speechEnd - speechStart) / Double(words.count) / 16_000
+            let segments = (requestWordFrom..<max(requestWordFrom, upTo)).filter { !missed.contains($0) }.map { k in
+                ReadingSegment(word: words[k], start: Double(speechStart - requestFrom) / 16_000 + Double(k) * span, duration: span)
+            }
+            if !segments.isEmpty { events(.transcript(segments)) }
             if now - requestFrom >= Self.requestSamples { events(.ended(nil)) }
         }
     }

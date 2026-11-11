@@ -695,7 +695,15 @@ final class VoiceIndicatorController {
 /// 60 s of speech, with the reason on the status line.
 @MainActor
 final class VoiceEnrollPanel: NSObject, NSWindowDelegate {
-    static let size = NSSize(width: 560, height: 420)
+    static let size = NSSize(width: 560, height: 510)
+    static let micTitle = "Use your MacBook's microphone"
+    static let micBody = "Choose MacBook Pro Microphone in System Settings › Sound › Input. Bluetooth headsets (AirPods) are not used: they switch to call quality when an app listens."
+    private let micHeader = NSTextField(labelWithString: VoiceEnrollPanel.micTitle)
+    private let micText = NSTextField(wrappingLabelWithString: VoiceEnrollPanel.micBody)
+    private let micLine = NSTextField(labelWithString: "Input now: checking…")
+    /// The cached default input (InputDeviceWatch: Core Audio is read off the main thread).
+    private let inputDevice: @MainActor () -> InputDevice?
+    private var inputTimer: Timer?
     static let sentenceFont = NSFont.systemFont(ofSize: 22)
     static let passageFont = NSFont.systemFont(ofSize: 14)
     private(set) var window: NSPanel?
@@ -722,7 +730,9 @@ final class VoiceEnrollPanel: NSObject, NSWindowDelegate {
     /// Why the reading is not followed this round, or nil.
     private(set) var trackingNote: String?
 
-    init(words: [String] = ReadingPassage.words, paragraphs: [String] = ReadingPassage.paragraphs) {
+    init(words: [String] = ReadingPassage.words, paragraphs: [String] = ReadingPassage.paragraphs,
+         inputDevice: @escaping @MainActor () -> InputDevice? = { InputDeviceWatch.shared.device }) {
+        self.inputDevice = inputDevice
         self.words = words
         self.paragraphs = paragraphs
         sentences = ReadingSentences(words: words)
@@ -730,6 +740,15 @@ final class VoiceEnrollPanel: NSObject, NSWindowDelegate {
     }
 
     var statusText: String { status.stringValue }
+    var micLineText: String { micLine.stringValue }
+    var micHeaderText: String { micHeader.stringValue + "\n" + micText.stringValue }
+
+    /// The live microphone line, from the cached answer (cheap: called every second while shown).
+    func refreshInput() {
+        guard let d = inputDevice() else { micLine.stringValue = "Input now: checking…"; micLine.textColor = .secondaryLabelColor; return }
+        micLine.stringValue = d.line
+        micLine.textColor = d.bluetooth ? .systemOrange : .systemGreen
+    }
     var stepsText: String { steps.stringValue }
     var progressValue: Double { progress.doubleValue }
     var buttonTitle: String { button.title }
@@ -789,7 +808,24 @@ final class VoiceEnrollPanel: NSObject, NSWindowDelegate {
         button.bezelStyle = .rounded
         button.target = self
         button.action = #selector(clicked)
-        [message, steps, scroll, progress, status, button].forEach(v.addSubview)
+        // The microphone header, above everything else.
+        micHeader.frame = NSRect(x: 20, y: size.height - 34, width: inner, height: 20)
+        micHeader.font = .boldSystemFont(ofSize: 13)
+        micText.frame = NSRect(x: 20, y: size.height - 70, width: inner, height: 34)
+        micText.font = .systemFont(ofSize: 11)
+        micText.textColor = .secondaryLabelColor
+        micLine.frame = NSRect(x: 20, y: size.height - 92, width: inner, height: 18)
+        micLine.font = .systemFont(ofSize: 12, weight: .medium)
+        micLine.lineBreakMode = .byTruncatingTail
+        let rule = NSBox(frame: NSRect(x: 20, y: size.height - 97, width: inner, height: 1))
+        rule.boxType = .separator
+        [micHeader, micText, micLine, rule, message, steps, scroll, progress, status, button].forEach(v.addSubview)
+        refreshInput()
+        let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { if self?.window?.isVisible == true { self?.refreshInput() } }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        inputTimer = t
         w.contentView = v
         return w
     }
@@ -1029,6 +1065,12 @@ final class VoiceIDController {
     /// advancing means recognition is not following the owner.
     private var speechAtLastAdvance = 0.0
     private var lastProgress: (reached: Int, heard: Int) = (0, 0)
+    /// Speech heard at the recognizer's last result: a request that goes quiet while the owner
+    /// talks is replaced.
+    private var speechAtLastResult = 0.0
+    private var lastResults = 0
+    private var lastDiagnostic = Date.distantPast
+    static let diagnosticSeconds = 5.0
 
     enum ReadingMode: Equatable { case off, tracked, untracked(String) }
     private(set) var readingMode = ReadingMode.off
@@ -1219,6 +1261,9 @@ final class VoiceIDController {
             reading = ReadingState(sentences: sentences, passage: tracker.passage)
             speechAtLastAdvance = engine.output.value.enrollSpeechSeconds
             lastProgress = (0, 0)
+            speechAtLastResult = speechAtLastAdvance
+            lastResults = 0
+            lastDiagnostic = .distantPast
             tracker.start()
             panel?.reading(.start, speechSeconds: engine.output.value.enrollSpeechSeconds, waitingForMic: false)
         case .unavailable(let why):
@@ -1237,6 +1282,19 @@ final class VoiceIDController {
     }
 
     /// Tick, while a tracked reading listens: colours, and done (or too little speech).
+    /// At most every 5 s while reading: where the reading is, in counts only (never the words),
+    /// so a stall can be read from menubar.log.
+    private func logReading(_ out: VoiceIDEngine.Output) {
+        let t = now()
+        guard t.timeIntervalSince(lastDiagnostic) >= Self.diagnosticSeconds else { return }
+        lastDiagnostic = t
+        let since = tracker.lastResultAt.map { String(format: "%.1f s", t.timeIntervalSince($0)) } ?? "none yet"
+        log.info("reading: transcript \(tracker.transcriptWords) words (\(tracker.timedResults) of \(tracker.results) results timed, \(tracker.freshTranscripts) fresh), "
+                 + "\(tracker.alignedSinceMove) aligned since the last move, word \(tracker.reached)/\(tracker.total), "
+                 + "sentence \(min(reading.current + 1, sentences.count))/\(sentences.count), \(tracker.restarts) restarts, "
+                 + String(format: "%.0f s of speech, last result %@ ago", out.enrollSpeechSeconds, since))
+    }
+
     private func followReading(_ out: VoiceIDEngine.Output, micOn: Bool) {
         // Recognition gave up, or hears nothing while Silero hears the owner: the speech so far
         // still counts, toward 60 s.
@@ -1255,11 +1313,28 @@ final class VoiceIDController {
             panel?.untracked(why)
             return
         }
+        if tracker.results != lastResults {
+            lastResults = tracker.results
+            speechAtLastResult = out.enrollSpeechSeconds
+        } else if out.enrollSpeechSeconds - speechAtLastResult >= ReadingCompletion.quietRequestSeconds {
+            // Results stopped though the owner is talking (a final result with no end, or a
+            // stuck request): a new request, from where the reading is.
+            speechAtLastResult = out.enrollSpeechSeconds
+            tracker.restartRequest("no results in \(Int(ReadingCompletion.quietRequestSeconds)) s of speech")
+        }
+        logReading(out)
         let quiet = out.lastSpeechAt.map { now().timeIntervalSince($0) } ?? .infinity
         // A sentence whose last word or two the recognizer missed is done once the owner stops.
         let settled = sentences.settled(reached: tracker.reached, quietFor: quiet)
         if settled > tracker.reached { tracker.move(to: settled) }
         // Back to a sentence not heard well enough, or on past one read once more.
+        let doneBefore = reading.done
+        defer {
+            for i in reading.done.subtracting(doneBefore).sorted() {
+                let r = sentences.ranges[i]
+                log.info("sentence \(i + 1) complete (matched \(r.filter(tracker.matched.contains).count)/\(r.count), misheard \(r.filter(tracker.misheard.contains).count))")
+            }
+        }
         if let move = reading.update(reached: tracker.reached, matched: tracker.matched, misheard: tracker.misheard) {
             if let r = move.forget {
                 log.info("sentence \(reading.current + 1) asked for once more (too few of its words heard)")

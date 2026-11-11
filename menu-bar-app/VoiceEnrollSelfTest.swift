@@ -173,6 +173,9 @@ final class VoiceEnrollSelfTest {
             "wordsCredited": ReadingAlignment.credited(c.tracker.matched, misheard: c.tracker.misheard, passage: c.tracker.passage).count,
             "reached": c.tracker.reached,
             "recognizerRestarts": c.tracker.restarts,
+            "recognizerResults": c.tracker.results,
+            "timedResults": c.tracker.timedResults,
+            "freshTranscripts": c.tracker.freshTranscripts,
         ]
         if let f = c.tracker.failure { r["trackingFailure"] = f }
         if case .untracked(let why) = c.readingMode { r["fellBackToTime"] = why }

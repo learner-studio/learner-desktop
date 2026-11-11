@@ -1,4 +1,5 @@
 import AppKit
+import CoreAudio
 @preconcurrency import AVFoundation
 import Foundation
 @preconcurrency import Speech
@@ -113,6 +114,10 @@ enum ReadingAlignment {
         /// (`plausible`): said, but misrecognized. A gap with nothing heard in it, or only
         /// unrelated words ("um", a repeat), was not said.
         var misheard: [Int] = []
+        /// The passage position after each heard word.
+        var positions: [Int] = []
+        /// The heard word matched last, if any.
+        var lastMatchedHeard: Int?
     }
 
     /// `reach`, with which words were matched and which misheard on the way.
@@ -146,13 +151,17 @@ enum ReadingAlignment {
                 }
                 unplaced = []
                 result.matched.append(contentsOf: j..<m.next)
+                result.lastMatchedHeard = i + m.heard - 1
                 pos = m.next
                 taken = m.heard
                 break
             }
             if pos == before { unplaced.append(word) }
+            result.positions.append(contentsOf: Array(repeating: pos, count: taken))
             i += taken
         }
+        // Words after the end of the passage stay there.
+        result.positions.append(contentsOf: Array(repeating: pos, count: max(0, heard.count - result.positions.count)))
         result.reached = pos
         return result
     }
@@ -289,6 +298,8 @@ struct ReadingState: Equatable {
     /// when it must move (back to a sentence to read once more, or on to the first sentence not
     /// read after one was), else nil.
     mutating func update(reached: Int, matched: Set<Int>, misheard: Set<Int> = []) -> Move? {
+        // Mostly the reading is inside the current sentence: nothing to judge.
+        if current < sentences.count, sentences.ranges[current].contains(reached) { return nil }
         let credited = ReadingAlignment.credited(matched, misheard: misheard, passage: passage)
         while current < sentences.count {
             let i = current, r = sentences.ranges[i]
@@ -330,6 +341,8 @@ enum ReadingCompletion {
     /// A sentence's last words may be missed by the recognizer once the owner has stopped talking.
     static let tailWords = 2
     static let tailQuietSeconds = 2.0
+    /// This much speech with no result at all: the request is replaced.
+    static let quietRequestSeconds = 8.0
     /// This much speech with no word recognized: recognition is not hearing the owner.
     static let silentRecognizerSeconds = 20.0
 
@@ -386,9 +399,18 @@ enum ReadingTrackingAvailability: Equatable, Sendable {
     }
 }
 
+/// One recognized word and when it was heard, in seconds from the start of the request's audio
+/// (0 when the recognizer gives no times, as some partial results do).
+struct ReadingSegment: Equatable, Sendable {
+    var word: String
+    var start: TimeInterval = 0
+    var duration: TimeInterval = 0
+}
+
 enum ReadingRecognizerEvent: Equatable, Sendable {
-    /// The current request's whole best transcription so far (it may revise earlier words).
-    case transcript(String)
+    /// The current request's best transcription so far, word by word. The recognizer revises
+    /// it as it goes: it merges and splits words, and may start it afresh after a pause.
+    case transcript([ReadingSegment])
     /// The request ended (they last about a minute) or failed; nil when it simply finished.
     case ended(String?)
 }
@@ -469,7 +491,11 @@ final class AppleReadingRecognizer: ReadingRecognizer, @unchecked Sendable {
         lock.withLock { if generation == g { request = req } }
         let t = recognizer.recognitionTask(with: req) { [weak self] result, error in
             guard let self, self.lock.withLock({ self.generation == g }) else { return }
-            if let result { deliver(.transcript(result.bestTranscription.formattedString)) }
+            if let result {
+                deliver(.transcript(result.bestTranscription.segments.map {
+                    ReadingSegment(word: $0.substring, start: $0.timestamp, duration: $0.duration)
+                }))
+            }
             guard error != nil || result?.isFinal == true else { return }
             // Only one end per request, though an error may follow a final result.
             guard ended.withLock({ e in defer { e = true }; return !e }) else { return }
@@ -517,7 +543,20 @@ final class AppleReadingRecognizer: ReadingRecognizer, @unchecked Sendable {
 // MARK: The tracker (main thread)
 
 /// The furthest passage word heard, across recognition requests: a request ends after about a
-/// minute (or on an error), and the next one is started from where the last left off.
+/// minute (or on an error, or when it goes quiet), and the next one is started from where the
+/// last left off.
+///
+/// The recognizer's transcript is not an append-only log: it revises its last words, merges
+/// and splits words ("rain drops" -> "raindrops"), drops and adds fillers, sends an empty
+/// result now and then, and may begin again from nothing after a pause. Real partial results
+/// carry no word times (0 of 219 in the self-test), so each result is compared with the last
+/// by a word diff (a longest common subsequence of keys): words it keeps are already followed;
+/// only words after the last kept one are new, aligned from where the reading is (never from
+/// behind it). Revised words between kept ones only add credit, inside the span they belong
+/// to. A result sharing little with the last, on the diagonal, is a fresh transcript: aligned
+/// from where it fits best, so a repeated sentence lands on itself, not on the words ahead.
+/// After a move back to read a sentence again, every word heard before the move stays old
+/// (never credited again) until a fresh transcript arrives.
 @MainActor
 final class ReadingTracker {
     let recognizer: ReadingRecognizer
@@ -534,20 +573,38 @@ final class ReadingTracker {
     /// Requests ending this soon after they start count as failing at once.
     static let quickEnd: TimeInterval = 1
     static let maxQuickEnds = 5
+    /// Kept words further than this off the diagonal do not show a continuation.
+    static let drift = 4
     var restartDelay: TimeInterval = 0.25
     var now: () -> Date = Date.init
-    private var base = 0
-    /// Words of the current request's transcript already accounted for by a `skip`.
-    private var offset = 0
-    private var lastHeard = 0
+    let sentences: ReadingSentences
+
+    /// A word of the last result: its key, the passage position after it, and whether it was
+    /// heard before the last move (old: never aligned or credited again).
+    private struct Heard {
+        var key: String
+        var at: Int
+        var old: Bool
+    }
+    private var previous: [Heard] = []
+    private var keyCache: [String: String] = [:]
     private var round = 0
     private var startedAt = Date.distantPast
     private var quickEnds = 0
     private let log = Log("VoiceID")
 
+    // Diagnostics (counts only, never the words).
+    private(set) var results = 0
+    private(set) var lastResultAt: Date?
+    private(set) var transcriptWords = 0
+    private(set) var alignedSinceMove = 0
+    private(set) var timedResults = 0
+    private(set) var freshTranscripts = 0
+
     init(recognizer: ReadingRecognizer, words: [String] = ReadingPassage.words) {
         self.recognizer = recognizer
         passage = words.map(ReadingAlignment.key)
+        sentences = ReadingSentences(words: words)
     }
 
     var total: Int { passage.count }
@@ -556,23 +613,27 @@ final class ReadingTracker {
         reached = 0
         matched = []
         misheard = []
-        base = 0
-        offset = 0
-        lastHeard = 0
         restarts = 0
         quickEnds = 0
         failure = nil
+        results = 0
+        timedResults = 0
+        freshTranscripts = 0
+        lastResultAt = nil
+        alignedSinceMove = 0
         running = true
+        freshRequest()
         begin()
     }
 
     /// Follow the reading from `to`: on past a sentence's missed last words, or back to a
-    /// sentence to read once more. What this request already heard is not aligned again.
+    /// sentence to read once more. Nothing heard so far is aligned or credited again, however
+    /// the recognizer revises it.
     func move(to: Int) {
         guard to != reached else { return }
         reached = min(max(0, to), total)
-        base = reached
-        offset = lastHeard
+        for i in previous.indices { previous[i].old = true; previous[i].at = reached }
+        alignedSinceMove = 0
     }
 
     /// A sentence read once more starts from nothing heard.
@@ -588,6 +649,21 @@ final class ReadingTracker {
         recognizer.stop()
     }
 
+    /// Ends the current request and starts another (it went quiet while the owner talks).
+    func restartRequest(_ why: String) {
+        guard running else { return }
+        recognizer.stop()
+        restarts += 1
+        freshRequest()
+        log.info("recognition request ended at word \(reached) of \(total) (\(why)); starting another")
+        begin()
+    }
+
+    private func freshRequest() {
+        previous = []
+        transcriptWords = 0
+    }
+
     private func begin() {
         round += 1
         let r = round
@@ -595,23 +671,72 @@ final class ReadingTracker {
         recognizer.start { [weak self] event in self?.handle(event, round: r) }
     }
 
+    /// Takes an alignment's words: `reached` on (never back), and only words at or after
+    /// `from` credited (a fresh transcript's repeat of words already read adds nothing).
+    private func take(_ a: ReadingAlignment.Alignment, creditFrom from: Int = 0) {
+        reached = max(reached, a.reached)
+        let new = Set(a.matched.filter { $0 >= from }).subtracting(matched)
+        alignedSinceMove += new.count
+        matched.formUnion(a.matched.filter { $0 >= from })
+        misheard.formUnion(a.misheard.filter { $0 >= from })
+    }
+
+    /// The longest common subsequence of two key lists, as index pairs in order. The shared
+    /// start and end are taken first, so a revision of a few words costs only those words.
+    static func diff(_ a: [String], _ b: [String]) -> [(a: Int, b: Int)] {
+        var head = 0
+        while head < a.count, head < b.count, a[head] == b[head] { head += 1 }
+        var tail = 0
+        while tail < a.count - head, tail < b.count - head, a[a.count - 1 - tail] == b[b.count - 1 - tail] { tail += 1 }
+        var out = (0..<head).map { (a: $0, b: $0) }
+        let n = a.count - head - tail, m = b.count - head - tail
+        if n > 0, m > 0 {
+            // len[i * (m + 1) + j]: the LCS of a[head + i...] and b[head + j...] (middles only).
+            var len = [Int32](repeating: 0, count: (n + 1) * (m + 1))
+            for i in stride(from: n - 1, through: 0, by: -1) {
+                for j in stride(from: m - 1, through: 0, by: -1) {
+                    len[i * (m + 1) + j] = a[head + i] == b[head + j] ? len[(i + 1) * (m + 1) + j + 1] + 1
+                        : max(len[(i + 1) * (m + 1) + j], len[i * (m + 1) + j + 1])
+                }
+            }
+            var i = 0, j = 0
+            while i < n, j < m {
+                if a[head + i] == b[head + j] { out.append((head + i, head + j)); i += 1; j += 1 }
+                else if len[(i + 1) * (m + 1) + j] >= len[i * (m + 1) + j + 1] { i += 1 } else { j += 1 }
+            }
+        }
+        out += (0..<tail).map { (a: a.count - tail + $0, b: b.count - tail + $0) }
+        return out
+    }
+
     func handle(_ event: ReadingRecognizerEvent, round r: Int) {
         guard running, r == round else { return }
         switch event {
-        case .transcript(let text):
+        case .transcript(let segments):
             quickEnds = 0
-            let heard = ReadingAlignment.keys(text)
-            lastHeard = heard.count
-            let fresh = Array(heard.dropFirst(min(offset, heard.count)))
-            let a = ReadingAlignment.align(heard: fresh, passage: passage, from: base)
-            reached = max(reached, a.reached)
-            matched.formUnion(a.matched)
-            misheard.formUnion(a.misheard)
+            results += 1
+            lastResultAt = now()
+            if segments.contains(where: { $0.start > 0 }) { timedResults += 1 }
+            // Results repeat the whole transcript, a few times a second: keys are kept.
+            let keys = segments.map { seg in
+                if let k = keyCache[seg.word] { return k }
+                let k = ReadingAlignment.key(seg.word)
+                keyCache[seg.word] = k
+                return k
+            }.filter { !$0.isEmpty }
+            // An empty result says nothing: the last one is kept.
+            guard !keys.isEmpty else { return }
+            transcriptWords = keys.count
+            let kept = Self.diff(previous.map(\.key), keys)
+            let diagonal = kept.filter { abs($0.a - $0.b) <= Self.drift }.count
+            if previous.isEmpty || diagonal * 2 < keys.count {
+                fresh(keys)
+            } else {
+                continuation(keys, kept)
+            }
         case .ended(let why):
             // The next request picks up where this one got to; its words are kept.
-            base = reached
-            offset = 0
-            lastHeard = 0
+            freshRequest()
             restarts += 1
             if now().timeIntervalSince(startedAt) < Self.quickEnd { quickEnds += 1 }
             if quickEnds >= Self.maxQuickEnds {
@@ -620,7 +745,7 @@ final class ReadingTracker {
                 stop()
                 return
             }
-            log.info("recognition request ended at word \(reached) of \(total)\(why.map { " (\($0))" } ?? ""); starting another")
+            log.info("recognition request ended at word \(reached) of \(total)\(why.map { " (\($0))" } ?? " (final result)"); starting another")
             if restartDelay <= 0 { begin(); return }
             DispatchQueue.main.asyncAfter(deadline: .now() + restartDelay) { [weak self] in
                 MainActor.assumeIsolated {
@@ -629,5 +754,150 @@ final class ReadingTracker {
                 }
             }
         }
+    }
+
+    /// A transcript begun afresh: aligned from where it fits best, of where the reading is and
+    /// the starts of the current and last sentence (a repeat lands on itself); only words from
+    /// where the reading is are credited.
+    private func fresh(_ keys: [String]) {
+        freshTranscripts += 1
+        let i = sentences.index(at: reached)
+        var starts = [reached]
+        if i < sentences.count { starts.append(sentences.ranges[i].lowerBound) }
+        if i > 0 { starts.append(sentences.ranges[i - 1].lowerBound) }
+        let candidates = starts.filter { $0 <= reached }.map { ReadingAlignment.align(heard: keys, passage: passage, from: $0) }
+        // Most words matched; on a tie, from where the reading is (the first).
+        let best = candidates.enumerated().max { a, b in
+            a.element.matched.count != b.element.matched.count ? a.element.matched.count < b.element.matched.count : a.offset > b.offset
+        }!.element
+        let from = reached
+        take(best, creditFrom: from)
+        previous = keys.indices.map { Heard(key: keys[$0], at: best.positions[$0], old: false) }
+    }
+
+    /// The same transcript, revised and grown: words the diff keeps are followed already; new
+    /// words after the last kept one are aligned from where the reading is; revised words
+    /// between kept ones may add credit inside their span. Old words (before a move back) and
+    /// revisions of them stay old.
+    private func continuation(_ keys: [String], _ kept: [(a: Int, b: Int)]) {
+        var next = [Heard?](repeating: nil, count: keys.count)
+        for k in kept { next[k.b] = previous[k.a] }
+        let last = kept.last
+        // Revisions of an old tail stay old: as many words after the last kept one as old words
+        // followed it.
+        let oldAfter = last.map { l in previous[(l.a + 1)...].filter(\.old).count } ?? previous.filter(\.old).count
+        let tailStart = (last?.b ?? -1) + 1
+        let lastOld = last.map { previous[$0.a].old } ?? previous.contains(where: \.old)
+        // Revised words between kept ones.
+        var b = 0
+        while b < tailStart {
+            guard next[b] == nil else { b += 1; continue }
+            var e = b
+            while e < tailStart, next[e] == nil { e += 1 }
+            let before = b > 0 ? next[b - 1]! : nil
+            let after = next[e]!   // e < tailStart: a kept word
+            let from = before?.at ?? 0
+            let old = after.old
+            var at = [Int](repeating: from, count: e - b)
+            if !old {
+                let a = ReadingAlignment.align(heard: Array(keys[b..<e]), passage: passage, from: from)
+                let inside = { (i: Int) in i < after.at && i >= from }
+                matched.formUnion(a.matched.filter(inside))
+                misheard.formUnion(a.misheard.filter(inside))
+                // Each word where it was found, within its span.
+                at = a.positions.map { min($0, max(from, after.at - 1)) }
+            }
+            for i in b..<e { next[i] = Heard(key: keys[i], at: at[i - b], old: old) }
+            b = e
+        }
+        // The tail: revisions of old words stay old; the rest is new.
+        let oldEnd = lastOld ? tailStart + oldAfter : tailStart
+        for i in tailStart..<min(oldEnd, keys.count) { next[i] = Heard(key: keys[i], at: reached, old: true) }
+        let newStart = min(oldEnd, keys.count)
+        if newStart < keys.count {
+            // Live words after the last kept one that the last result also had (revised: "uhrainbow"
+            // -> "rainbow") belong right after it, not after where the reading got to: aligned
+            // from there, they cannot find the same word again further on.
+            let revised = last.map { l in previous[(l.a + 1)...].filter { !$0.old }.count } ?? 0
+            let from = revised > 0 && !lastOld ? min(reached, max(previous[last!.a].at, reached - revised - 1)) : reached
+            let a = ReadingAlignment.align(heard: Array(keys[newStart...]), passage: passage, from: from)
+            take(a)
+            for (n, i) in (newStart..<keys.count).enumerated() { next[i] = Heard(key: keys[i], at: a.positions[n], old: false) }
+        }
+        previous = next.map { $0! }
+    }
+}
+
+// MARK: - Which microphone (for the enrollment window)
+
+/// The default input's name and whether it is Bluetooth: enrollment wants the MacBook's own
+/// microphone (a Bluetooth headset switches to call quality when an app listens, and this app
+/// leaves it alone).
+struct InputDevice: Equatable, Sendable {
+    var name: String
+    var bluetooth: Bool
+
+    /// The window's live line.
+    var line: String {
+        bluetooth ? "⚠︎ \(name) is Bluetooth: switch to the MacBook microphone" : "Input now: \(name) ✓"
+    }
+}
+
+/// Reads the default input on its own queue (Core Audio round trips can take seconds when
+/// coreaudiod is busy: never on the main thread, as BluetoothInputWatch), when it changes and
+/// every few seconds, and keeps the answer for the main thread. Started on first use.
+final class InputDeviceWatch: Sendable {
+    static let shared = InputDeviceWatch()
+    static let period: TimeInterval = 5
+
+    private let queue = DispatchQueue(label: "learner.input-device", qos: .utility)
+    private let state = Locked<InputDevice?>(nil)
+    private let read: @Sendable () -> InputDevice?
+
+    init(read: @escaping @Sendable () -> InputDevice? = InputDeviceWatch.defaultInput, listen: Bool = true) {
+        self.read = read
+        queue.async { [self] in refresh() }
+        guard listen else { return }
+        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice,
+                                                 mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, queue) { [weak self] _, _ in
+            self?.refresh()
+        }
+        schedule()
+    }
+
+    /// The last answer (nil until the first read is done, or when there is no input).
+    var device: InputDevice? { state.value }
+
+    func refresh() { state.value = read() }
+
+    /// Waits until the reads handed to the queue so far are done (tests).
+    func settle() { queue.sync {} }
+
+    private func schedule() {
+        queue.asyncAfter(deadline: .now() + Self.period) { [weak self] in
+            self?.refresh()
+            self?.schedule()
+        }
+    }
+
+    /// A synchronous round trip to coreaudiod: on `queue` only.
+    static func defaultInput() -> InputDevice? {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice,
+                                                 mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var device = AudioObjectID(0)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &device) == noErr,
+              device != 0 else { return nil }
+        address.mSelector = kAudioObjectPropertyName
+        var name: Unmanaged<CFString>?
+        size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        let named = withUnsafeMutablePointer(to: &name) { AudioObjectGetPropertyData(device, &address, 0, nil, &size, $0) } == noErr
+        address.mSelector = kAudioDevicePropertyTransportType
+        var transport: UInt32 = 0
+        size = UInt32(MemoryLayout<UInt32>.size)
+        let typed = AudioObjectGetPropertyData(device, &address, 0, nil, &size, &transport) == noErr
+        return InputDevice(name: named ? (name?.takeRetainedValue() as String? ?? "Unknown input") : "Unknown input",
+                           bluetooth: typed && (transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE))
     }
 }
