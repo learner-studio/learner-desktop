@@ -752,6 +752,8 @@ final class VoiceEnrollPanel: NSObject, NSWindowDelegate {
     var stepsText: String { steps.stringValue }
     var progressValue: Double { progress.doubleValue }
     var buttonTitle: String { button.title }
+    /// For tests: the button's fill (nil: the system's plain one).
+    var buttonColor: NSColor? { button.bezelColor }
     var passageText: String { passage.string }
 
     /// `underway`: an enrollment is already running, so its progress stays (no second Start).
@@ -838,6 +840,7 @@ final class VoiceEnrollPanel: NSObject, NSWindowDelegate {
         progress.doubleValue = 0
         status.stringValue = "Press Start when you are ready."
         button.title = "Start"
+        button.bezelColor = nil
     }
 
     /// Asking for speech-recognition permission (the first time, macOS asks the owner).
@@ -907,12 +910,16 @@ final class VoiceEnrollPanel: NSObject, NSWindowDelegate {
 
     func finished(_ result: VoiceIDEngine.EnrollResult) {
         running = false
-        button.title = "Close"
         switch result {
         case .done(let print):
+            // Finished: the button itself says so, green.
+            button.title = "Done!"
+            button.bezelColor = .systemGreen
             status.stringValue = "Done: enrolled from \(print.segments) segments, \(Int(print.speechSeconds)) s of speech."
             message.stringValue = "Your voiceprint is saved. Turn on \"Show 'Am I Talking?' Indicator\" in the 🎙 Voice ID menu to try it."
         case .failed(let why):
+            button.title = "Close"
+            button.bezelColor = nil
             progress.doubleValue = 0
             status.stringValue = "Not enrolled."
             message.stringValue = "Enrollment failed: \(why)"

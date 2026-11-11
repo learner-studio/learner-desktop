@@ -531,8 +531,15 @@ struct VoiceEnrollReadingWindowTests {
         c.tick()
         #expect(saved.value == 1)
         #expect(c.voiceprint != nil && c.readingMode == .off)
-        #expect(panel.buttonTitle == "Close" && panel.statusText.hasPrefix("Done"))
+        #expect(panel.buttonTitle == "Done!" && panel.statusText.hasPrefix("Done"))
+        #expect(panel.buttonColor == .systemGreen, "finished: the button turns green")
         #expect(fake.stops >= 1, "recognition stops once the reading is done")
+        // A failed one says Close, plain; Done! (like Close) closes the window.
+        panel.failed("test")
+        #expect(panel.buttonTitle == "Close" && panel.buttonColor == nil)
+        panel.finished(.done(try #require(c.voiceprint)))
+        panel.press()
+        #expect(panel.window?.isVisible != true, "Done! closes the window")
     }
 
     @Test func tooLittleSpeechIsKeptAndAReadingAgainAddsToIt() throws {
