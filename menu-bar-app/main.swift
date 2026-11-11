@@ -23,6 +23,10 @@ if CommandLine.arguments.contains("--drain-outbox") {
     exit(left == 0 ? 0 : 1)
 }
 
+// `--voice-enroll-selftest <wav>`: guided enrollment through the real speech recognizer, from
+// a recording (never the mic), without saving (VoiceEnrollSelfTest.swift). Run it via `open`.
+if CommandLine.arguments.contains("--voice-enroll-selftest") { runVoiceEnrollSelfTestCLI(CommandLine.arguments) }
+
 let app = NSApplication.shared
 let delegate = TrayAppManager()
 app.delegate = delegate

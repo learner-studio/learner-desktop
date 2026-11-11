@@ -71,6 +71,8 @@ cat << 'EOF' > "${BUNDLE_DIR}/Contents/Info.plist"
     <true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>Learner Desktop listens for your own speech on the microphone, on this Mac only (no audio is stored or sent), to time how long you have been talking and, with Voice ID on, to tell your voice from others'.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>When you enroll your voice for Voice ID, Learner Desktop follows your reading of the enrollment passage so each word turns green as you say it. Recognition runs on this Mac only; nothing is sent or stored, and it is used for nothing else.</string>
     <key>NSBluetoothAlwaysUsageDescription</key>
     <string>Learner Desktop connects directly to your Pavlok wearable wristband over Bluetooth Low Energy for instant, sub-15ms physical speech coaching feedback.</string>
     <key>NSBluetoothPeripheralUsageDescription</key>

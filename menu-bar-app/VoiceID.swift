@@ -7,8 +7,8 @@ import SherpaOnnxC
 
 // The owner's voice versus anyone else's, from the coach's own microphone frames (no second
 // tap): while Silero hears speech, a 1.5 s window is embedded every 0.5 s (3D-Speaker CAM++
-// through sherpa-onnx, on its own queue) and scored against a voiceprint enrolled from about
-// 60 s of the owner talking. Nothing about other speakers: no clustering, no names. No audio
+// through sherpa-onnx, on its own queue) and scored against a voiceprint enrolled from the
+// owner reading a passage aloud (VoiceEnrollReading.swift). Nothing about other speakers: no clustering, no names. No audio
 // is kept; the voiceprint is one averaged embedding in Application Support.
 
 enum VoiceID {
@@ -27,6 +27,8 @@ enum VoiceID {
     /// A window is speech, and worth the model, when at least this share of it is.
     static let minSpeechFraction = 0.5
     static let enrollSeconds = 60.0
+    /// Enrollment speech kept at most (about 11 MB): a reading that never ends cannot grow it.
+    static let maxEnrollSeconds = 180.0
     /// Enrollment speech is cut into segments this long (10 from 60 s); a shorter tail of at
     /// least `minSegmentSeconds` is kept as one more.
     static let segmentSeconds = 6.0
@@ -291,7 +293,10 @@ final class VoiceIDEngine: @unchecked Sendable {
         var enrollment: [Float]?
         /// Bumped by every start and cancel: a voiceprint computed for an older round is dropped.
         var enrollRound = 0
-        var enrollTarget = VoiceID.samples(VoiceID.enrollSeconds)
+        /// nil: until `finishEnrollment` (a guided reading decides when it is done).
+        var enrollTarget: Int? = VoiceID.samples(VoiceID.enrollSeconds)
+        /// Kept, not listening: the reading ended short of speech and may be read again.
+        var enrollPaused = false
     }
     private let feed = Locked(Feed())
 
@@ -309,6 +314,9 @@ final class VoiceIDEngine: @unchecked Sendable {
         /// 0...1 while enrolling.
         var enrollProgress: Double?
         var enrollResult: EnrollResult?
+        /// Speech heard so far this enrollment, and when Silero last called a frame speech.
+        var enrollSpeechSeconds = 0.0
+        var lastSpeechAt: Date?
     }
     let output = Locked(Output())
 
@@ -342,25 +350,65 @@ final class VoiceIDEngine: @unchecked Sendable {
     /// Loads the model ahead of the first window (a second or so), on the model queue.
     func warmUp() { queue.async { _ = self.loadedEmbedder() } }
 
-    func startEnrollment(seconds: Double = VoiceID.enrollSeconds) {
+    /// `seconds` of speech, or nil: until `finishEnrollment`.
+    func startEnrollment(seconds: Double? = VoiceID.enrollSeconds) {
         feed.withLock { f in
             f.enrollment = []
-            f.enrollTarget = VoiceID.samples(seconds)
+            f.enrollTarget = seconds.map(VoiceID.samples)
+            f.enrollPaused = false
             f.enrollRound += 1
         }
-        output.withLock { $0.enrollProgress = 0; $0.enrollResult = nil }
+        output.withLock { $0.enrollProgress = 0; $0.enrollResult = nil; $0.enrollSpeechSeconds = 0; $0.lastSpeechAt = nil }
+    }
+
+    /// An open-ended enrollment turns time-based (the reading can no longer be followed).
+    func setEnrollmentTarget(seconds: Double) {
+        feed.withLock { if $0.enrollment != nil { $0.enrollTarget = VoiceID.samples(seconds) } }
+    }
+
+    /// Stops taking speech but keeps what was heard (the reading ended short of speech).
+    func pauseEnrollment() {
+        feed.withLock { if $0.enrollment != nil { $0.enrollPaused = true } }
+    }
+
+    /// Listens again, adding to the speech kept; `seconds` as in `startEnrollment`.
+    func resumeEnrollment(seconds: Double?) {
+        feed.withLock { f in
+            guard f.enrollment != nil else { return }
+            f.enrollPaused = false
+            f.enrollTarget = seconds.map(VoiceID.samples)
+        }
+    }
+
+    var enrollmentPaused: Bool { feed.withLock { $0.enrollment != nil && $0.enrollPaused } }
+
+    /// The voiceprint from the speech heard so far (the reading is done). False when no
+    /// enrollment was listening.
+    @discardableResult
+    func finishEnrollment() -> Bool {
+        let taken: ([Float], Int)? = feed.withLock { f in
+            guard let speech = f.enrollment else { return nil }
+            f.enrollment = nil
+            f.window.reset()
+            return (speech, f.enrollRound)
+        }
+        guard let (speech, round) = taken else { return false }
+        output.withLock { $0.enrollProgress = 1 }
+        queue.async { self.run(.enroll(speech, round)) }
+        return true
     }
 
     /// Stops listening, and drops a voiceprint already being made: nothing is saved.
     func cancelEnrollment() {
-        feed.withLock { $0.enrollment = nil; $0.enrollRound += 1 }
+        feed.withLock { $0.enrollment = nil; $0.enrollPaused = false; $0.enrollRound += 1 }
         output.withLock { $0.enrollProgress = nil }
     }
 
     /// Whether an enrollment is listening or its voiceprint is being made.
     var enrollmentUnderway: Bool { feed.withLock { $0.enrollment != nil } || output.withLock { $0.enrollProgress != nil } }
 
-    var enrolling: Bool { feed.withLock { $0.enrollment != nil } }
+    /// Listening for enrollment speech (not paused).
+    var enrolling: Bool { feed.withLock { $0.enrollment != nil && !$0.enrollPaused } }
 
     private enum Work: Sendable {
         case score([Float])
@@ -371,23 +419,32 @@ final class VoiceIDEngine: @unchecked Sendable {
     /// On the VAD queue: one batch of Silero's frames. Returns at once.
     func frames(_ frames: [SileroVAD.Frame], now: Date = Date()) {
         var progress: Double?
+        var heardSpeech: Double?
+        var spoke = false
         let work: [Work] = feed.withLock { f in
             if let last = f.lastFrameAt, now.timeIntervalSince(last) > VoiceID.gapSeconds { f.window.reset() }
             f.lastFrameAt = now
             var work: [Work] = []
             for frame in frames {
                 let speech = frame.probability >= VoiceID.speechProbability
+                if f.enrollment != nil, f.enrollPaused {
+                    continue   // kept for a second reading; neither enrolling nor scoring live
+                }
                 if f.enrollment != nil {
                     // Only what Silero calls speech: pauses would dilute the voiceprint. Appended in
                     // place (a copy per frame would be megabytes on this queue, under this lock).
-                    if speech { f.enrollment!.append(contentsOf: frame.samples) }
+                    if speech {
+                        spoke = true
+                        if f.enrollment!.count < VoiceID.samples(VoiceID.maxEnrollSeconds) { f.enrollment!.append(contentsOf: frame.samples) }
+                    }
                     let heard = f.enrollment!.count
-                    if heard >= f.enrollTarget {
+                    heardSpeech = Double(heard) / Double(VoiceID.sampleRate)
+                    if let target = f.enrollTarget, heard >= target {
                         work.append(.enroll(f.enrollment!, f.enrollRound))
                         f.enrollment = nil
                         f.window.reset()   // live scoring starts afresh, not mid-window from before
-                    } else {
-                        progress = Double(heard) / Double(f.enrollTarget)
+                    } else if let target = f.enrollTarget {
+                        progress = Double(heard) / Double(target)
                     }
                     continue   // no live scoring while enrolling
                 }
@@ -403,7 +460,13 @@ final class VoiceIDEngine: @unchecked Sendable {
             }
             return work
         }
-        if let progress { output.withLock { $0.enrollProgress = progress } }
+        if progress != nil || heardSpeech != nil {
+            output.withLock { o in
+                if let progress { o.enrollProgress = progress }
+                if let heardSpeech { o.enrollSpeechSeconds = heardSpeech }
+                if spoke { o.lastSpeechAt = now }
+            }
+        }
         for w in work {
             if case .score(let s) = w, s.isEmpty {
                 output.withLock { $0.dropped += 1 }
@@ -626,17 +689,51 @@ final class VoiceIndicatorController {
 
 // MARK: - Enrollment panel
 
-/// "Talk normally for about 60 s": progress while it listens, then done or why not.
+/// "Read this aloud", one sentence at a time: the sentence large, each word green once heard and
+/// the next one bold and underlined, a pill per sentence (✓ when done), progress, a status
+/// line and Start/Cancel. Without tracking, the whole passage shows plain and progress counts
+/// 60 s of speech, with the reason on the status line.
 @MainActor
 final class VoiceEnrollPanel: NSObject, NSWindowDelegate {
+    static let size = NSSize(width: 560, height: 420)
+    static let sentenceFont = NSFont.systemFont(ofSize: 22)
+    static let passageFont = NSFont.systemFont(ofSize: 14)
     private(set) var window: NSPanel?
     private let message = NSTextField(wrappingLabelWithString: "")
+    private let steps = NSTextField(labelWithString: "")
+    private let scroll = NSScrollView()
+    private let passage = NSTextView()
     private let progress = NSProgressIndicator()
-    private let status = NSTextField(labelWithString: "")
+    private let status = NSTextField(wrappingLabelWithString: "")
     private let button = NSButton(title: "Start", target: nil, action: nil)
     var onStart: (() -> Void)?
     var onCancel: (() -> Void)?
     private var running = false
+    let words: [String]
+    let paragraphs: [String]
+    let sentences: ReadingSentences
+
+    /// What the text view holds: one sentence (tracked) or the whole passage (not tracked).
+    enum Display: Equatable { case sentence(Int), passage }
+    private(set) var display = Display.sentence(0)
+    /// The shown words' ranges in the text view, and their styles.
+    private var ranges: [NSRange] = []
+    private(set) var wordStyles: [WordStyle] = []
+    /// Why the reading is not followed this round, or nil.
+    private(set) var trackingNote: String?
+
+    init(words: [String] = ReadingPassage.words, paragraphs: [String] = ReadingPassage.paragraphs) {
+        self.words = words
+        self.paragraphs = paragraphs
+        sentences = ReadingSentences(words: words)
+        super.init()
+    }
+
+    var statusText: String { status.stringValue }
+    var stepsText: String { steps.stringValue }
+    var progressValue: Double { progress.doubleValue }
+    var buttonTitle: String { button.title }
+    var passageText: String { passage.string }
 
     /// `underway`: an enrollment is already running, so its progress stays (no second Start).
     func show(underway: Bool = false) {
@@ -651,7 +748,7 @@ final class VoiceEnrollPanel: NSObject, NSWindowDelegate {
     }
 
     private func make() -> NSPanel {
-        let size = NSSize(width: 380, height: 170)
+        let size = Self.size
         let w = NSPanel(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled, .closable, .utilityWindow],
                         backing: .buffered, defer: false)
         w.title = "Enroll My Voice"
@@ -663,47 +760,121 @@ final class VoiceEnrollPanel: NSObject, NSWindowDelegate {
         w.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         w.delegate = self
         let v = NSView(frame: NSRect(origin: .zero, size: size))
-        message.frame = NSRect(x: 20, y: 92, width: size.width - 40, height: 60)
+        let inner = size.width - 40
+        message.frame = NSRect(x: 20, y: 366, width: inner, height: 44)
         message.font = .systemFont(ofSize: 12)
-        progress.frame = NSRect(x: 20, y: 66, width: size.width - 40, height: 16)
+        steps.frame = NSRect(x: 20, y: 340, width: inner, height: 20)
+        steps.font = .systemFont(ofSize: 13, weight: .medium)
+        steps.textColor = .secondaryLabelColor
+        steps.lineBreakMode = .byTruncatingTail
+        scroll.frame = NSRect(x: 20, y: 134, width: inner, height: 200)
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        passage.frame = NSRect(origin: .zero, size: scroll.contentSize)
+        passage.autoresizingMask = [.width]
+        passage.isEditable = false
+        passage.isSelectable = false
+        passage.textContainerInset = NSSize(width: 12, height: 14)
+        passage.drawsBackground = true
+        passage.backgroundColor = .textBackgroundColor
+        scroll.documentView = passage
+        progress.frame = NSRect(x: 20, y: 108, width: inner, height: 16)
         progress.isIndeterminate = false
         progress.minValue = 0
         progress.maxValue = 1
-        status.frame = NSRect(x: 20, y: 42, width: size.width - 40, height: 18)
+        status.frame = NSRect(x: 20, y: 46, width: inner, height: 54)
         status.font = .systemFont(ofSize: 11)
         status.textColor = .secondaryLabelColor
-        status.lineBreakMode = .byTruncatingTail
-        button.frame = NSRect(x: size.width - 110, y: 8, width: 92, height: 28)
+        button.frame = NSRect(x: size.width - 150, y: 10, width: 132, height: 28)
         button.bezelStyle = .rounded
         button.target = self
         button.action = #selector(clicked)
-        [message, progress, status, button].forEach(v.addSubview)
+        [message, steps, scroll, progress, status, button].forEach(v.addSubview)
         w.contentView = v
         return w
     }
 
     private func ready() {
         running = false
-        message.stringValue = "Talk normally for about a minute: read something aloud, or describe your day. Only your speech counts; pauses are skipped. Nothing is recorded, only a voiceprint is kept."
+        trackingNote = nil
+        message.stringValue = "Press Start, then read each sentence aloud at your normal pace. Words turn green as they are heard; the next sentence follows. Recognition runs on this Mac only; nothing is recorded, only a voiceprint is kept."
+        show(.start)
         progress.doubleValue = 0
         status.stringValue = "Press Start when you are ready."
         button.title = "Start"
     }
 
+    /// Asking for speech-recognition permission (the first time, macOS asks the owner).
+    func preparing() { status.stringValue = "Getting speech recognition ready…" }
+
+    /// Where a tracked reading is, in passage word indices.
+    struct Snapshot: Equatable {
+        var reached: Int
+        /// Words actually heard (the others passed over show dim).
+        var matched: Set<Int>
+        /// The sentence shown (the first not read); `count` once all are.
+        var current: Int
+        var done: Set<Int>
+        /// The current sentence is asked for once more.
+        var again = false
+
+        static let start = Snapshot(reached: 0, matched: [], current: 0, done: [])
+
+        /// Every word up to `reached` heard, every sentence before it read.
+        static func heard(upTo reached: Int, sentences: ReadingSentences) -> Snapshot {
+            let current = sentences.index(at: reached)
+            return Snapshot(reached: reached, matched: Set(0..<reached), current: current, done: Set(0..<current))
+        }
+    }
+
+    /// Tracked: `reached` words of the passage are green.
+    func reading(reached: Int, speechSeconds: Double, waitingForMic: Bool) {
+        reading(.heard(upTo: reached, sentences: sentences), speechSeconds: speechSeconds, waitingForMic: waitingForMic)
+    }
+
+    func reading(_ at: Snapshot, speechSeconds: Double, waitingForMic: Bool) {
+        trackingNote = nil
+        show(at)
+        progress.doubleValue = sentences.count == 0 ? 0 : Double(at.done.count) / Double(sentences.count)
+        let i = min(at.current, sentences.count - 1)
+        let speech = "\(Int(speechSeconds)) s of speech (\(Int(ReadingCompletion.minSpeechSeconds)) s needed)"
+        status.stringValue = waitingForMic ? "Waiting for the microphone…"
+            : at.again ? "Not all of sentence \(i + 1) was heard: read it once more, clearly. · \(speech)"
+            : "Read on… sentence \(i + 1) of \(sentences.count) · \(speech)"
+    }
+
+    /// Not tracked: the whole passage to read, plain; progress is time-based.
+    func untracked(_ why: String) {
+        trackingNote = why
+        setDisplay(.passage)
+        setStyles(WordStyle.styles(count: words.count, reached: 0, tracking: false))
+        steps.stringValue = ""
+        message.stringValue = "Read the passage aloud at your normal pace (or keep talking) until the bar is full. Only your speech counts; pauses are skipped. Nothing is recorded, only a voiceprint is kept."
+        listening(progress.doubleValue, waitingForMic: false)
+    }
+
     func listening(_ fraction: Double, waitingForMic: Bool) {
         progress.doubleValue = fraction
-        status.stringValue = waitingForMic ? "Waiting for the microphone…"
+        let line = waitingForMic ? "Waiting for the microphone…"
             : "Listening… \(Int(fraction * VoiceID.enrollSeconds)) of \(Int(VoiceID.enrollSeconds)) s of speech"
+        status.stringValue = trackingNote.map { "Reading tracking isn't available: \($0). \(line)" } ?? line
     }
 
     func computing() { status.stringValue = "Making your voiceprint…"; progress.doubleValue = 1 }
+
+    /// The passage is read, but too little of it was speech for a voiceprint. The speech is kept
+    /// (`running` stays: closing the window still discards it); reading again adds to it.
+    func needsMoreSpeech(_ seconds: Double) {
+        button.title = "Read It Again"
+        status.stringValue = "You reached the end, but only \(Int(seconds)) s of speech were heard (\(Int(ReadingCompletion.minSpeechSeconds)) s needed). Read it again from the first sentence: what was heard is kept and added to."
+    }
 
     func finished(_ result: VoiceIDEngine.EnrollResult) {
         running = false
         button.title = "Close"
         switch result {
         case .done(let print):
-            status.stringValue = "Done: enrolled from \(print.segments) segments."
+            status.stringValue = "Done: enrolled from \(print.segments) segments, \(Int(print.speechSeconds)) s of speech."
             message.stringValue = "Your voiceprint is saved. Turn on \"Show 'Am I Talking?' Indicator\" in the 🎙 Voice ID menu to try it."
         case .failed(let why):
             progress.doubleValue = 0
@@ -714,9 +885,91 @@ final class VoiceEnrollPanel: NSObject, NSWindowDelegate {
 
     func failed(_ why: String) { finished(.failed(why)) }
 
+    /// The current sentence, its words styled, and the pills. Once all are read the last
+    /// sentence stays, green.
+    private func show(_ at: Snapshot) {
+        guard sentences.count > 0 else { return }
+        let i = at.current
+        let shown = min(i, sentences.count - 1)
+        setDisplay(.sentence(shown))
+        setStyles(WordStyle.styles(range: sentences.ranges[shown], reached: at.reached, matched: at.matched))
+        steps.stringValue = Self.pills(current: i, done: at.done, count: sentences.count)
+            + "   " + (i < sentences.count ? "Sentence \(i + 1) of \(sentences.count)" : "All \(sentences.count) sentences read")
+    }
+
+    /// ✓ per finished sentence, ● the current one, ○ those to come.
+    nonisolated static func pills(current: Int, count: Int) -> String {
+        pills(current: current, done: Set(0..<current), count: count)
+    }
+
+    nonisolated static func pills(current: Int, done: Set<Int>, count: Int) -> String {
+        (0..<count).map { $0 == current ? "●" : done.contains($0) ? "✓" : "○" }.joined(separator: " ")
+    }
+
+    private func setDisplay(_ next: Display) {
+        guard next != display || ranges.isEmpty, let storage = passage.textStorage else { return }
+        display = next
+        let shownWords: [String]
+        let text: String
+        let font: NSFont
+        switch next {
+        case .sentence(let i):
+            shownWords = Array(words[sentences.ranges[i]])
+            text = shownWords.joined(separator: " ")
+            font = Self.sentenceFont
+        case .passage:
+            shownWords = words
+            text = paragraphs.joined(separator: "\n\n")
+            font = Self.passageFont
+        }
+        let ns = text as NSString
+        var at = 0
+        ranges = shownWords.map { w in
+            let r = ns.range(of: w, range: NSRange(location: at, length: ns.length - at))
+            if r.location != NSNotFound { at = r.location + r.length }
+            return r
+        }
+        let para = NSMutableParagraphStyle()
+        para.lineSpacing = next == .passage ? 4 : 8
+        storage.setAttributedString(NSAttributedString(string: text, attributes: [.font: font, .paragraphStyle: para,
+                                                                                  .foregroundColor: NSColor.labelColor]))
+        wordStyles = []
+    }
+
+    private func setStyles(_ next: [WordStyle]) {
+        guard next != wordStyles, let storage = passage.textStorage else { return }
+        wordStyles = next
+        let base = display == .passage ? Self.passageFont : Self.sentenceFont
+        storage.beginEditing()
+        for (r, style) in zip(ranges, next) where r.location != NSNotFound {
+            storage.removeAttribute(.underlineStyle, range: r)
+            storage.addAttributes(Self.attributes(style, base: base), range: r)
+        }
+        storage.endEditing()
+        if let n = next.firstIndex(of: .next), ranges[n].location != NSNotFound { passage.scrollRangeToVisible(ranges[n]) }
+    }
+
+    static func attributes(_ style: WordStyle, base: NSFont) -> [NSAttributedString.Key: Any] {
+        switch style {
+        case .read: return [.foregroundColor: NSColor.systemGreen, .font: base]
+        case .skipped: return [.foregroundColor: NSColor.systemGreen.withAlphaComponent(0.4), .font: base]
+        case .next: return [.foregroundColor: NSColor.labelColor, .font: NSFont.boldSystemFont(ofSize: base.pointSize),
+                            .underlineStyle: NSUnderlineStyle.single.rawValue]
+        case .unread: return [.foregroundColor: NSColor.tertiaryLabelColor, .font: base]
+        case .plain: return [.foregroundColor: NSColor.labelColor, .font: base]
+        }
+    }
+
+    /// The colour shown word `i` (of those shown) is drawn in (tests).
+    func color(ofWord i: Int) -> NSColor? {
+        guard ranges.indices.contains(i), ranges[i].location != NSNotFound, let storage = passage.textStorage,
+              ranges[i].location < storage.length else { return nil }
+        return storage.attribute(.foregroundColor, at: ranges[i].location, effectiveRange: nil) as? NSColor
+    }
+
     @objc private func clicked() {
         switch button.title {
-        case "Start":
+        case "Start", "Read It Again":
             running = true
             button.title = "Cancel"
             status.stringValue = "Listening…"
@@ -728,6 +981,9 @@ final class VoiceEnrollPanel: NSObject, NSWindowDelegate {
             window?.close()
         }
     }
+
+    /// For tests: the button, as the owner would press it.
+    func press() { clicked() }
 
     func windowWillClose(_ notification: Notification) {
         if running { running = false; onCancel?() }
@@ -754,14 +1010,31 @@ final class VoiceIDController {
     private var listening = false
     private(set) var panel: VoiceEnrollPanel?
     private let log = Log("VoiceID")
+    /// Follows the reading during enrollment, from the same frames.
+    let tracker: ReadingTracker
+    let sentences = ReadingSentences()
+    /// Which sentences are read, with rigor (most of each really heard).
+    private(set) var reading = ReadingState()
+    /// Speech heard when the reading last moved on (or started): 20 s more with no word
+    /// advancing means recognition is not following the owner.
+    private var speechAtLastAdvance = 0.0
+    private var lastProgress: (reached: Int, heard: Int) = (0, 0)
+
+    enum ReadingMode: Equatable { case off, tracked, untracked(String) }
+    private(set) var readingMode = ReadingMode.off
+    /// Bumped by every Start and Cancel: a permission answer for an older Start is ignored.
+    private var attempt = 0
+    var now: () -> Date = Date.init
 
     init(mic: MicSpeechSource?, engine: VoiceIDEngine = VoiceIDEngine(), defaults: UserDefaults = .standard,
-         modelPresent: Bool = VoiceID.modelURL != nil, voiceprint: Voiceprint? = Voiceprint.load()) {
+         modelPresent: Bool = VoiceID.modelURL != nil, voiceprint: Voiceprint? = Voiceprint.load(),
+         recognizer: ReadingRecognizer = AppleReadingRecognizer()) {
         self.mic = mic
         self.engine = engine
         self.defaults = defaults
         self.modelPresent = modelPresent
         self.voiceprint = voiceprint
+        tracker = ReadingTracker(recognizer: recognizer)
         engine.use(voiceprint)
     }
 
@@ -797,7 +1070,9 @@ final class VoiceIDController {
         listening = on
         if on {
             let engine = self.engine
-            mic?.listen { frames in engine.frames(frames) }
+            let recognizer = tracker.recognizer
+            // The recognizer drops frames unless a reading is being followed.
+            mic?.listen { frames in engine.frames(frames); recognizer.append(frames) }
             if modelPresent { engine.warmUp() }
             let t = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.tick() } }
             // Common modes: it also runs while the tray menu is open.
@@ -812,7 +1087,7 @@ final class VoiceIDController {
     }
 
     /// Main thread, at most 4 times a second: the pill and the enrollment panel.
-    private func tick() {
+    func tick() {
         let out = engine.output.value
         let micOn = mic?.isListening ?? false
         if indicatorShown {
@@ -821,8 +1096,13 @@ final class VoiceIDController {
         if let result = out.enrollResult {
             engine.output.withLock { $0.enrollResult = nil }
             if case .done(let print) = result { voiceprint = print }
+            readingMode = .off
             panel?.finished(result)
             apply()
+        } else if readingMode == .tracked, engine.enrolling {
+            followReading(out, micOn: micOn)
+        } else if engine.enrollmentPaused {
+            // Kept for "Read It Again": the panel says so already.
         } else if let p = out.enrollProgress {
             if p >= 1 || (p > 0 && !engine.enrolling) { panel?.computing() } else { panel?.listening(p, waitingForMic: !micOn) }
         }
@@ -873,6 +1153,9 @@ final class VoiceIDController {
         p.show(underway: underway)
     }
 
+    /// Tests stand in for the microphone check (they have no microphone).
+    var blocker: (@MainActor () -> String?)?
+
     /// Why enrollment cannot start now, or nil.
     func enrollmentBlocker() -> String? {
         if !modelPresent { return "the voice model is missing (run scripts/fetch-voice-id.sh, then rebuild the app)" }
@@ -885,17 +1168,106 @@ final class VoiceIDController {
     }
 
     private func beginEnrollment() {
-        if let why = enrollmentBlocker() {
+        attempt += 1
+        if let why = (blocker ?? enrollmentBlocker)() {
             log.warn("enrollment not started: \(why)")
             panel?.failed(why)
             return
         }
-        log.info("enrollment started")
-        engine.startEnrollment()
+        let mine = attempt
+        panel?.preparing()
+        tracker.recognizer.prepare { [weak self] availability in
+            guard let self, self.attempt == mine else { return }   // cancelled while macOS asked
+            self.startReading(availability)
+        }
+    }
+
+    /// Listening starts: followed word by word when recognition is available, else on 60 s of
+    /// speech as before, saying why on the status line.
+    func startReading(_ availability: ReadingTrackingAvailability) {
+        // "Read It Again": the speech heard last time is kept and added to.
+        let again = engine.enrollmentPaused
+        switch availability {
+        case .available:
+            log.info("enrollment \(again ? "resumed" : "started"): following the reading on device")
+            readingMode = .tracked
+            if again { engine.resumeEnrollment(seconds: nil) } else { engine.startEnrollment(seconds: nil) }
+            reading = ReadingState(sentences: sentences, passage: tracker.passage)
+            speechAtLastAdvance = engine.output.value.enrollSpeechSeconds
+            lastProgress = (0, 0)
+            tracker.start()
+            panel?.reading(.start, speechSeconds: engine.output.value.enrollSpeechSeconds, waitingForMic: false)
+        case .unavailable(let why):
+            log.warn("enrollment \(again ? "resumed" : "started") without reading tracking: \(why)")
+            readingMode = .untracked(why)
+            if again { engine.resumeEnrollment(seconds: VoiceID.enrollSeconds) } else { engine.startEnrollment() }
+            panel?.untracked(why)
+        }
         listen(true)
     }
 
+    /// Where the reading is, for the panel and the self-test.
+    var readingSnapshot: VoiceEnrollPanel.Snapshot {
+        .init(reached: tracker.reached, matched: tracker.matched, current: reading.current, done: reading.done,
+              again: reading.again != nil && reading.again == reading.current)
+    }
+
+    /// Tick, while a tracked reading listens: colours, and done (or too little speech).
+    private func followReading(_ out: VoiceIDEngine.Output, micOn: Bool) {
+        // Recognition gave up, or hears nothing while Silero hears the owner: the speech so far
+        // still counts, toward 60 s.
+        let progress = (reached: tracker.reached, heard: tracker.matched.count + tracker.misheard.count)
+        if progress != lastProgress {
+            lastProgress = progress
+            speechAtLastAdvance = out.enrollSpeechSeconds
+        }
+        let stuck = out.enrollSpeechSeconds - speechAtLastAdvance >= ReadingCompletion.silentRecognizerSeconds
+        let silent = "no words were recognized in \(Int(ReadingCompletion.silentRecognizerSeconds)) s of speech"
+        if let why = tracker.failure ?? (stuck ? (progress == (0, 0) ? silent : "the reading stopped moving: " + silent) : nil) {
+            log.warn("reading not followed any more: \(why)")
+            tracker.stop()
+            readingMode = .untracked(why)
+            engine.setEnrollmentTarget(seconds: VoiceID.enrollSeconds)
+            panel?.untracked(why)
+            return
+        }
+        let quiet = out.lastSpeechAt.map { now().timeIntervalSince($0) } ?? .infinity
+        // A sentence whose last word or two the recognizer missed is done once the owner stops.
+        let settled = sentences.settled(reached: tracker.reached, quietFor: quiet)
+        if settled > tracker.reached { tracker.move(to: settled) }
+        // Back to a sentence not heard well enough, or on past one read once more.
+        if let move = reading.update(reached: tracker.reached, matched: tracker.matched, misheard: tracker.misheard) {
+            if let r = move.forget {
+                log.info("sentence \(reading.current + 1) asked for once more (too few of its words heard)")
+                tracker.forget(r)
+            }
+            tracker.move(to: move.to)
+        }
+        switch ReadingCompletion.verdict(allRead: reading.allRead, speechSeconds: out.enrollSpeechSeconds) {
+        case .reading:
+            panel?.reading(readingSnapshot, speechSeconds: out.enrollSpeechSeconds, waitingForMic: !micOn)
+        case .done:
+            log.info(String(format: "reading done (%d of %d words heard, %.0f s of speech): making the voiceprint",
+                            tracker.matched.count, tracker.total, out.enrollSpeechSeconds))
+            tracker.stop()
+            panel?.reading(readingSnapshot, speechSeconds: out.enrollSpeechSeconds, waitingForMic: false)
+            engine.finishEnrollment()
+            panel?.computing()
+        case .tooLittleSpeech(let seconds):
+            log.warn(String(format: "reading done but only %.0f s of speech: kept, to read again", seconds))
+            tracker.stop()
+            readingMode = .off
+            engine.pauseEnrollment()
+            panel?.reading(readingSnapshot, speechSeconds: seconds, waitingForMic: false)
+            panel?.needsMoreSpeech(seconds)
+            apply()
+        }
+    }
+
     private func cancelEnrollment() {
+        attempt += 1
+        tracker.stop()
+        readingMode = .off
         guard engine.enrollmentUnderway else { return }
         log.info("enrollment cancelled")
         engine.cancelEnrollment()
