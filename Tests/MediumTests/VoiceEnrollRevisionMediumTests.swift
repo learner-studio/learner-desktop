@@ -80,8 +80,8 @@ struct VoiceEnrollRevisionMediumTests {
 
     // MARK: Words lost in a row (the recognizer dropped them)
 
-    /// The whole passage read with `k` words from `p` lost, results growing `step` words at a
-    /// time. `reachedEnd`: the tracker followed to the last word (it caught up after the gap).
+    /// The passage read with `k` words from `p` lost, results growing `step` words at a time,
+    /// up to the sentence after the gap. `reachedEnd`: the tracker followed to the last word (it caught up after the gap).
     /// `completed`: the owner, reading what the window shows (a sentence asked for again is read
     /// again; a pause at each sentence's end), finished the enrollment.
     static func dropped(_ k: Int, at p: Int, step: Int) -> (reachedEnd: Bool, completed: Bool) {
@@ -90,7 +90,11 @@ struct VoiceEnrollRevisionMediumTests {
         var tr: [String] = []
         var lost = Set(p..<(p + k))
         var w = 0, reachedEnd = false, said = 0
+        // Once the sentence after the lost words is read, the tracker has caught up: the rest is
+        // a clean reading (tested on its own), so the run stops there.
+        let caughtUp = min(sentences.index(at: min(p + k, P.count - 1)) + 2, sentences.count)
         while !st.allRead, said < 6 * P.count {
+            if st.current >= caughtUp, st.done.isSuperset(of: 0..<caughtUp) { return (true, true) }
             let shown = sentences.ranges[min(st.current, sentences.count - 1)]
             if !shown.contains(w) { w = shown.lowerBound }   // asked again, or on to the next
             if lost.remove(w) == nil { tr.append(P[w]); said += 1 }

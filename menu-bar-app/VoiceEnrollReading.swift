@@ -66,20 +66,34 @@ enum ReadingAlignment {
     }
 
     /// Edit distance over UTF-8 bytes (keys are lower-case letters and digits: one byte each
-    /// for the passage's words). Called for every candidate word: kept cheap.
-    static func distance(_ a: String, _ b: String) -> Int {
-        let a = Array(a.utf8), b = Array(b.utf8)
-        if a.isEmpty { return b.count }
-        if b.isEmpty { return a.count }
-        var prev = Array(0...b.count), cur = [Int](repeating: 0, count: b.count + 1)
-        for i in 1...a.count {
-            cur[0] = i
-            for j in 1...b.count {
-                cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1))
+    /// for the passage's words). Called for every candidate word: no heap, and it stops as soon
+    /// as the distance is past `limit` (returning `limit + 1`).
+    static func distance(_ a: String, _ b: String, limit: Int = Int.max - 1) -> Int {
+        var a = a, b = b
+        return a.withUTF8 { pa in
+            b.withUTF8 { pb in
+                let n = pa.count, m = pb.count
+                if n == 0 { return min(m, limit + 1) }
+                if m == 0 { return min(n, limit + 1) }
+                if abs(n - m) > limit { return limit + 1 }
+                return withUnsafeTemporaryAllocation(of: Int.self, capacity: 2 * (m + 1)) { buf in
+                    var prev = 0, cur = m + 1
+                    for j in 0...m { buf[prev + j] = j }
+                    for i in 1...n {
+                        buf[cur] = i
+                        var best = i
+                        for j in 1...m {
+                            let v = Swift.min(buf[prev + j] + 1, buf[cur + j - 1] + 1, buf[prev + j - 1] + (pa[i - 1] == pb[j - 1] ? 0 : 1))
+                            buf[cur + j] = v
+                            best = Swift.min(best, v)
+                        }
+                        if best > limit { return limit + 1 }
+                        swap(&prev, &cur)
+                    }
+                    return Swift.min(buf[prev + m], limit + 1)
+                }
             }
-            swap(&prev, &cur)
         }
-        return prev[b.count]
     }
 
     /// Same word, allowing small recognition errors: none when either is short ("the" is not
@@ -89,7 +103,7 @@ enum ReadingAlignment {
         let la = a.utf8.count, lb = b.utf8.count
         let allowed = min(la, lb) <= 3 ? 0 : max(la, lb) <= 7 ? 1 : 2
         // More letters apart than edits allowed: no need to count them.
-        return allowed > 0 && abs(la - lb) <= allowed && distance(a, b) <= allowed
+        return allowed > 0 && abs(la - lb) <= allowed && distance(a, b, limit: allowed) <= allowed
     }
 
     /// How many heard words, starting at `i`, match the passage word at `j`, and the passage
@@ -100,7 +114,11 @@ enum ReadingAlignment {
         if i + 1 < heard.count, similar(heard[i] + heard[i + 1], passage[j]) { return (2, j + 1) }
         // Not when the heard word is just the second one ("prism" is not "a prism": the "a"
         // was not heard).
-        if j + 1 < passage.count, !similar(heard[i], passage[j + 1]), similar(heard[i], passage[j] + passage[j + 1]) { return (1, j + 2) }
+        // At most one edit: a merge of two other words ("Whensunlight") is not "the sunlight".
+        if j + 1 < passage.count, !similar(heard[i], passage[j + 1]) {
+            let pair = passage[j] + passage[j + 1]
+            if heard[i] == pair || (min(heard[i].utf8.count, pair.utf8.count) > 3 && distance(heard[i], pair, limit: 1) <= 1) { return (1, j + 2) }
+        }
         return nil
     }
 
@@ -134,7 +152,13 @@ enum ReadingAlignment {
     /// are taken as the reading having got there: words lost in a row (the recognizer dropped
     /// them, or a request began a few words on) do not stop it. The words passed over are not
     /// credited.
-    static func align(heard: [String], passage: [String], from start: Int, catchUpTo: Int? = nil) -> Alignment {
+    /// `passed`: words the reading already went past (the current sentence so far): a pair that
+    /// also agrees with two of those is a re-read, never a catch-up. `strictShort`: after heard
+    /// words that placed nowhere (the reading is lost), a short word never skips a word without
+    /// the next heard word agreeing (words aligned again and again while lost must not land on a
+    /// stray "a" or "and").
+    static func align(heard: [String], passage: [String], from start: Int, catchUpTo: Int? = nil,
+                      passed: Range<Int>? = nil, strictShort: Bool = false) -> Alignment {
         var pos = min(max(0, start), passage.count)
         var result = Alignment(reached: pos)
         result.hits = Array(repeating: false, count: heard.count)
@@ -147,7 +171,9 @@ enum ReadingAlignment {
             let limit = min(passage.count, pos + 1 + maxSkip)
             // A short word ("the", "of") is everywhere: it needs the next heard word to agree
             // before it skips more than one; a longer one, more than two.
-            let free = word.count <= 3 ? 1 : 2
+            // While lost (heard words just before it placed nowhere), a short word does not skip
+            // on its own: "a" or "and" from a later sentence must not land here.
+            let free = word.utf8.count <= 3 ? (strictShort && !unplaced.isEmpty ? 0 : 1) : 2
             var taken = 1
             for j in pos..<limit {
                 guard let m = match(heard, i, passage, j) else { continue }
@@ -173,7 +199,8 @@ enum ReadingAlignment {
             }
             if pos == before, let bound = catchUpTo, i + 1 < heard.count, max(word.count, heard[i + 1].count) > 3,
                limit < bound - 1,
-               let j = (limit..<min(bound, passage.count) - 1).first(where: { similar(word, passage[$0]) && similar(heard[i + 1], passage[$0 + 1]) }) {
+               let j = (limit..<min(bound, passage.count) - 1).first(where: { similar(word, passage[$0]) && similar(heard[i + 1], passage[$0 + 1]) }),
+               !(passed ?? 0..<0).contains(where: { $0 + 1 < passage.count && similar(word, passage[$0]) && similar(heard[i + 1], passage[$0 + 1]) }) {
                 unplaced = []
                 result.matched.append(contentsOf: [j, j + 1])
                 result.lastMatchedHeard = i + 1
@@ -200,7 +227,7 @@ enum ReadingAlignment {
         if similar(heard, word) { return true }
         let lh = heard.utf8.count, lw = word.utf8.count
         let allowed = (min(lh, lw) <= 3 ? 0 : max(lh, lw) <= 7 ? 1 : 2) + 1
-        if abs(lh - lw) <= allowed, distance(heard, word) <= allowed { return true }
+        if abs(lh - lw) <= allowed, distance(heard, word, limit: allowed) <= allowed { return true }
         if heard.count >= 3, word.count >= 3, heard.prefix(3) == word.prefix(3) { return true }
         let a = sound(heard), b = sound(word)
         return a.count >= 2 && a == b
@@ -261,6 +288,9 @@ struct ReadingSentences: Equatable {
 
     var count: Int { ranges.count }
 
+    /// The passage's, worked out once.
+    static let passage = ReadingSentences()
+
     /// The sentence being read when `reached` words are green; `count` once all are.
     func index(at reached: Int) -> Int {
         ranges.firstIndex { reached < $0.upperBound } ?? count
@@ -293,7 +323,7 @@ struct ReadingState: Equatable {
     /// The sentence asked for once more, if any.
     private(set) var again: Int?
 
-    init(sentences: ReadingSentences = ReadingSentences(), passage: [String] = ReadingPassage.keys) {
+    init(sentences: ReadingSentences = .passage, passage: [String] = ReadingPassage.keys) {
         self.sentences = sentences
         self.passage = passage
     }
@@ -726,6 +756,8 @@ struct ReadingFollower {
     private var previous: [Heard] = []
     private var keyCache: [String: String] = [:]
     private var speechAtMove: Double?
+    /// The words a settle moved past, still expected (see `move`).
+    private var pendingTail: [Int] = []
 
     // Diagnostics (counts only, never the words).
     private(set) var transcriptWords = 0
@@ -734,8 +766,9 @@ struct ReadingFollower {
     private(set) var freshTranscripts = 0
 
     init(words: [String] = ReadingPassage.words) {
-        passage = words == ReadingPassage.words ? ReadingPassage.keys : words.map(ReadingAlignment.key)
-        sentences = ReadingSentences(words: words)
+        let standard = words == ReadingPassage.words
+        passage = standard ? ReadingPassage.keys : words.map(ReadingAlignment.key)
+        sentences = standard ? .passage : ReadingSentences(words: words)
     }
 
     var total: Int { passage.count }
@@ -745,6 +778,7 @@ struct ReadingFollower {
         previous = []
         speechAtMove = nil
         transcriptWords = 0
+        pendingTail = []
     }
 
     /// Follow the reading from `to`: on past a sentence's missed last words, or back to a
@@ -753,6 +787,9 @@ struct ReadingFollower {
     mutating func move(to: Int, speech: Double?) {
         guard to != reached else { return }
         let back = to < reached
+        // On past a sentence's last word or two (the owner paused before them): if those words
+        // come next, they belong to that sentence, not the next.
+        pendingTail = !back && to - reached <= ReadingCompletion.tailWords ? Array(reached..<min(to, total)) : []
         reached = min(max(0, to), total)
         for i in previous.indices { previous[i].old = true; previous[i].at = reached; previous[i].hit = false }
         alignedSinceMove = 0
@@ -842,8 +879,19 @@ struct ReadingFollower {
     /// A transcript begun afresh: aligned from where it fits best, of where the reading is and
     /// the starts of the current and last sentence (a repeat lands on itself); only words from
     /// where the reading is are credited.
-    private mutating func fresh(_ keys: [String]) {
+    private mutating func fresh(_ all: [String]) {
         freshTranscripts += 1
+        // A settled sentence's last words, said after the pause, are its own.
+        var peeled = 0
+        while peeled < all.count, peeled < pendingTail.count, ReadingAlignment.similar(all[peeled], passage[pendingTail[peeled]]) {
+            matched.insert(pendingTail[peeled])
+            peeled += 1
+        }
+        let keys = Array(all[peeled...])
+        guard !keys.isEmpty else {
+            previous = all.map { Heard(key: $0, at: reached, old: false, hit: true) }
+            return
+        }
         let i = sentences.index(at: reached)
         var starts = [reached]
         if i < sentences.count { starts.append(sentences.ranges[i].lowerBound) }
@@ -856,7 +904,9 @@ struct ReadingFollower {
             a.element.matched.count != b.element.matched.count ? a.element.matched.count < b.element.matched.count : a.offset > b.offset
         }!.element
         take(best, creditFrom: reached)
-        previous = keys.indices.map { Heard(key: keys[$0], at: best.positions[$0], old: false, hit: best.hits[$0]) }
+        if best.hits.contains(true) { pendingTail = [] } else { pendingTail.removeFirst(min(peeled, pendingTail.count)) }
+        previous = all[..<peeled].map { Heard(key: $0, at: reached, old: false, hit: true) }
+            + keys.indices.map { Heard(key: keys[$0], at: best.positions[$0], old: false, hit: best.hits[$0]) }
     }
 
     /// The same transcript, revised and grown. Words the diff keeps keep what they matched;
@@ -903,15 +953,41 @@ struct ReadingFollower {
         let firstLive = next.firstIndex { $0 == nil || !$0!.old } ?? keys.count
         var start = firstLive
         if let lastHit = (firstLive..<keys.count).last(where: { next[$0]?.hit == true }) { start = lastHit + 1 }
+        // A settled sentence's last words, said after the pause, are its own.
+        while start < keys.count, let t = pendingTail.first, ReadingAlignment.similar(keys[start], passage[t]) {
+            matched.insert(t)
+            next[start] = Heard(key: keys[start], at: reached, old: false, hit: true)
+            pendingTail.removeFirst()
+            start += 1
+        }
         if start < keys.count {
             let after = start > firstLive ? next[start - 1]!.at : reached
             // Never further back than the words being aligned again could reach.
             let from = min(reached, max(after, reached - (keys.count - start) - 1))
-            let a = ReadingAlignment.align(heard: Array(keys[start...]), passage: passage, from: from, catchUpTo: catchUpBound(reached))
+            let (a, _) = group(Array(keys[start...]), from: from)
+            // Credit from where the group started: a re-read fills in nothing it did not reach.
             take(a, creditFrom: from)
+            if a.hits.contains(true) { pendingTail = [] }
             for (n, i) in (start..<keys.count).enumerated() { next[i] = Heard(key: keys[i], at: a.positions[n], old: false, hit: a.hits[n]) }
         }
         previous = next.map { $0! }
+    }
+
+    /// Words aligned again as a group: from `from`, or as the current sentence read again from
+    /// its start, whichever places more of them (on a tie, `from`). A re-read lands on the
+    /// sentence itself and fills in what it missed; it cannot catch up into the next sentence
+    /// on a pair the sentence already had ("the gods", "the rainbow").
+    private func group(_ heard: [String], from: Int) -> (ReadingAlignment.Alignment, Int) {
+        let i = sentences.index(at: reached)
+        let sentenceStart = i < sentences.count ? sentences.ranges[i].lowerBound : reached
+        let passed = sentenceStart..<max(sentenceStart, reached)
+        let here = ReadingAlignment.align(heard: heard, passage: passage, from: from, catchUpTo: catchUpBound(reached),
+                                          passed: passed, strictShort: true)
+        guard sentenceStart < from else { return (here, from) }
+        let again = ReadingAlignment.align(heard: heard, passage: passage, from: sentenceStart, catchUpTo: catchUpBound(reached),
+                                           passed: passed, strictShort: true)
+        // A re-read places several words; one stray word ("The") does not make one.
+        return again.matched.count >= here.matched.count + 2 ? (again, sentenceStart) : (here, from)
     }
 }
 

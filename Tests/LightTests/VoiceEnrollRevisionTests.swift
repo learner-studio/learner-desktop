@@ -101,8 +101,8 @@ struct VoiceEnrollRevisionTests {
 
     // MARK: Words lost in a row (the recognizer dropped them)
 
-    /// The whole passage read with `k` words from `p` lost, results growing `step` words at a
-    /// time. `reachedEnd`: the tracker followed to the last word (it caught up after the gap).
+    /// The passage read with `k` words from `p` lost, results growing `step` words at a time,
+    /// up to the sentence after the gap. `reachedEnd`: the tracker followed to the last word (it caught up after the gap).
     /// `completed`: the owner, reading what the window shows (a sentence asked for again is read
     /// again; a pause at each sentence's end), finished the enrollment.
     static func dropped(_ k: Int, at p: Int, step: Int) -> (reachedEnd: Bool, completed: Bool) {
@@ -111,7 +111,11 @@ struct VoiceEnrollRevisionTests {
         var tr: [String] = []
         var lost = Set(p..<(p + k))
         var w = 0, reachedEnd = false, said = 0
+        // Once the sentence after the lost words is read, the tracker has caught up: the rest is
+        // a clean reading (tested on its own), so the run stops there.
+        let caughtUp = min(sentences.index(at: min(p + k, P.count - 1)) + 2, sentences.count)
         while !st.allRead, said < 6 * P.count {
+            if st.current >= caughtUp, st.done.isSuperset(of: 0..<caughtUp) { return (true, true) }
             let shown = sentences.ranges[min(st.current, sentences.count - 1)]
             if !shown.contains(w) { w = shown.lowerBound }   // asked again, or on to the next
             if lost.remove(w) == nil { tr.append(P[w]); said += 1 }
@@ -163,7 +167,7 @@ struct VoiceEnrollRevisionTests {
     @Test func reDecodedOldAudioAfterAMoveBackIsNotANewReading() {
         let r = Self.sentences.ranges[1]
         let bad = r.enumerated().map { $0.offset % 2 == 0 ? Self.P[$0.element] : "mumble" }
-        let first = Array(Self.P[0..<17]) + bad + ["These"]
+        let first = Array(Self.P[0..<17]) + bad + ["These", "take"]   // two words on: the reading has moved on
         let (t, f, st0) = Self.setup()
         var st = st0
         var speech = 20.0
@@ -172,7 +176,7 @@ struct VoiceEnrollRevisionTests {
         f.hear(first); Self.follow(t, &st)
         #expect(st.again == 1 && t.reached == r.lowerBound)
         speech += 0.4   // a breath, not a reading
-        let redecoded = Array(Self.P[6..<r.upperBound]) + ["These"]
+        let redecoded = Array(Self.P[6..<r.upperBound]) + ["These", "take"]
         f.hear(redecoded); Self.follow(t, &st)
         #expect(!st.done.contains(1), "the old audio, re-decoded, passed sentence 2")
         #expect(Self.credited(t, r) == 0)
@@ -180,6 +184,95 @@ struct VoiceEnrollRevisionTests {
         speech += 4
         f.hear(Array(Self.P[r])); Self.follow(t, &st)
         #expect(st.done.contains(1))
+    }
+
+    // 11-12 review (h5, h9): a sentence re-read must land on itself; while lost, stray short
+    // words must not be credited; a sentence's last words said after a pause stay its own.
+
+    /// Sentence heard but for its last 3 words; the owner reads it again from its start and
+    /// reads on. The re-read fills in the sentence: no catch-up into the next one on a pair it
+    /// shares ("the gods", "the rainbow"), no sentence asked for again.
+    @Test func aSentenceReadAgainLandsOnItselfNotTheNextOne() {
+        for s in 0..<(Self.sentences.count - 1) {
+            let rg = Self.sentences.ranges[s]
+            let (t, f, st0) = Self.setup()
+            var st = st0
+            var tr: [String] = []
+            for i in 0..<(rg.upperBound - 3) { tr.append(Self.P[i]); f.hear(tr); Self.follow(t, &st) }
+            #expect(t.reached == rg.upperBound - 3, "sentence \(s + 1): waits for its last words")
+            var jumped = false
+            for i in Array(rg) + Array(rg.upperBound..<Self.P.count) {
+                tr.append(Self.P[i])
+                let before = t.reached
+                f.hear(tr); Self.follow(t, &st)
+                if t.reached < before || t.reached > before + 3 { jumped = true }
+            }
+            #expect(!jumped, "sentence \(s + 1): the re-read jumped ahead or was sent back")
+            #expect(st.allRead, "sentence \(s + 1): not completed (at \(t.reached), current \(st.current + 1))")
+        }
+    }
+
+    /// The start of a sentence read (k words), then the owner reads on from one or two sentences
+    /// later (11-12 review, h4: sentence 1 read to word 10, then sentence 3 on: "a", "and", "a"
+    /// at 11, 13, 15 were picked up from the later reading and sentence 1 passed with 10 of 17
+    /// said). No sentence may pass with fewer of its words said than the 80 % it needs.
+    @Test func whileLostStrayShortWordsAreNotCredited() {
+        var cheats: [String] = []
+        // (sentence, words of it read, sentences jumped): the review's cases and a few like them.
+        let cases = [(0, 10, 2), (0, 11, 2), (0, 11, 1), (2, 12, 2), (5, 13, 2), (9, 10, 2)]
+        for (s, k, jump) in cases {
+            let rg = Self.sentences.ranges[s]
+            do {
+                do {
+                    for step in [1, 2] {
+                        for settle in [false, true] {
+                            let said = Array(rg.lowerBound..<(rg.lowerBound + k)) + Array(Self.sentences.ranges[s + jump].lowerBound..<Self.P.count)
+                            let (t, f, st0) = Self.setup()
+                            var st = st0
+                            var tr: [String] = []
+                            for (n, i) in said.enumerated() {
+                                tr.append(Self.P[i])
+                                guard n % step == step - 1 || n == said.count - 1 else { continue }
+                                f.hear(tr); Self.follow(t, &st)
+                                if settle {
+                                    let to = Self.sentences.settled(reached: t.reached, quietFor: 5)
+                                    if to > t.reached { t.move(to: to); f.hear(tr); Self.follow(t, &st) }
+                                }
+                            }
+                            let truth = ReadingAlignment.credited(Set(said), passage: t.passage)
+                            let need = Int((Double(rg.count) * ReadingState.sentenceShare).rounded(.down))
+                            if st.done.contains(s), rg.filter(truth.contains).count < need {
+                                cheats.append("s\(s + 1) k\(k) +\(jump) step \(step) settle \(settle)")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        #expect(cheats.isEmpty, "sentences passed without being read: \(cheats.count), e.g. \(cheats.prefix(6))")
+    }
+
+    /// The owner pauses before a sentence's last one or two words (the reading settles on past
+    /// them), then says them: they are that sentence's, not the next one's.
+    @Test func lastWordsSaidAfterAPauseStayInTheirSentence() {
+        for s in 0..<(Self.sentences.count - 1) {
+            for left in [1, 2] {
+                let rg = Self.sentences.ranges[s], next = Self.sentences.ranges[s + 1]
+                let (t, f, st0) = Self.setup()
+                var st = st0
+                var tr: [String] = []
+                for i in 0..<(rg.upperBound - left) { tr.append(Self.P[i]); f.hear(tr); Self.follow(t, &st) }
+                let settled = Self.sentences.settled(reached: t.reached, quietFor: 2.5)
+                if settled > t.reached { t.move(to: settled); f.hear(tr); Self.follow(t, &st) }
+                let before = t.matched
+                for i in (rg.upperBound - left)..<rg.upperBound { tr.append(Self.P[i]); f.hear(tr); Self.follow(t, &st) }
+                let landed = t.matched.subtracting(before)
+                #expect(landed.isSubset(of: Set(rg)), "sentence \(s + 1), \(left) left: landed at \(landed.sorted())")
+                for i in next { tr.append(Self.P[i]); f.hear(tr); Self.follow(t, &st) }
+                #expect(st.done.contains(s + 1), "sentence \(s + 2) not done after reading it")
+                #expect(next.allSatisfy { t.matched.contains($0) }, "sentence \(s + 2) not all heard")
+            }
+        }
     }
 
     @Test func aRevisedFirstWordOrAnEmptyResultDoesNotRunAhead() {
@@ -221,7 +314,7 @@ struct VoiceEnrollRevisionTests {
     @Test func aSentenceAskedForAgainPassesOnlyOnItsNewReading() {
         let r = Self.sentences.ranges[1]
         let bad = r.enumerated().map { $0.offset % 2 == 0 ? Self.P[$0.element] : "mumble" }
-        let first = Array(Self.P[0..<17]) + bad + ["These"]
+        let first = Array(Self.P[0..<17]) + bad + ["These", "take"]   // two words on: the reading has moved on
         for variant in ["timed final", "tail revised"] {
             let (t, f, st0) = Self.setup()
             var st = st0
