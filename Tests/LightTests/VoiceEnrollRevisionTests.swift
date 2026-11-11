@@ -99,6 +99,89 @@ struct VoiceEnrollRevisionTests {
         }
     }
 
+    // MARK: Words lost in a row (the recognizer dropped them)
+
+    /// The whole passage read with `k` words from `p` lost, results growing `step` words at a
+    /// time. `reachedEnd`: the tracker followed to the last word (it caught up after the gap).
+    /// `completed`: the owner, reading what the window shows (a sentence asked for again is read
+    /// again; a pause at each sentence's end), finished the enrollment.
+    static func dropped(_ k: Int, at p: Int, step: Int) -> (reachedEnd: Bool, completed: Bool) {
+        let (t, f, st0) = setup()
+        var st = st0
+        var tr: [String] = []
+        var lost = Set(p..<(p + k))
+        var w = 0, reachedEnd = false, said = 0
+        while !st.allRead, said < 6 * P.count {
+            let shown = sentences.ranges[min(st.current, sentences.count - 1)]
+            if !shown.contains(w) { w = shown.lowerBound }   // asked again, or on to the next
+            if lost.remove(w) == nil { tr.append(P[w]); said += 1 }
+            w += 1
+            let atEnd = w == shown.upperBound
+            if tr.count % step == 0 || atEnd { f.hear(tr); follow(t, &st) }
+            if t.reached >= P.count { reachedEnd = true }
+            if atEnd, st.current < sentences.count, sentences.ranges[st.current] == shown {
+                // The owner pauses at the sentence's end: a missed last word or two goes.
+                let s = sentences.settled(reached: t.reached, quietFor: 3)
+                if s > t.reached { t.move(to: s) }
+                follow(t, &st)
+                if st.current < sentences.count, sentences.ranges[st.current] == shown, t.reached < shown.upperBound, st.again == nil {
+                    w = shown.lowerBound   // not taken: the owner reads it again
+                }
+            }
+        }
+        return (reachedEnd || st.allRead, st.allRead)
+    }
+
+    static func sweep(_ ks: ClosedRange<Int>, steps: [Int], positions: StrideTo<Int>) -> [String] {
+        var failures: [String] = []
+        for k in ks {
+            for step in steps {
+                var notEnd: [Int] = [], notDone: [Int] = []
+                for p in positions where p + k < P.count {
+                    let r = dropped(k, at: p, step: step)
+                    if !r.reachedEnd { notEnd.append(p) }
+                    if !r.completed { notDone.append(p) }
+                }
+                if !notEnd.isEmpty || !notDone.isEmpty {
+                    failures.append("\(k) lost, \(step) per result: tracker stuck at \(notEnd.count) positions \(notEnd.prefix(6)), enrollment not finished at \(notDone.count) \(notDone.prefix(6))")
+                }
+            }
+        }
+        return failures
+    }
+
+    /// 11-12 review: three words lost in a row stalled the tracker for good at 170 of 171
+    /// positions. Sampled here; MediumTests runs every position, 2-6 words, 1 or 3 per result.
+    @Test func threeWordsLostInARowNeverStallIt() {
+        let failures = Self.sweep(3...3, steps: [1], positions: stride(from: 1, to: Self.P.count - 4, by: 6))
+        #expect(failures.isEmpty, "\(failures)")
+    }
+
+    /// After sentence 2 is asked for again, the recognizer re-decodes the same audio: its first
+    /// words gone, the garbled ones now right. That shares little with the last result, but it
+    /// is not a new reading: with no new speech since the move, it credits nothing.
+    @Test func reDecodedOldAudioAfterAMoveBackIsNotANewReading() {
+        let r = Self.sentences.ranges[1]
+        let bad = r.enumerated().map { $0.offset % 2 == 0 ? Self.P[$0.element] : "mumble" }
+        let first = Array(Self.P[0..<17]) + bad + ["These"]
+        let (t, f, st0) = Self.setup()
+        var st = st0
+        var speech = 20.0
+        t.speechSeconds = { speech }
+        f.hear(Array(Self.P[0..<17])); Self.follow(t, &st)
+        f.hear(first); Self.follow(t, &st)
+        #expect(st.again == 1 && t.reached == r.lowerBound)
+        speech += 0.4   // a breath, not a reading
+        let redecoded = Array(Self.P[6..<r.upperBound]) + ["These"]
+        f.hear(redecoded); Self.follow(t, &st)
+        #expect(!st.done.contains(1), "the old audio, re-decoded, passed sentence 2")
+        #expect(Self.credited(t, r) == 0)
+        // Read again, with new speech: it passes.
+        speech += 4
+        f.hear(Array(Self.P[r])); Self.follow(t, &st)
+        #expect(st.done.contains(1))
+    }
+
     @Test func aRevisedFirstWordOrAnEmptyResultDoesNotRunAhead() {
         for n in 10...Self.P.count {
             let (t, f, st0) = Self.setup()

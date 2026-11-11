@@ -1089,6 +1089,9 @@ final class VoiceIDController {
         self.modelPresent = modelPresent
         self.voiceprint = voiceprint
         tracker = ReadingTracker(recognizer: recognizer)
+        // Silero's speech so far: after a move back, only a result that comes with new speech
+        // can be a fresh transcript (not the recognizer re-decoding the old reading).
+        tracker.speechSeconds = { [engine] in engine.output.value.enrollSpeechSeconds }
         engine.use(voiceprint)
     }
 
