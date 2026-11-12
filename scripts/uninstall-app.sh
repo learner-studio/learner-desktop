@@ -23,6 +23,11 @@ UPDATER_DIR="${HOME}/Library/Application Support/Learner Desktop/updater"
 
 echo "Stopping the automatic updater..."
 launchctl bootout "${DOMAIN}/${UPDATER_LABEL}" 2>/dev/null || true
+# bootout returns before the job has left the domain (a run in progress finishes first).
+for _ in $(seq 1 40); do
+  launchctl print "${DOMAIN}/${UPDATER_LABEL}" >/dev/null 2>&1 || break
+  sleep 0.5
+done
 rm -f "${UPDATER_AGENT}"
 rm -rf "${UPDATER_DIR}"
 

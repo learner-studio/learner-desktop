@@ -16,7 +16,7 @@ enum Live {
     /// On the GitHub runner (TestEnvironment): a clean Mac with the app and a virtual
     /// microphone, and none of the owner's live stack. Suites that need it skip, by name.
     static let ci = TestEnvironment.isRunner
-    static let notOnCI: Comment = "runner: needs the owner's live screenpipe (LEARNER_TEST_ENV=runner)"
+    static let notOnCI: Comment = "runner: needs the screenpipe app and the owner's launchd setup, not just its engine (LEARNER_TEST_ENV=runner)"
     static let api = env["SCREENPIPE_API"] ?? "http://localhost:3030"
 
     static func json(_ url: String, body: Any? = nil) -> Any? {
@@ -37,11 +37,19 @@ enum Live {
 struct CaptureLiveTests {
     let health = Live.health ?? [:]
 
-    @Test func audioPipelineIsHealthyAndRealtime() {
+    /// Runs everywhere: chunked mode reintroduces the transcription backlog the coach cannot
+    /// live with.
+    @Test func audioPipelineIsRealtime() {
+        #expect((health["audio_pipeline"] as? [String: Any])?["transcription_mode"] as? String == "realtime")
+    }
+
+    /// The owner's Mac only. On the runner BlackHole's loopback goes dead mid-run: the
+    /// virtual mic read RMS 0.000000 with the room tone playing (runs 7 and 11, at two tone
+    /// levels), so screenpipe's 30 s no-data rule cannot be met there.
+    @Test(.enabled(if: !Live.ci, "runner: BlackHole's loopback goes dead mid-run (RMS 0.000000 measured on the virtual mic in runs 7 and 11), so screenpipe's 30 s no-data rule cannot be met there"))
+    func audioIsFlowingAndHealthy() {
         #expect(health["status"] as? String == "healthy")
         #expect(health["audio_status"] as? String == "ok")
-        // Chunked mode reintroduces the transcription backlog the coach cannot live with.
-        #expect((health["audio_pipeline"] as? [String: Any])?["transcription_mode"] as? String == "realtime")
     }
 
     @Test(.enabled(if: !LiveMachine.screenpipeWaiting, "screenpipe has paused capture (screen locked)"))
@@ -87,7 +95,8 @@ struct CaptureLiveTests {
         #expect(off.isEmpty, "rows whose stamp is neither the chunk start nor chunk start + start_time: \(off.prefix(3))")
     }
 
-    @Test(.enabled(if: FileManager.default.fileExists(atPath: NSHomeDirectory() + "/.screenpipe/store.bin"), "no ~/.screenpipe/store.bin"))
+    @Test(.enabled(if: !Live.ci, "runner: the store.bin there is the engine's, not the screenpipe app's settings"),
+          .enabled(if: FileManager.default.fileExists(atPath: NSHomeDirectory() + "/.screenpipe/store.bin"), "no ~/.screenpipe/store.bin"))
     func liveSettingsMatchTheCommittedCapture() throws {
         let live = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: NSHomeDirectory() + "/.screenpipe/store.bin"))) as? [String: Any])["settings"] as? [String: Any] ?? [:]
         let expected = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: toolsRepoRoot() + "/config/screenpipe-settings.json"))) as? [String: Any])["settings"] as? [String: Any] ?? [:]
@@ -96,7 +105,10 @@ struct CaptureLiveTests {
         #expect(drift.isEmpty, "settings drifted from config/screenpipe-settings.json (update it if deliberate): \(drift)")
     }
 
-    @Test func preflightPassesAgainstTheLiveStack() {
+    /// Needs the screenpipe app's own settings (~/.screenpipe/store.bin); the runner runs
+    /// screenpipe's engine without the app.
+    @Test(.enabled(if: !Live.ci, "runner: screenpipe's engine runs without the app, so there is no store.bin to check"))
+    func preflightPassesAgainstTheLiveStack() {
         let r = ChildProcess.run(appBinary, ["tool", "preflight"], timeout: 120, stderr: true)
         #expect(r.status == 0, "preflight reported drift:\n\(r.output)")
     }

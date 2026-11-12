@@ -105,7 +105,6 @@ final class NoCalls: CallSource {
 @Suite("Coach, heavy: audio to warning latency", .tags(.heavy, .coach), .quietLog,
        .enabled(if: env["LEARNER_HEAVY"] == "1", "heavy lane: set LEARNER_HEAVY=1"),
        .enabled(if: env["LEARNER_HEAVY_AUDIO"] != "0", "audio benchmark switched off (LEARNER_HEAVY_AUDIO=0)"),
-       .enabled(if: !Live.ci, Live.notOnCI),
        .timeLimit(.minutes(2)), .serialized)
 struct CoachAudioLatencyTests {
     /// Two real-time passes of ~36 s each; a push runs the fast speaker only (the slower
@@ -153,7 +152,17 @@ struct CoachAudioLatencyTests {
         let delay = shown.timeIntervalSince(origin.addingTimeInterval(30))
         Log("Coach").info("audio benchmark \(wpm) wpm: warning \(String(format: "%.2f", delay)) s after 30 s of audio; median STT \(String(format: "%.2f", stt.sorted()[stt.count / 2])) s")
         #expect(delay >= 0, "warned early")
-        #expect(delay < 6, "warning came \(delay) s after the 30 s mark")
+        // 6 s is the owner's Mac (its whisper speed). The GitHub runner's 3 shared cores run the
+        // same model several times slower and unevenly (21 s, then 34 s), so no time there says
+        // anything about the Mac: on the runner the test proves the pipeline end to end (the
+        // warning comes, never early) and prints the delay; the 6 s budget is the Mac's only.
+        if TestEnvironment.isRunner {
+            // stderr: the suite's quiet log swallows print(). 90 s only catches a broken pipeline.
+            FileHandle.standardError.write(Data("RUNNER audio benchmark: warning \(String(format: "%.1f", delay)) s after the 30 s mark (the Mac's budget is 6 s)\n".utf8))
+            #expect(delay < 90, "warning came \(delay) s after the 30 s mark: the pipeline is stuck, not slow")
+        } else {
+            #expect(delay < 6, "warning came \(delay) s after the 30 s mark")
+        }
         coach.resetStreak()
         logger.close()
     }

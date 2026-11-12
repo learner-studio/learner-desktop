@@ -35,6 +35,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # learner-server (public) at the commit config/learner-server.ref pins: its pairing
+      # harness runs on this runner for the desktop + server pairing tests.
+      - name: Read the pinned learner-server commit
+        id: server-ref
+        run: echo "sha=$(tr -d '[:space:]' < config/learner-server.ref)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: learner-studio/learner-server
+          ref: ${{ steps.server-ref.outputs.sha }}
+          path: learner-server
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
       - name: Use the newest Xcode on the runner
         run: |
           newest="$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
@@ -61,6 +75,20 @@ jobs:
       - name: fixtures (synthetic sample as ~/ai-vault-data)
         if: ${{ !cancelled() }}
         run: scripts/ci.sh fixtures
+      - name: Cache screenpipe's engine and models
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/learner-screenpipe
+            ~/.cache/huggingface/hub/models--ggerganov--whisper.cpp
+            ~/Library/Caches/screenpipe
+          key: screenpipe-${{ hashFiles('config/screenpipe-settings.json') }}
+      - name: screenpipe (real engine on :3030)
+        if: ${{ !cancelled() }}
+        run: scripts/ci.sh screenpipe
+      - name: server (learner-server's pairing harness, Postgres 17)
+        if: ${{ !cancelled() }}
+        run: scripts/ci.sh server
       - name: speech (Siri and Dictation on)
         if: ${{ !cancelled() }}
         run: scripts/ci.sh speech
