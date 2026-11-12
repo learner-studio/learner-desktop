@@ -5,6 +5,7 @@
 #   fetch          Voice ID's model and sherpa-onnx (scripts/fetch-voice-id.sh)
 #   virtual-mic    two BlackHole loopback devices; "BlackHole 2ch" becomes the default input
 #   grant          microphone + speech-recognition grants for the app's bundle id (TCC.db)
+#   speech         Siri and Dictation on, which Apple's speech recognizer needs
 #   install        release build, installed and started by scripts/build-app.sh
 #   mic-e2e        speech played into the virtual mic is heard by the installed app; the
 #                  default input is switched and the app follows it and hears again
@@ -107,6 +108,15 @@ grant() {
   [ "$(sqlite3 "$db" "SELECT count(*) FROM access WHERE client='$BUNDLE_ID' AND auth_value=2;")" = 2 ]
 }
 
+speech() {
+  # Apple's speech recognizer refuses with "Siri and Dictation are disabled" until one of
+  # them is on; the owner's Mac has Siri on ("Assistant Enabled"). Both, for the runner.
+  defaults write com.apple.assistant.support "Assistant Enabled" -bool true
+  defaults write com.apple.assistant.support "Dictation Enabled" -bool true
+  killall assistantd corespeechd 2>/dev/null || true   # they reread the settings on relaunch
+  defaults read com.apple.assistant.support | grep -E '"(Assistant|Dictation) Enabled"' | sed 's/^ */  /'
+}
+
 install() {
   set -e
   swift build -c release --product LearnerDesktop
@@ -117,6 +127,23 @@ install() {
     sleep 1
   done
   echo "running: pid $(pgrep -f "Learner Desktop.app/Contents/MacOS/learner-desktop")"
+}
+
+# What reaches DEVICE's input while speech is played into it: per-channel peak and RMS.
+# Run when the app hears nothing, to tell "no sound arrived" from "the app dropped it".
+diagnose_input() {
+  local dev="$1" wav="$OUT/diag-$(tr ' ' '-' <<< "$1").wav"
+  echo "  diagnosis: recording 6 s from $dev while speech plays into it"
+  ( sleep 0.5; speak_into "$dev" ) &
+  sox -q -t coreaudio "$dev" "$wav" trim 0 6 2>&1 | sed 's/^/  sox: /'
+  wait
+  local n; n=$(soxi -c "$wav" 2>/dev/null || echo 0)
+  echo "  $n channel(s) recorded"
+  for ch in 1 2 3; do
+    [ "$ch" -le "$n" ] || break
+    echo "  channel $ch: $(sox "$wav" -n remix "$ch" stat 2>&1 | awk -F: '/Maximum amplitude|RMS +amplitude/{gsub(/ +/," ",$2); printf "%s=%s ", $1, $2}')"
+  done
+  echo "  all channels mixed: $(sox "$wav" -n remix - stat 2>&1 | awk -F: '/RMS +amplitude/{print $2}')"
 }
 
 # say TEXT into a device: BlackHole loops its output back to its input.
@@ -141,7 +168,7 @@ mic_e2e() {
   echo "4. speech played into $MIC_B is heard"
   sleep 15   # the previous turn ends after 14 s of silence, so this one is a new turn
   speak_into "$MIC_B"
-  wait_log "\[Coach\] heard " 30 "$from" || ok=1
+  wait_log "\[Coach\] heard " 30 "$from" || { ok=1; diagnose_input "$MIC_B"; }
   SwitchAudioSource -t input -s "$MIC_A" >/dev/null
   return $ok
 }
@@ -155,6 +182,7 @@ uninstall() { PURGE_DATA=1 scripts/uninstall-app.sh; }
 phase fetch fetch
 phase virtual-mic virtual_mic
 phase grant grant
+phase speech speech
 phase install install
 phase mic-e2e mic_e2e
 phase light lane light
