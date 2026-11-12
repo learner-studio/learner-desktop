@@ -32,3 +32,4 @@ UITests/*.xcodeproj/
 # --- Voice ID (scripts/fetch-voice-id.sh) -------------------------------------------
 third_party/sherpa-onnx/artifacts/
 menu-bar-app/Models/*.onnx
+ci-out/

@@ -7,7 +7,7 @@ PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="Learner Desktop.app"
 OUT_DIR="${OUT_DIR:-${PROJECT_DIR}/menu-bar-app}"
 BUNDLE_DIR="${OUT_DIR}/${APP_NAME}"
-TARGET_APP="/Users/benpollack/Applications/${APP_NAME}"
+TARGET_APP="${HOME}/Applications/${APP_NAME}"
 
 # Voice ID's speaker model, and (to compile) sherpa-onnx's static libraries: both come from
 # scripts/fetch-voice-id.sh, not git. Checked first, so a missing one fails before the build.
@@ -102,11 +102,17 @@ if [ "${BUNDLE_ONLY:-0}" = 1 ]; then
 fi
 
 echo "Installing to ~/Applications/..."
+mkdir -p "${HOME}/Applications" "${HOME}/Library/LaunchAgents" "${HOME}/.ai-aggregator/logs"
 rm -rf "${TARGET_APP}"
 cp -R "${BUNDLE_DIR}" "${TARGET_APP}"
 
 AGENT_LABEL="com.benpollack.learner-desktop"
-AGENT_SRC="${PROJECT_DIR}/menu-bar-app/${AGENT_LABEL}.plist"
+# The checked-in LaunchAgent names the owner's home; any other user (a CI runner) gets
+# the same file with its own home in those paths. On the owner's Mac nothing changes.
+AGENT_SRC="$(mktemp "${TMPDIR:-/tmp}/learner-agent.XXXXXX")"
+trap 'rm -f "${AGENT_SRC}"' EXIT
+sed "s#/Users/benpollack/#${HOME}/#g" "${PROJECT_DIR}/menu-bar-app/${AGENT_LABEL}.plist" > "${AGENT_SRC}"
+chmod 644 "${AGENT_SRC}"
 AGENT_DST="${HOME}/Library/LaunchAgents/${AGENT_LABEL}.plist"
 
 if cmp -s "${AGENT_SRC}" "${AGENT_DST}" 2>/dev/null; then

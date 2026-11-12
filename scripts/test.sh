@@ -85,6 +85,11 @@ run_lane() {
   end=$(date +%s)
   took=$((end - start))
   read -r _ max <<< "$(budget "$lane")"
+  # A shared CI runner (3 slow cores) is not this Mac: its time says nothing about a test.
+  if [ "${LEARNER_CI:-0}" = 1 ] && [ "$max" -gt 0 ]; then
+    echo "($lane lane: ${took}s; the ${max}s budget is not enforced on a CI runner)"
+    max=0
+  fi
   printf '\033[1m<== %s lane: %s%s in %ss\033[0m\n' "$lane" "$([ $status -eq 0 ] && echo passed || echo FAILED)" \
     "$([ -n "$skipped" ] && echo " ($(wc -l <<< "$skipped" | tr -d ' ') live check skipped)")" "$took"
   if [ "$status" -eq 0 ] && [ "$max" -gt 0 ] && [ "$took" -gt "$max" ]; then

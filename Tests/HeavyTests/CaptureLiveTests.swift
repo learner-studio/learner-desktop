@@ -13,6 +13,10 @@ enum Live {
     static let heavy = env["LEARNER_HEAVY"] == "1"
     static let destructive = heavy && env["LEARNER_HEAVY_DESTRUCTIVE"] == "1"
     static let remote = heavy && env["LEARNER_REMOTE_E2E"] == "1"
+    /// A CI runner (scripts/ci.sh): a clean Mac with the app and a virtual microphone, and
+    /// none of the owner's live stack. Suites that need screenpipe skip there, by name.
+    static let ci = env["LEARNER_CI"] == "1"
+    static let notOnCI: Comment = "CI runner: screenpipe runs on the owner's Mac only"
     static let api = env["SCREENPIPE_API"] ?? "http://localhost:3030"
 
     static func json(_ url: String, body: Any? = nil) -> Any? {

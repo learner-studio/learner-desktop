@@ -1,0 +1,52 @@
+# The whole app on a clean GitHub macOS runner: install, a virtual microphone (play speech,
+# switch inputs), the light/medium/heavy lanes, uninstall. scripts/ci.sh does the work and
+# writes the PASS/FAIL/skip report to this run's summary page.
+#
+# Nothing of the owner's goes here: no secrets, no logins. Suites that need the owner's
+# live stack (screenpipe, ChatGPT, ai-vault, the ovh server harness) skip by name.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mac:
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use the newest Xcode on the runner
+        run: |
+          newest="$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          sudo xcode-select -s "$newest"
+          echo "Xcode: $newest"
+          swift --version
+
+      - name: Cache Voice ID's model and sherpa-onnx
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/sherpa-onnx/artifacts
+            menu-bar-app/Models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx
+          key: voice-id-${{ hashFiles('scripts/fetch-voice-id.sh') }}
+
+      - name: Install, microphone, all lanes, uninstall
+        run: scripts/ci.sh
+
+      - name: Keep the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-out
+          path: ci-out/
+          retention-days: 14
