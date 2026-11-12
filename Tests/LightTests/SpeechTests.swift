@@ -170,3 +170,48 @@ struct BluetoothInputWatchTests {
         #expect(watch.isBluetooth == false)
     }
 }
+
+// The microphone to Silero's 16 kHz mono: the first input channel is heard on any input,
+// including a discrete 16-channel one, where AVAudioConverter's own mapping gave silence.
+@Suite("Microphone format to 16 kHz mono", .tags(.light, .coach))
+struct MicMonoConverterTests {
+    static func format(_ channels: AVAudioChannelCount) -> AVAudioFormat? {
+        if channels <= 2 { return AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48000, channels: channels, interleaved: false) }
+        guard let layout = AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_DiscreteInOrder | UInt32(channels)) else { return nil }
+        return AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48000, interleaved: false, channelLayout: layout)
+    }
+
+    static func rms(channels: AVAudioChannelCount, signalOn: [Int]) throws -> Float {
+        let format = try #require(Self.format(channels))
+        let (target, converter) = try #require(MicEngine.monoConverter(from: format))
+        let n: AVAudioFrameCount = 4800
+        let input = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: n))
+        input.frameLength = n
+        for c in signalOn { for i in 0..<Int(n) { input.floatChannelData![c][i] = 0.5 * sinf(Float(i) * 0.1) } }
+        let out = try #require(AVAudioPCMBuffer(pcmFormat: target, frameCapacity: 2000))
+        // Fed once, as the app's tap does.
+        final class Feed: @unchecked Sendable { var buffer: AVAudioPCMBuffer?; init(_ b: AVAudioPCMBuffer) { buffer = b } }
+        let feed = Feed(input)
+        var error: NSError?
+        converter.convert(to: out, error: &error) { _, status in
+            guard let b = feed.buffer else { status.pointee = .noDataNow; return nil }
+            feed.buffer = nil
+            status.pointee = .haveData
+            return b
+        }
+        #expect(error == nil)
+        #expect(out.frameLength > 1000)
+        let x = UnsafeBufferPointer(start: out.floatChannelData![0], count: Int(out.frameLength))
+        return (x.map { $0 * $0 }.reduce(0, +) / Float(max(x.count, 1))).squareRoot()
+    }
+
+    @Test(arguments: [1, 2, 4, 16] as [AVAudioChannelCount])
+    func speechOnTheFirstChannelIsHeard(channels: AVAudioChannelCount) throws {
+        #expect(try Self.rms(channels: channels, signalOn: Array(0..<Int(min(channels, 2)))) > 0.2)
+        #expect(try Self.rms(channels: channels, signalOn: [0]) > 0.2)
+    }
+
+    @Test func silenceStaysSilent() throws {
+        #expect(try Self.rms(channels: 16, signalOn: []) < 0.001)
+    }
+}

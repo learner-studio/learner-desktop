@@ -80,7 +80,8 @@ fetch() { scripts/fetch-voice-id.sh; }
 
 virtual_mic() {
   set -e
-  command -v SwitchAudioSource >/dev/null || brew install switchaudio-osx
+  command -v SwitchAudioSource >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install switchaudio-osx
+  command -v sox >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install sox   # diagnose_input
   # BlackHole is a CoreAudio driver (a HAL plug-in): coreaudiod loads it on restart.
   HOMEBREW_NO_AUTO_UPDATE=1 brew install --cask blackhole-2ch blackhole-16ch
   sudo killall coreaudiod || true

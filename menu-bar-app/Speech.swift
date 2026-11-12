@@ -188,6 +188,18 @@ final class MicEngine: @unchecked Sendable {
     private var engine = AVAudioEngine()
     private var observer: NSObjectProtocol?
 
+    /// The microphone's format to Silero's 16 kHz mono, from the first input channel. Set
+    /// explicitly: from a discrete multichannel input (an audio interface, an aggregate
+    /// device, BlackHole 16ch) AVAudioConverter maps no channel to mono (channelMap [-1]),
+    /// and `downmix` does not mix discrete channels either, so the app listened to silence.
+    /// Found by CI's virtual-microphone check (11-12). Stereo already took channel 0.
+    nonisolated static func monoConverter(from format: AVAudioFormat) -> (AVAudioFormat, AVAudioConverter)? {
+        guard let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: SileroVAD.sampleRate, channels: 1, interleaved: false),
+              let converter = AVAudioConverter(from: format, to: target) else { return nil }
+        converter.channelMap = [0]
+        return (target, converter)
+    }
+
     /// On `queue`. `changed` runs when the input device changes under the running engine.
     func open(state: Locked<MicSpeechSource.VADState>, model: MicSpeechSource.VADModel, vad: DispatchQueue, log: Log, changed: @escaping @Sendable () -> Void) -> Opened {
         dispatchPrecondition(condition: .onQueue(queue))
@@ -197,8 +209,7 @@ final class MicEngine: @unchecked Sendable {
         guard format.sampleRate > 0, format.channelCount > 0 else {
             return .failed("no microphone input ready (\(format.sampleRate) Hz, \(format.channelCount) channels)")
         }
-        guard let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: SileroVAD.sampleRate, channels: 1, interleaved: false),
-              let converter = AVAudioConverter(from: format, to: target) else {
+        guard let (target, converter) = Self.monoConverter(from: format) else {
             return .failed("cannot convert the microphone's \(format) to 16 kHz")
         }
         let tap = MicSpeechSource.tap(format: format, target: target, converter: converter, state: state, model: model, queue: vad, log: log)
