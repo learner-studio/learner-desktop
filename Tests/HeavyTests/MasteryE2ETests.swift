@@ -45,7 +45,31 @@ private final class Recording: HTTPTransport, @unchecked Sendable {
        .timeLimit(.minutes(3)),
        .enabled(if: Live.heavy && Live.env["LEARNER_MASTERY_E2E"] == "1", "opt-in: set LEARNER_HEAVY=1 LEARNER_MASTERY_E2E=1"))
 struct MasteryE2ETests {
+    /// The pinned learner-server that CI runs (config/learner-server.ref).
+    static var pinnedServer: String {
+        ((try? String(contentsOfFile: toolsRepoRoot() + "/config/learner-server.ref", encoding: .utf8)) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     @Test func aSeededGainIsToastedOpenedAndItsFeedbackRecorded() throws {
+        // A known server-side issue at the pinned learner-server, not the desktop's: since its
+        // 7d2a7c8 the feed announces a rise only past a 30-day chance gate (gains in 6+
+        // sittings), and pairing-server.ts's --seed-mastery-gain still writes ONE sitting, so
+        // the feed is empty by design (getBaselineStatus resolves the seeded learner). The
+        // fix is learner-server's seedMasteryGain RPC (branch pairing-testdevices). Marked,
+        // not weakened: once the pinned server's seed makes a gain the feed announces, this
+        // known issue stops occurring and Swift Testing fails the test until it is removed.
+        if Harness.localServer != nil, Self.pinnedServer.hasPrefix("918beb1") {
+            try withKnownIssue("learner-server 918beb1: the harness seeds one sitting; the feed's chance gate (7d2a7c8) needs 6") {
+                try seededGainRun()
+            }
+        } else {
+            try seededGainRun()
+        }
+    }
+
+    private typealias Harness = PairingE2ETests.Harness
+
+    func seededGainRun() throws {
         let harness = try PairingE2ETests.Harness(["--topology", "same-machine", "--seed-mastery-gain"])
         defer { harness.stop() }
         let ready = try #require(harness.ready(), "the harness did not start: \(harness.output.suffix(1500))")
