@@ -115,7 +115,10 @@ virtual_mic() {
   # ("active_no_data"). Pink noise at about -46 dBFS is a quiet room: above that floor, far
   # below speech. It plays for the rest of the run.
   command -v sox >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install sox
-  nohup sox -q -n -t coreaudio "$MIC_A" synth pinknoise vol 0.005 > "$OUT/room-tone.log" 2>&1 &
+  # Re-launched every 20 s: another program opening the device can reconfigure it under a
+  # long-running sox, which then keeps running while the device hears zeros (run 5). A
+  # fresh sox picks the device up again well inside screenpipe's 30 s window.
+  nohup bash -c "while true; do sox -q -n -t coreaudio '$MIC_A' synth 20 pinknoise vol 0.005; done" > "$OUT/room-tone.log" 2>&1 &
   echo $! > "$OUT/room-tone.pid"
   sleep 1
   kill -0 "$(cat "$OUT/room-tone.pid")" 2>/dev/null || { echo "room tone did not start:"; cat "$OUT/room-tone.log"; return 1; }
@@ -361,7 +364,7 @@ report() {
     echo
     # Known issues: a test marked with withKnownIssue (and why), never counted as a pass.
     local known
-    known="$(cat "$OUT"/light.log "$OUT"/medium.log "$OUT"/heavy.log 2>/dev/null | grep -E 'known issue' | sed -E 's/^[^A-Za-z]*//' | sort -u)"
+    known="$(cat "$OUT"/light.log "$OUT"/medium.log "$OUT"/heavy.log 2>/dev/null | grep -E 'recorded a known issue|^.? ?Test .* with [0-9]+ known issue' | sed -E 's/^[^A-Za-z]*//' | sort -u)"
     if [ -n "$known" ]; then
       echo "### ⚠️ Known issues (expected failures, not passes)"; echo; echo '```'; echo "$known"; echo '```'; echo
     fi
