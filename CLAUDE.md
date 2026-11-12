@@ -10,4 +10,4 @@
 - **Test environment:**
   - `LEARNER_TEST_ENV=runner` on CI (`TestEnvironment.current` in tests); otherwise the owner's Mac.
   - A test that needs the owner's live machine must skip on the runner and name the reason.
-- **Installing:** on the owner's Mac, install only CI-tested builds, with `scripts/install-latest.sh`.
+- **Installing:** the owner's Mac installs only CI-tested builds. The updater (`scripts/install-updater.sh`) installs each new green build of `main` by itself, never during a call. `scripts/install-latest.sh` installs one now.

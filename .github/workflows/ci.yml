@@ -76,6 +76,9 @@ jobs:
       - name: heavy lane
         if: ${{ !cancelled() }}
         run: scripts/ci.sh heavy
+      - name: updater (automatic updates' LaunchAgent loads)
+        if: ${{ !cancelled() }}
+        run: scripts/ci.sh updater
       - name: uninstall (nothing left behind)
         if: ${{ !cancelled() }}
         run: scripts/ci.sh uninstall

@@ -84,7 +84,8 @@ Requires macOS 14+, Xcode (Swift 6), screenpipe, and for chats the `ai-vault` CL
 security add-generic-password -s learner-server -a ben-mbp -w   # store the device key (prompts)
 scripts/fetch-voice-id.sh                                       # sherpa-onnx + Voice ID's model (pinned, SHA-checked; not in git)
 scripts/install-hooks.sh                                        # the secret scan on commit and push
-scripts/install-latest.sh                                       # install the build CI tested (main's newest green run)
+scripts/install-updater.sh                                      # new CI-tested builds of main install themselves (not mid-call)
+scripts/install-latest.sh                                       # or install main's newest green build now
 scripts/build-app.sh                                            # or: build and install from this checkout
 ```
 

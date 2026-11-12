@@ -10,7 +10,9 @@
 #   mic-e2e        speech played into the virtual mic is heard by the installed app; the
 #                  default input is switched and the app follows it and hears again
 #   light/medium/heavy   scripts/test.sh, with LEARNER_TEST_ENV=runner (owner-only suites skip, by name)
-#   uninstall      scripts/uninstall-app.sh with PURGE_DATA=1: nothing may be left behind
+#   updater        scripts/install-updater.sh: the automatic updater's LaunchAgent loads
+#   uninstall      scripts/uninstall-app.sh with PURGE_DATA=1: nothing may be left behind,
+#                  the updater included
 #
 # Usage: scripts/ci.sh PHASE   one phase (the workflow runs each as its own step, so the
 #                              Actions page shows them pass or fail live); exit = its verdict
@@ -139,6 +141,10 @@ install() {
   mkdir -p "$PWD/ci-app"
   ditto -c -k --keepParent "menu-bar-app/Learner Desktop.app" "$PWD/ci-app/Learner-Desktop.zip"
   printf 'commit %s\nrun %s\nbuilt %s\n' "$(git rev-parse HEAD)" "${GITHUB_RUN_ID:-local}" "$(date -u +%FT%TZ)" > "$PWD/ci-app/BUILD.txt"
+  # The install kit: what installs this build on the owner's Mac comes with it.
+  mkdir -p "$PWD/ci-app/kit/scripts" "$PWD/ci-app/kit/menu-bar-app"
+  cp scripts/build-app.sh scripts/auto-update.sh "$PWD/ci-app/kit/scripts/"
+  cp menu-bar-app/com.benpollack.learner-desktop.plist "$PWD/ci-app/kit/menu-bar-app/"
   echo "packaged ci-app/Learner-Desktop.zip"
 }
 
@@ -187,6 +193,14 @@ mic_e2e() {
 }
 
 lane() { scripts/test.sh "$1"; }
+
+# The automatic updater installs and loads (on the runner it finds no GitHub token and
+# waits); uninstall must then remove it with everything else.
+updater() {
+  scripts/install-updater.sh || return 1
+  launchctl print "gui/$(id -u)/com.benpollack.learner-desktop-updater" | grep -E "state|run interval" | sed 's/^\s*/  /'
+  launchctl print "gui/$(id -u)/com.benpollack.learner-desktop-updater" >/dev/null
+}
 
 uninstall() { PURGE_DATA=1 scripts/uninstall-app.sh; }
 
@@ -237,13 +251,14 @@ run() {
     install) phase install install ;;
     mic-e2e) phase mic-e2e mic_e2e ;;
     light|medium|heavy) phase "$1" lane "$1" ;;
+    updater) phase updater updater ;;
     uninstall) keep_app_log; phase uninstall uninstall ;;
     report) report ;;
     all)
       rm -f "$RESULTS"
-      for p in fetch virtual-mic grant speech install mic-e2e light medium heavy uninstall; do run "$p" || true; done
+      for p in fetch virtual-mic grant speech install mic-e2e light medium heavy updater uninstall; do run "$p" || true; done
       report ;;
-    *) echo "usage: scripts/ci.sh fetch|virtual-mic|grant|speech|install|mic-e2e|light|medium|heavy|uninstall|report|all" >&2; return 2 ;;
+    *) echo "usage: scripts/ci.sh fetch|virtual-mic|grant|speech|install|mic-e2e|light|medium|heavy|updater|uninstall|report|all" >&2; return 2 ;;
   esac
 }
 

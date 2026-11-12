@@ -12,7 +12,7 @@ push the branch              CI on a clean macOS runner:
                                install, mic end to end, light/medium/
                                heavy lanes, uninstall (live step by step)
                              green -> auto-merge into main
-                             CI again on main -> keeps the tested app  --->  scripts/install-latest.sh
+                             CI again on main -> keeps the tested app  --->  updater installs it (not mid-call)
 ```
 
 ## Rules
@@ -57,26 +57,39 @@ interactive session on the runner.
 
 ## On the owner's Mac
 
+New builds install themselves. `scripts/install-updater.sh` (once) adds a LaunchAgent,
+`com.benpollack.learner-desktop-updater`. It runs `auto-update.sh` every 5 minutes and at
+login. Each run, when `main` has a newer CI run that passed every phase, it:
+
+1. Waits if a call is on, so the app is never restarted mid-call. It checks the coach's
+   saved session, which names the call app.
+2. Downloads the exact bundle the runner tested and checks that it names the run's commit.
+3. Installs it with the build's own install kit: the `build-app.sh` from that commit,
+   re-signing the bundle with this Mac's Apple Development identity so macOS keeps its
+   microphone, speech and Bluetooth grants.
+4. Checks that the app comes back up.
+5. Posts a notification: "Updated to <commit>", or "Update failed" with the reason.
+6. Updates itself from the same kit.
+
+Log: `~/.ai-aggregator/logs/updater.log`. Installed commit: `~/.ai-aggregator/installed-build.txt`.
+
 ```bash
-scripts/install-latest.sh           # the newest green CI build of main
+scripts/install-updater.sh              # turn automatic updates on (or refresh the updater)
+scripts/install-updater.sh --remove     # turn them off
+touch "$HOME/Library/Application Support/Learner Desktop/updater/PAUSED"   # pause; rm to resume
+scripts/install-latest.sh               # install the newest green build now (even during a call)
 RUN_ID=<id> scripts/install-latest.sh   # a specific green run
 ```
 
-The script:
-
-1. Downloads the exact bundle the runner tested.
-2. Checks that the bundle names the run's commit.
-3. Re-signs it with this Mac's Apple Development identity, so macOS keeps its
-   microphone, speech and Bluetooth grants.
-4. Installs and restarts it through `build-app.sh`.
-
-The installed commit is written to `~/.ai-aggregator/installed-build.txt`.
+`scripts/uninstall-app.sh` removes the updater too, so it cannot reinstall the app.
 
 ## Coordination
 
 - The agent on ovh opens and merges the pull requests.
-- It tells the agent on the owner's Mac when `main` has a new green build.
-- The Mac's agent runs `scripts/install-latest.sh` and reports what the owner sees.
+- The updater installs each new green build of `main` by itself, within about 5 minutes,
+  or after the call ends.
+- To check what is running on the Mac, read `~/.ai-aggregator/installed-build.txt` and the
+  updater's log.
 - Checks that need the owner's live accounts or hardware stay out of CI. Today that is
   screenpipe's recordings, the ChatGPT login and the Pavlok wristband. They run only by
   hand on the Mac, when the owner asks.
