@@ -179,6 +179,58 @@ struct VADSegmenter {
 /// never on the main thread. Starting a Bluetooth input waits on the hardware for seconds
 /// (10-28: 4.7 s with AirPods), which on the main thread froze the tray menu for as long.
 /// AVAudio's Objective-C exceptions are caught here and become failures to retry.
+/// The microphone's buffers to Silero's 16 kHz mono. A multichannel input is heard on its
+/// loudest channel, buffer by buffer (~85 ms): on an audio interface or an aggregate device
+/// the voice can be on any input, and averaging would bury one live channel under the
+/// silent ones. Before 11-12 AVAudioConverter chose: from a discrete multichannel format it
+/// maps no channel at all (channelMap [-1]; `downmix` does not mix discrete channels), so
+/// the app listened to silence. Found by CI's virtual-microphone check (BlackHole 16ch).
+struct MicMono: @unchecked Sendable {
+    let target: AVAudioFormat
+    let converter: AVAudioConverter
+    /// Set for a float, deinterleaved, multichannel input: the one channel copied out of it.
+    let single: AVAudioFormat?
+
+    init?(from format: AVAudioFormat) {
+        guard let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: SileroVAD.sampleRate, channels: 1, interleaved: false) else { return nil }
+        self.target = target
+        if format.channelCount > 1, format.commonFormat == .pcmFormatFloat32, !format.isInterleaved,
+           let single = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: format.sampleRate, channels: 1, interleaved: false),
+           let converter = AVAudioConverter(from: single, to: target) {
+            self.single = single
+            self.converter = converter
+        } else {
+            // Mono, or a layout this cannot pick from: the converter's own path, from channel 0.
+            guard let converter = AVAudioConverter(from: format, to: target) else { return nil }
+            converter.channelMap = [0]
+            self.single = nil
+            self.converter = converter
+        }
+    }
+
+    /// What the converter is fed for `buffer`: its loudest channel, or the buffer itself.
+    func source(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        guard let single, let channels = buffer.floatChannelData else { return buffer }
+        let n = Int(buffer.frameLength)
+        guard let out = AVAudioPCMBuffer(pcmFormat: single, frameCapacity: buffer.frameLength), let dst = out.floatChannelData else { return nil }
+        out.frameLength = buffer.frameLength
+        dst[0].update(from: channels[Self.loudest(channels, count: Int(buffer.format.channelCount), frames: n)], count: n)
+        return out
+    }
+
+    /// The channel with the most energy (the first on a tie, so silence stays on channel 0).
+    static func loudest(_ channels: UnsafePointer<UnsafeMutablePointer<Float>>, count: Int, frames: Int) -> Int {
+        var best = 0, bestEnergy: Float = 0
+        for c in 0..<count {
+            var energy: Float = 0
+            let x = channels[c]
+            for i in 0..<frames { energy += x[i] * x[i] }
+            if energy > bestEnergy { best = c; bestEnergy = energy }
+        }
+        return best
+    }
+}
+
 final class MicEngine: @unchecked Sendable {
     enum Opened: Sendable { case listening(String), failed(String) }
     let queue = DispatchQueue(label: "learner.speech.engine", qos: .userInitiated)
@@ -187,18 +239,6 @@ final class MicEngine: @unchecked Sendable {
     // and tapping it then raises.
     private var engine = AVAudioEngine()
     private var observer: NSObjectProtocol?
-
-    /// The microphone's format to Silero's 16 kHz mono, from the first input channel. Set
-    /// explicitly: from a discrete multichannel input (an audio interface, an aggregate
-    /// device, BlackHole 16ch) AVAudioConverter maps no channel to mono (channelMap [-1]),
-    /// and `downmix` does not mix discrete channels either, so the app listened to silence.
-    /// Found by CI's virtual-microphone check (11-12). Stereo already took channel 0.
-    nonisolated static func monoConverter(from format: AVAudioFormat) -> (AVAudioFormat, AVAudioConverter)? {
-        guard let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: SileroVAD.sampleRate, channels: 1, interleaved: false),
-              let converter = AVAudioConverter(from: format, to: target) else { return nil }
-        converter.channelMap = [0]
-        return (target, converter)
-    }
 
     /// On `queue`. `changed` runs when the input device changes under the running engine.
     func open(state: Locked<MicSpeechSource.VADState>, model: MicSpeechSource.VADModel, vad: DispatchQueue, log: Log, changed: @escaping @Sendable () -> Void) -> Opened {
@@ -209,10 +249,10 @@ final class MicEngine: @unchecked Sendable {
         guard format.sampleRate > 0, format.channelCount > 0 else {
             return .failed("no microphone input ready (\(format.sampleRate) Hz, \(format.channelCount) channels)")
         }
-        guard let (target, converter) = Self.monoConverter(from: format) else {
+        guard let mono = MicMono(from: format) else {
             return .failed("cannot convert the microphone's \(format) to 16 kHz")
         }
-        let tap = MicSpeechSource.tap(format: format, target: target, converter: converter, state: state, model: model, queue: vad, log: log)
+        let tap = MicSpeechSource.tap(format: format, mono: mono, state: state, model: model, queue: vad, log: log)
         var startError: Error?
         if let raised = LDCatchException({
             input.removeTap(onBus: 0)
@@ -432,22 +472,23 @@ final class MicSpeechSource: SpeechSource {
     /// The microphone callback. Built outside the main actor on purpose: AVAudio calls it on
     /// its real-time thread, and a main-actor closure there is a Swift 6 isolation trap
     /// (the app crashed on 10-27 exactly so).
-    nonisolated static func tap(format: AVAudioFormat, target: AVAudioFormat, converter: AVAudioConverter,
+    nonisolated static func tap(format: AVAudioFormat, mono: MicMono,
                                 state: Locked<VADState>, model: VADModel, queue: DispatchQueue, log: Log) -> @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void {
         { buffer, _ in
             // When this buffer's first sample was heard.
             let heard = Date().addingTimeInterval(-Double(buffer.frameLength) / format.sampleRate)
             let capacity = AVAudioFrameCount(Double(buffer.frameLength) * SileroVAD.sampleRate / format.sampleRate) + 32
-            guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return }
+            guard let out = AVAudioPCMBuffer(pcmFormat: mono.target, frameCapacity: capacity),
+                  let source = mono.source(buffer) else { return }
             // The converter asks for input synchronously, once per buffer.
             final class Once: @unchecked Sendable { var fed = false }
             let once = Once()
             var error: NSError?
-            converter.convert(to: out, error: &error) { _, status in
+            mono.converter.convert(to: out, error: &error) { _, status in
                 if once.fed { status.pointee = .noDataNow; return nil }
                 once.fed = true
                 status.pointee = .haveData
-                return buffer
+                return source
             }
             guard error == nil, let data = out.floatChannelData else { return }
             let samples = Array(UnsafeBufferPointer(start: data[0], count: Int(out.frameLength)))

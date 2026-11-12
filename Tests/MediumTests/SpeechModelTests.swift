@@ -67,25 +67,38 @@ struct SpeechModelTests {
     // background queue with 48 kHz speech (the Mac's input rate): it must not trap (a
     // main-actor closure there crashed the app on 10-27), and its 48 -> 16 kHz conversion
     // must still hear speech. In this serialized suite: `say` fails when run concurrently.
-    @Test func theTapRunsOffTheMainThreadAndHearsSpeech() throws {
+    /// Speech through the real callback, from a mono file and from a 16-channel input whose
+    /// voice is only on channel 3 (as CI's BlackHole 16ch delivered it, 11-12).
+    @Test(arguments: [1, 16] as [AVAudioChannelCount])
+    func theTapRunsOffTheMainThreadAndHearsSpeech(channels: AVAudioChannelCount) throws {
         let dir = TempDir("mic")
         let wav = dir.file("speech48k.wav")
         let r = ChildProcess.run("/usr/bin/say", ["-r", "180", "-o", wav, "--file-format=WAVE", "--data-format=LEF32@48000",
                                                   "We should look at the plan for next week and decide who does what."], timeout: 60, stderr: true)
         try #require(r.ok, "say failed: \(r.output)")
         let file = try AVAudioFile(forReading: URL(fileURLWithPath: wav))
-        let format = file.processingFormat
-        let target = try #require(AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: SileroVAD.sampleRate, channels: 1, interleaved: false))
-        let converter = try #require(AVAudioConverter(from: format, to: target))
+        let fileFormat = file.processingFormat
+        let format = try #require(channels == 1 ? fileFormat
+            : AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: fileFormat.sampleRate, interleaved: false,
+                            channelLayout: try #require(AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_DiscreteInOrder | UInt32(channels)))))
+        let mono = try #require(MicMono(from: format))
         let state = Locked<MicSpeechSource.VADState>(MicSpeechSource.VADState())
         let model = MicSpeechSource.VADModel(try SileroVAD())
         let queue = DispatchQueue(label: "test.vad")
-        let tap = MicSpeechSource.tap(format: format, target: target, converter: converter, state: state, model: model, queue: queue, log: Log("Test"))
+        let tap = MicSpeechSource.tap(format: format, mono: mono, state: state, model: model, queue: queue, log: Log("Test"))
         let done = DispatchSemaphore(value: 0)
         DispatchQueue.global(qos: .userInteractive).async {
             while file.framePosition < file.length {
-                guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4800) else { break }
-                try? file.read(into: buffer, frameCount: 4800)
+                guard let read = AVAudioPCMBuffer(pcmFormat: fileFormat, frameCapacity: 4800) else { break }
+                try? file.read(into: read, frameCount: 4800)
+                var buffer = read
+                if channels > 1, let wide = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: read.frameLength) {
+                    // Silence everywhere but channel 3.
+                    wide.frameLength = read.frameLength
+                    for c in 0..<Int(channels) { wide.floatChannelData![c].update(repeating: 0, count: Int(read.frameLength)) }
+                    wide.floatChannelData![2].update(from: read.floatChannelData![0], count: Int(read.frameLength))
+                    buffer = wide
+                }
                 tap(buffer, AVAudioTime(hostTime: mach_absolute_time()))
             }
             done.signal()

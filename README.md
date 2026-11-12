@@ -201,6 +201,41 @@ LEARNER_HEAVY_DESTRUCTIVE=1 scripts/test.sh heavy --filter Destructive
 
 Nothing is recorded while they run. Do not run them during a call.
 
+### CI on a clean Mac
+
+Every push to `main` also runs `.github/workflows/ci.yml` on a GitHub macOS runner (free
+for this public repo), which calls `scripts/ci.sh`. That script refuses to run anywhere
+but a throwaway CI machine. Each run works through these phases in order:
+
+1. Fetch Voice ID's model.
+2. Install two BlackHole loopback devices to act as microphones.
+3. Grant the app microphone and speech-recognition access in TCC.db.
+4. Turn on Siri and Dictation, which Apple's speech recognizer needs.
+5. Install a release build with `build-app.sh`.
+6. Check the microphone end to end through the installed app's own log:
+   - speech played into the default input is heard;
+   - when the default input is switched, the app reopens on the new input and hears again.
+7. Run the light, medium and heavy lanes with `LEARNER_CI=1`.
+8. Run `scripts/uninstall-app.sh` with `PURGE_DATA=1`, which must leave nothing behind.
+
+Every phase runs even after a failure. The run's summary page lists each phase as PASS
+or FAIL, and every skipped test with its reason. The logs, including the app's
+`menubar.log`, are kept as the `ci-out` artifact.
+
+Nothing of the owner's goes to CI: no secrets and no logins. Suites that need the owner's
+live stack skip by name there:
+
+- screenpipe;
+- the ChatGPT session and ai-vault;
+- the ovh server harness;
+- the CLI sessions uploader;
+- the wristband.
+
+Those still run in the pre-push heavy lane on the owner's Mac.
+
+`scripts/uninstall-app.sh` also works on the owner's Mac. Without `PURGE_DATA` it keeps
+`~/.ai-aggregator` and the app's settings.
+
 ## screenpipe
 
 Transcription comes from the installed screenpipe desktop app (mediar-ai/screenpipe, tested

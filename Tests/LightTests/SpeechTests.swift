@@ -171,8 +171,8 @@ struct BluetoothInputWatchTests {
     }
 }
 
-// The microphone to Silero's 16 kHz mono: the first input channel is heard on any input,
-// including a discrete 16-channel one, where AVAudioConverter's own mapping gave silence.
+// The microphone to Silero's 16 kHz mono: speech is heard on whichever channel carries it,
+// including on a discrete 16-channel input, where AVAudioConverter's own mapping gave silence.
 @Suite("Microphone format to 16 kHz mono", .tags(.light, .coach))
 struct MicMonoConverterTests {
     static func format(_ channels: AVAudioChannelCount) -> AVAudioFormat? {
@@ -183,17 +183,17 @@ struct MicMonoConverterTests {
 
     static func rms(channels: AVAudioChannelCount, signalOn: [Int]) throws -> Float {
         let format = try #require(Self.format(channels))
-        let (target, converter) = try #require(MicEngine.monoConverter(from: format))
+        let mono = try #require(MicMono(from: format))
         let n: AVAudioFrameCount = 4800
         let input = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: n))
         input.frameLength = n
         for c in signalOn { for i in 0..<Int(n) { input.floatChannelData![c][i] = 0.5 * sinf(Float(i) * 0.1) } }
-        let out = try #require(AVAudioPCMBuffer(pcmFormat: target, frameCapacity: 2000))
+        let out = try #require(AVAudioPCMBuffer(pcmFormat: mono.target, frameCapacity: 2000))
         // Fed once, as the app's tap does.
         final class Feed: @unchecked Sendable { var buffer: AVAudioPCMBuffer?; init(_ b: AVAudioPCMBuffer) { buffer = b } }
-        let feed = Feed(input)
+        let feed = Feed(try #require(mono.source(input)))
         var error: NSError?
-        converter.convert(to: out, error: &error) { _, status in
+        mono.converter.convert(to: out, error: &error) { _, status in
             guard let b = feed.buffer else { status.pointee = .noDataNow; return nil }
             feed.buffer = nil
             status.pointee = .haveData
@@ -206,9 +206,10 @@ struct MicMonoConverterTests {
     }
 
     @Test(arguments: [1, 2, 4, 16] as [AVAudioChannelCount])
-    func speechOnTheFirstChannelIsHeard(channels: AVAudioChannelCount) throws {
-        #expect(try Self.rms(channels: channels, signalOn: Array(0..<Int(min(channels, 2)))) > 0.2)
-        #expect(try Self.rms(channels: channels, signalOn: [0]) > 0.2)
+    func speechOnAnyChannelIsHeardAtFullLevel(channels: AVAudioChannelCount) throws {
+        // Full level: a single 0.5 sine has an RMS of ~0.354, and averaging would divide it.
+        for c in 0..<Int(channels) { #expect(try Self.rms(channels: channels, signalOn: [c]) > 0.3, "channel \(c) of \(channels)") }
+        #expect(try Self.rms(channels: channels, signalOn: Array(0..<Int(channels))) > 0.3)
     }
 
     @Test func silenceStaysSilent() throws {
