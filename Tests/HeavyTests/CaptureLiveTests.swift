@@ -16,7 +16,7 @@ enum Live {
     /// On the GitHub runner (TestEnvironment): a clean Mac with the app and a virtual
     /// microphone, and none of the owner's live stack. Suites that need it skip, by name.
     static let ci = TestEnvironment.isRunner
-    static let notOnCI: Comment = "runner: needs the owner's live screenpipe (LEARNER_TEST_ENV=runner)"
+    static let notOnCI: Comment = "runner: needs the screenpipe app and the owner's launchd setup, not just its engine (LEARNER_TEST_ENV=runner)"
     static let api = env["SCREENPIPE_API"] ?? "http://localhost:3030"
 
     static func json(_ url: String, body: Any? = nil) -> Any? {
@@ -96,7 +96,10 @@ struct CaptureLiveTests {
         #expect(drift.isEmpty, "settings drifted from config/screenpipe-settings.json (update it if deliberate): \(drift)")
     }
 
-    @Test func preflightPassesAgainstTheLiveStack() {
+    /// Needs the screenpipe app's own settings (~/.screenpipe/store.bin); the runner runs
+    /// screenpipe's engine without the app.
+    @Test(.enabled(if: !Live.ci, "runner: screenpipe's engine runs without the app, so there is no store.bin to check"))
+    func preflightPassesAgainstTheLiveStack() {
         let r = ChildProcess.run(appBinary, ["tool", "preflight"], timeout: 120, stderr: true)
         #expect(r.status == 0, "preflight reported drift:\n\(r.output)")
     }

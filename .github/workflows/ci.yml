@@ -61,6 +61,17 @@ jobs:
       - name: fixtures (synthetic sample as ~/ai-vault-data)
         if: ${{ !cancelled() }}
         run: scripts/ci.sh fixtures
+      - name: Cache screenpipe's engine and models
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/learner-screenpipe
+            ~/.cache/huggingface/hub/models--ggerganov--whisper.cpp
+            ~/Library/Caches/screenpipe
+          key: screenpipe-${{ hashFiles('config/screenpipe-settings.json') }}
+      - name: screenpipe (real engine on :3030)
+        if: ${{ !cancelled() }}
+        run: scripts/ci.sh screenpipe
       - name: speech (Siri and Dictation on)
         if: ${{ !cancelled() }}
         run: scripts/ci.sh speech

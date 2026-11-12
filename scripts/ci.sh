@@ -6,6 +6,7 @@
 #   virtual-mic    two BlackHole loopback devices; "BlackHole 2ch" becomes the default input
 #   grant          microphone + speech-recognition grants for the app's bundle id (TCC.db)
 #   fixtures       the synthetic sample (Tests/Fixtures/sample) as ~/ai-vault-data + its ledger
+#   screenpipe     screenpipe's engine (the pinned version, the owner's audio settings) on :3030
 #   speech         Siri and Dictation on, which Apple's speech recognizer needs
 #   install        release build, installed and started by scripts/build-app.sh
 #   mic-e2e        speech played into the virtual mic is heard by the installed app; the
@@ -130,6 +131,57 @@ fixtures() {
   sed "s#@HOME@#$HOME#g" "$sample/sync-ledger.sql" | sqlite3 "$HOME/.ai-aggregator/sync-ledger.sqlite"
   echo "installed $(find "$HOME/ai-vault-data" -name conversation.md | wc -l | tr -d ' ') synthetic conversations into ~/ai-vault-data"
   echo "ledger: $(sqlite3 "$HOME/.ai-aggregator/sync-ledger.sqlite" "select sync_status || ' ' || count(*) from archive_ledger group by sync_status;" | paste -sd, -)"
+}
+
+# screenpipe's open-source engine, the version config/screenpipe-settings.json pins, with
+# the owner's audio settings, recording BlackHole 2ch: the heavy lane's capture suites then
+# run against a real screenpipe. The CLI, not the app: the app records only when signed in
+# to a screenpipe account (checked in its source at app-v2.7.145). npm never changes a
+# published version, and the tarball must match its pinned integrity hash.
+SCREENPIPE_CLI_VERSION=0.4.58
+SCREENPIPE_CLI_SHA512="EhpKXwvgNmIMNNBV6blOFlJqNdMFvAnn+fN9F2/1gOEM/lmaXtDBNYYFr1HoPlIjI8FTO0sBZognNcsNQuMsgg=="
+screenpipe() {
+  set -e
+  local pinned; pinned="$(python3 -c "import json; print(json.load(open('config/screenpipe-settings.json'))['_screenpipe_engine_version'])")"
+  [ "$pinned" = "$SCREENPIPE_CLI_VERSION" ] || { echo "config pins screenpipe engine $pinned but ci.sh installs $SCREENPIPE_CLI_VERSION: update SCREENPIPE_CLI_VERSION and its SHA512"; return 1; }
+  local cache="$HOME/.cache/learner-screenpipe" dir="$HOME/.local/screenpipe-cli"
+  mkdir -p "$cache" "$dir"
+  local tgz="$cache/cli-darwin-arm64-$SCREENPIPE_CLI_VERSION.tgz"
+  [ -f "$tgz" ] || curl -fsSL --retry 3 -o "$tgz" "https://registry.npmjs.org/@screenpipe/cli-darwin-arm64/-/cli-darwin-arm64-$SCREENPIPE_CLI_VERSION.tgz"
+  [ "$(openssl dgst -sha512 -binary "$tgz" | base64)" = "$SCREENPIPE_CLI_SHA512" ] || { echo "screenpipe CLI tarball does not match its pinned SHA-512"; rm -f "$tgz"; return 1; }
+  tar -xzf "$tgz" -C "$dir"
+  local bin; bin="$(find "$dir/package" -type f -name screenpipe -perm +111 | head -1)"
+  [ -x "$bin" ] || { echo "no screenpipe binary in the tarball:"; find "$dir/package" -maxdepth 3 | head -20; return 1; }
+  echo "screenpipe: $bin ($("$bin" --version 2>/dev/null || echo "version unknown"))"
+  # Screen and system-audio capture (system TCC.db) and the microphone (user TCC.db), for
+  # the binary by path, as the runner image does for its own tools.
+  local now; now=$(date +%s)
+  for service in kTCCServiceScreenCapture kTCCServiceAudioCapture; do
+    sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
+      "INSERT OR REPLACE INTO access VALUES('$service','$bin',1,2,3,1,NULL,NULL,NULL,'UNUSED',NULL,0,$now,NULL,NULL,'UNUSED',$now);"
+  done
+  sqlite3 "$HOME/Library/Application Support/com.apple.TCC/TCC.db" \
+    "INSERT OR REPLACE INTO access VALUES('kTCCServiceMicrophone','$bin',1,2,3,1,NULL,NULL,NULL,'UNUSED',NULL,0,$now,NULL,NULL,'UNUSED',$now);"
+  sudo launchctl kickstart -k system/com.apple.tccd || true
+  echo "audio devices:"; "$bin" audio list 2>&1 | sed 's/^/  /' | head -20
+  local mic; mic="$("$bin" audio list 2>/dev/null | grep -o "${MIC_A} (input)" | head -1)"
+  [ -n "$mic" ] || mic="${MIC_A} (input)"
+  # The owner's settings: realtime transcription, 5 s chunks, whisper-tiny-quantized,
+  # system audio through Core Audio, no PII removal (config/screenpipe-settings.json).
+  SCREENPIPE_NO_REMINDERS=1 SCREENPIPE_NO_UPDATE_CHECK=1 nohup "$bin" record --port 3030 \
+    -a whisper-tiny-quantized -d 5 --transcription-mode realtime \
+    -i "$mic" -i "System Audio (output)" --experimental-coreaudio-system-audio \
+    --use-pii-removal false --disable-telemetry > "$OUT/screenpipe.log" 2>&1 &
+  echo $! > "$OUT/screenpipe.pid"
+  local until=$((SECONDS + 240))
+  until curl -sf -m 3 http://localhost:3030/health >/dev/null; do
+    if ! kill -0 "$(cat "$OUT/screenpipe.pid")" 2>/dev/null; then echo "screenpipe exited:"; tail -40 "$OUT/screenpipe.log"; return 1; fi
+    [ $SECONDS -lt $until ] || { echo "screenpipe did not answer /health in 240 s:"; tail -40 "$OUT/screenpipe.log"; return 1; }
+    sleep 2
+  done
+  echo "health: $(curl -s -m 3 http://localhost:3030/health | head -c 400)"
+  # One transcription row, so the live-SQL suites have something to read.
+  say -a "$MIC_A" "This is the runner checking that screenpipe hears the virtual microphone."
 }
 
 speech() {
@@ -263,6 +315,7 @@ run() {
     virtual-mic) phase virtual-mic virtual_mic ;;
     grant) phase grant grant ;;
     fixtures) phase fixtures fixtures ;;
+    screenpipe) phase screenpipe screenpipe ;;
     speech) phase speech speech ;;
     install) phase install install ;;
     mic-e2e) phase mic-e2e mic_e2e ;;
@@ -272,9 +325,9 @@ run() {
     report) report ;;
     all)
       rm -f "$RESULTS"
-      for p in fetch virtual-mic grant fixtures speech install mic-e2e light medium heavy updater uninstall; do run "$p" || true; done
+      for p in fetch virtual-mic grant fixtures screenpipe speech install mic-e2e light medium heavy updater uninstall; do run "$p" || true; done
       report ;;
-    *) echo "usage: scripts/ci.sh fetch|virtual-mic|grant|fixtures|speech|install|mic-e2e|light|medium|heavy|updater|uninstall|report|all" >&2; return 2 ;;
+    *) echo "usage: scripts/ci.sh fetch|virtual-mic|grant|fixtures|screenpipe|speech|install|mic-e2e|light|medium|heavy|updater|uninstall|report|all" >&2; return 2 ;;
   esac
 }
 
