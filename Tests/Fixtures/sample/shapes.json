@@ -1,0 +1,121 @@
+{
+  "chatgpt": [
+    "chatgpt/conversations/067ece07-5d1e-3bbc-0223-415e40015ee6",
+    "chatgpt/conversations/0d9622f8-d841-cd55-b2f0-f456a4b00441",
+    "chatgpt/conversations/17872335-d4e3-5d84-1715-cb8d24b0f772",
+    "chatgpt/conversations/1898ae07-e3ee-eef6-839c-87fb896c1fec",
+    "chatgpt/conversations/18a3197d-9171-f407-eae0-0370a840621e",
+    "chatgpt/conversations/2238e605-0a28-c507-d211-a85ff51bb404",
+    "chatgpt/conversations/243f4614-21dd-0024-2590-f7016e7b0e1a",
+    "chatgpt/conversations/2fb05d10-eabb-9a39-1803-d1a22e99cb67",
+    "chatgpt/conversations/4535189b-b05f-b0a5-e137-763093fb5402",
+    "chatgpt/conversations/456d2c4f-2ec8-13db-f020-bb0420542c1d",
+    "chatgpt/conversations/538d86ab-ea3e-86eb-3874-be403d0dacef",
+    "chatgpt/conversations/780074d3-9a39-f6af-35be-13881d152eb2",
+    "chatgpt/conversations/7c947b16-9c84-444e-fe4d-96f6f1bc707f",
+    "chatgpt/conversations/7fed685b-2262-d177-b779-7b1bf50bfac5",
+    "chatgpt/conversations/92070ceb-4160-5349-dcc2-86a034ff9259",
+    "chatgpt/conversations/92d99864-f063-e167-e1db-cfc7bb954d72",
+    "chatgpt/conversations/9d4a92ea-85e1-8e2a-c2bd-c11877148481",
+    "chatgpt/conversations/a0c978dd-7ca9-76ee-4e7f-ad1900b81973",
+    "chatgpt/conversations/a3784602-b8ee-97f0-ff2d-567aa09eb810",
+    "chatgpt/conversations/cab0f349-df8b-507b-96c4-80de703d469c",
+    "chatgpt/conversations/cda84481-fed7-d036-cd86-5ed7cf39d415",
+    "chatgpt/conversations/d6eb7ae9-81ba-ac96-15c0-ed1da735df62",
+    "chatgpt/conversations/e90d4fda-11ac-bc94-87ea-40546e7904f0",
+    "chatgpt/conversations/fcbf4f9a-fb30-36bf-76f0-ec292c9271bb"
+  ],
+  "checklist": [
+    "chatgpt/conversations/243f4614-21dd-0024-2590-f7016e7b0e1a",
+    "chatgpt/conversations/4535189b-b05f-b0a5-e137-763093fb5402",
+    "chatgpt/conversations/cab0f349-df8b-507b-96c4-80de703d469c"
+  ],
+  "claude": [
+    "claude/conversations/8dc9af2e-ea5c-35e6-ad3c-5ce737faf619",
+    "claude/conversations/cee6046b-22c1-ccce-567b-cf0d88a1c46c",
+    "claude/conversations/f6fdebc9-00e5-6063-abd9-b307ac0e74c2"
+  ],
+  "code": [
+    "chatgpt/conversations/17872335-d4e3-5d84-1715-cb8d24b0f772",
+    "chatgpt/conversations/780074d3-9a39-f6af-35be-13881d152eb2",
+    "chatgpt/conversations/7fed685b-2262-d177-b779-7b1bf50bfac5",
+    "chatgpt/conversations/d6eb7ae9-81ba-ac96-15c0-ed1da735df62"
+  ],
+  "crlf": [
+    "chatgpt/conversations/2238e605-0a28-c507-d211-a85ff51bb404",
+    "chatgpt/conversations/92d99864-f063-e167-e1db-cfc7bb954d72",
+    "chatgpt/conversations/d6eb7ae9-81ba-ac96-15c0-ed1da735df62"
+  ],
+  "empty-section": [
+    "chatgpt/conversations/067ece07-5d1e-3bbc-0223-415e40015ee6",
+    "chatgpt/conversations/456d2c4f-2ec8-13db-f020-bb0420542c1d",
+    "chatgpt/conversations/9d4a92ea-85e1-8e2a-c2bd-c11877148481",
+    "chatgpt/conversations/e90d4fda-11ac-bc94-87ea-40546e7904f0",
+    "chatgpt/conversations/fcbf4f9a-fb30-36bf-76f0-ec292c9271bb"
+  ],
+  "inner-heading": [
+    "chatgpt/conversations/1898ae07-e3ee-eef6-839c-87fb896c1fec",
+    "chatgpt/conversations/18a3197d-9171-f407-eae0-0370a840621e",
+    "chatgpt/conversations/2238e605-0a28-c507-d211-a85ff51bb404",
+    "chatgpt/conversations/243f4614-21dd-0024-2590-f7016e7b0e1a",
+    "chatgpt/conversations/92d99864-f063-e167-e1db-cfc7bb954d72",
+    "chatgpt/conversations/a3784602-b8ee-97f0-ff2d-567aa09eb810",
+    "chatgpt/conversations/cab0f349-df8b-507b-96c4-80de703d469c",
+    "chatgpt/conversations/cda84481-fed7-d036-cd86-5ed7cf39d415",
+    "chatgpt/conversations/d6eb7ae9-81ba-ac96-15c0-ed1da735df62"
+  ],
+  "inner-rule": [
+    "chatgpt/conversations/067ece07-5d1e-3bbc-0223-415e40015ee6",
+    "chatgpt/conversations/0d9622f8-d841-cd55-b2f0-f456a4b00441",
+    "chatgpt/conversations/2238e605-0a28-c507-d211-a85ff51bb404",
+    "chatgpt/conversations/4535189b-b05f-b0a5-e137-763093fb5402",
+    "chatgpt/conversations/92d99864-f063-e167-e1db-cfc7bb954d72",
+    "chatgpt/conversations/cab0f349-df8b-507b-96c4-80de703d469c",
+    "chatgpt/conversations/cda84481-fed7-d036-cd86-5ed7cf39d415",
+    "chatgpt/conversations/d6eb7ae9-81ba-ac96-15c0-ed1da735df62",
+    "chatgpt/conversations/fcbf4f9a-fb30-36bf-76f0-ec292c9271bb"
+  ],
+  "long": [
+    "chatgpt/conversations/cda84481-fed7-d036-cd86-5ed7cf39d415"
+  ],
+  "metadata": [
+    "chatgpt/conversations/067ece07-5d1e-3bbc-0223-415e40015ee6",
+    "chatgpt/conversations/0d9622f8-d841-cd55-b2f0-f456a4b00441",
+    "chatgpt/conversations/17872335-d4e3-5d84-1715-cb8d24b0f772",
+    "chatgpt/conversations/1898ae07-e3ee-eef6-839c-87fb896c1fec",
+    "chatgpt/conversations/18a3197d-9171-f407-eae0-0370a840621e",
+    "chatgpt/conversations/2238e605-0a28-c507-d211-a85ff51bb404",
+    "chatgpt/conversations/243f4614-21dd-0024-2590-f7016e7b0e1a",
+    "chatgpt/conversations/2fb05d10-eabb-9a39-1803-d1a22e99cb67",
+    "chatgpt/conversations/4535189b-b05f-b0a5-e137-763093fb5402",
+    "chatgpt/conversations/456d2c4f-2ec8-13db-f020-bb0420542c1d",
+    "chatgpt/conversations/538d86ab-ea3e-86eb-3874-be403d0dacef",
+    "chatgpt/conversations/780074d3-9a39-f6af-35be-13881d152eb2",
+    "chatgpt/conversations/7c947b16-9c84-444e-fe4d-96f6f1bc707f",
+    "chatgpt/conversations/7fed685b-2262-d177-b779-7b1bf50bfac5",
+    "chatgpt/conversations/92070ceb-4160-5349-dcc2-86a034ff9259",
+    "chatgpt/conversations/92d99864-f063-e167-e1db-cfc7bb954d72",
+    "chatgpt/conversations/9d4a92ea-85e1-8e2a-c2bd-c11877148481",
+    "chatgpt/conversations/a0c978dd-7ca9-76ee-4e7f-ad1900b81973",
+    "chatgpt/conversations/a3784602-b8ee-97f0-ff2d-567aa09eb810",
+    "chatgpt/conversations/cab0f349-df8b-507b-96c4-80de703d469c",
+    "chatgpt/conversations/cda84481-fed7-d036-cd86-5ed7cf39d415",
+    "chatgpt/conversations/d6eb7ae9-81ba-ac96-15c0-ed1da735df62",
+    "chatgpt/conversations/e90d4fda-11ac-bc94-87ea-40546e7904f0",
+    "chatgpt/conversations/fcbf4f9a-fb30-36bf-76f0-ec292c9271bb",
+    "claude/conversations/8dc9af2e-ea5c-35e6-ad3c-5ce737faf619",
+    "claude/conversations/cee6046b-22c1-ccce-567b-cf0d88a1c46c",
+    "claude/conversations/f6fdebc9-00e5-6063-abd9-b307ac0e74c2"
+  ],
+  "no-messages": [
+    "chatgpt/conversations/538d86ab-ea3e-86eb-3874-be403d0dacef",
+    "chatgpt/conversations/92070ceb-4160-5349-dcc2-86a034ff9259",
+    "chatgpt/conversations/a0c978dd-7ca9-76ee-4e7f-ad1900b81973",
+    "claude/conversations/f6fdebc9-00e5-6063-abd9-b307ac0e74c2"
+  ],
+  "voice": [
+    "chatgpt/conversations/2fb05d10-eabb-9a39-1803-d1a22e99cb67",
+    "chatgpt/conversations/7c947b16-9c84-444e-fe4d-96f6f1bc707f",
+    "chatgpt/conversations/9d4a92ea-85e1-8e2a-c2bd-c11877148481"
+  ]
+}

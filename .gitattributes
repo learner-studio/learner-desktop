@@ -1,0 +1,3 @@
+# The synthetic sample is compared byte for byte (content hashes in its ledger; some files
+# keep CRLF on purpose): git must never convert it.
+Tests/Fixtures/** -text

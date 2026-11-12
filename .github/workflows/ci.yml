@@ -58,6 +58,9 @@ jobs:
       - name: grant (microphone, speech recognition)
         if: ${{ !cancelled() }}
         run: scripts/ci.sh grant
+      - name: fixtures (synthetic sample as ~/ai-vault-data)
+        if: ${{ !cancelled() }}
+        run: scripts/ci.sh fixtures
       - name: speech (Siri and Dictation on)
         if: ${{ !cancelled() }}
         run: scripts/ci.sh speech
