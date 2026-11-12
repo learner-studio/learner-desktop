@@ -281,15 +281,21 @@ speech() {
   defaults write com.apple.assistant.support "Dictation Enabled" -bool true
   killall assistantd corespeechd 2>/dev/null || true   # they reread the settings on relaunch
   defaults read com.apple.assistant.support | grep -E '"(Assistant|Dictation) Enabled"' | sed 's/^ */  /'
-  # Many checks speak with `say` (the mic end to end, the speech model, screenpipe's rows,
-  # the audio benchmark). Run 8's machine synthesized silence (85 samples for a sentence):
-  # check it here, restart the synthesizer if needed, and fail plainly if it stays broken.
-  local wav="$OUT/say-check.wav" n=0
+  ensure_say
+}
+
+# Many checks speak with `say` (the mic end to end, the speech model, screenpipe's rows,
+# the audio benchmark), and the runner's synthesizer can break mid-run: it passed this
+# check, then made silence later in runs 8 and 12 (85 samples for a passage). So before
+# each phase that speaks: check it, restart the synthesizer if it is silent, and fail
+# plainly if it stays broken.
+ensure_say() {
+  local wav="$OUT/say-check.wav" n=0 attempt
   for attempt in 1 2 3; do
     rm -f "$wav"
     say -o "$wav" --file-format=WAVE --data-format=LEI16@16000 "The quick brown fox checks the speech synthesizer." 2>&1 | tail -2
     n=$(( ( $(stat -f %z "$wav" 2>/dev/null || echo 0) - 44 ) / 2 ))
-    echo "say attempt $attempt: $n samples"
+    echo "say check, attempt $attempt: $n samples"
     [ "$n" -gt 16000 ] && break
     killall speechsynthesisd SpeechSynthesisServer com.apple.speech.speechsynthesisd 2>/dev/null || true
     sleep 3
@@ -341,6 +347,7 @@ diagnose_input() {
 speak_into() { say -a "$1" "I would like to explain the plan for our next project in a little more detail. The first step is to understand what people need from the product and what gets in their way today."; }
 
 mic_e2e() {
+  ensure_say || return 1
   local from ok=0
   from=1
   echo "1. the app listens on the default input ($MIC_A)"
@@ -392,6 +399,7 @@ lane() {
   fi
   if [ -f "$OUT/server.env" ]; then set -a; . "$OUT/server.env"; set +a; fi
   export LEARNER_SERVER_SECRETS="$HOME/.learner-ci-secrets.env"
+  if [ "$1" != light ]; then ensure_say || return 1; fi
   scripts/test.sh "$1"
 }
 
