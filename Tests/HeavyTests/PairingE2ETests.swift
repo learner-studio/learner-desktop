@@ -42,6 +42,16 @@ struct PairingE2ETests {
                 ssh.executableURL = URL(fileURLWithPath: Live.env["LEARNER_BUN"] ?? "/opt/homebrew/bin/bun")
                 ssh.arguments = ["scripts/pairing-server.ts", "--port", "\(PairingE2ETests.port)", "--pairing-dir", dir] + topologyArgs
                 ssh.currentDirectoryURL = URL(fileURLWithPath: server)
+                // The server's throwaway secrets (scripts/ci.sh's server phase) go to the
+                // harness alone: no test process carries them.
+                var env = ProcessInfo.processInfo.environment
+                if let path = Live.env["LEARNER_SERVER_SECRETS"], let text = try? String(contentsOfFile: path, encoding: .utf8) {
+                    for line in text.split(separator: "\n") {
+                        let parts = line.split(separator: "=", maxSplits: 1).map(String.init)
+                        if parts.count == 2 { env[parts[0]] = parts[1] }
+                    }
+                }
+                ssh.environment = env
             } else {
                 let command = "mkdir -p \(dir) && cd /root/learner && exec bun --env-file=/etc/learner/db.env --env-file=/etc/learner/learner.env "
                     + "scripts/pairing-server.ts --port \(PairingE2ETests.port) --pairing-dir \(dir) " + topologyArgs.joined(separator: " ")
@@ -90,7 +100,9 @@ struct PairingE2ETests {
                 if ssh.isRunning { ssh.terminate() }
                 let deadline = Date().addingTimeInterval(60)
                 while ssh.isRunning && Date() < deadline { usleep(200_000) }
+                var killed = false
                 if ssh.isRunning {
+                    killed = true
                     kill(ssh.processIdentifier, SIGKILL)
                     // The harness starts its API detached: a killed harness leaves it on the
                     // port, and the next test would find "something already answers".
@@ -98,6 +110,13 @@ struct PairingE2ETests {
                     for pid in held.output.split(separator: "\n").compactMap({ Int32($0) }) { kill(pid, SIGKILL) }
                 }
                 try? FileManager.default.removeItem(atPath: dir)
+                // Its teardown revokes the device and checks nothing is left; a failure there
+                // would leave a live key behind, so it fails the test.
+                usleep(300_000)
+                let said = output
+                if killed || said.contains("revoke-failed") || (!ssh.isRunning && ssh.terminationStatus != 0 && ssh.terminationStatus != SIGTERM) {
+                    Issue.record("the harness's teardown did not finish cleanly (killed: \(killed), exit \(ssh.isRunning ? -1 : ssh.terminationStatus)): \(said.suffix(600))")
+                }
                 return
             }
             // Bracketed, so the pattern does not match the remote shell running this very

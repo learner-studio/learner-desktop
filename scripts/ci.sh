@@ -46,10 +46,12 @@ APP_LOG="$HOME/.ai-aggregator/logs/menubar.log"
 BUNDLE_ID="com.benpollack.ai-aggregator-menubar"
 MIC_A="BlackHole 2ch"
 MIC_B="BlackHole 16ch"
+# The default output: its own device, so system-audio capture never hears what is played
+# into the two microphones.
+SPEAKER="BlackHole 64ch"
 
 # What the server phase exported for later phases (each workflow step is its own shell).
 if [ -f "$OUT/server.env" ]; then set -a; . "$OUT/server.env"; set +a; fi
-if [ -f "$HOME/.learner-ci-secrets.env" ]; then set -a; . "$HOME/.learner-ci-secrets.env"; set +a; fi
 
 RESULTS="$OUT/results.tsv"   # PASS|FAIL <TAB> phase <TAB> seconds <TAB> note
 
@@ -98,27 +100,29 @@ virtual_mic() {
   command -v SwitchAudioSource >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install switchaudio-osx
   command -v sox >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install sox   # diagnose_input
   # BlackHole is a CoreAudio driver (a HAL plug-in): coreaudiod loads it on restart.
-  HOMEBREW_NO_AUTO_UPDATE=1 brew install --cask blackhole-2ch blackhole-16ch
+  HOMEBREW_NO_AUTO_UPDATE=1 brew install --cask blackhole-2ch blackhole-16ch blackhole-64ch
   sudo killall coreaudiod || true
   local until=$((SECONDS + 30))
-  until SwitchAudioSource -a -t input | grep -qx "$MIC_B" && SwitchAudioSource -a -t input | grep -qx "$MIC_A"; do
+  until SwitchAudioSource -a -t input | grep -qx "$MIC_B" && SwitchAudioSource -a -t input | grep -qx "$MIC_A" \
+        && SwitchAudioSource -a -t output | grep -qx "$SPEAKER"; do
     [ $SECONDS -lt $until ] || { echo "BlackHole devices did not appear:"; SwitchAudioSource -a -t input; return 1; }
     sleep 1
   done
   SwitchAudioSource -t input -s "$MIC_A"
   # A real default output, so screenpipe's system-audio capture has something to tap (with
-  # none, its device check times out and /health reports degraded).
-  SwitchAudioSource -t output -s "$MIC_B"
+  # none, its device check times out and /health reports degraded). Not a microphone: what
+  # the run plays into the mics must not also reach system audio as "someone else".
+  SwitchAudioSource -t output -s "$SPEAKER"
   echo "default output: $(SwitchAudioSource -c -t output)"
   # Room tone on the virtual microphone: a real mic never delivers digital silence, and
   # screenpipe marks an input whose level stays under RMS 0.001 for 30 s as no data
-  # ("active_no_data"). Pink noise at about -46 dBFS is a quiet room: above that floor, far
-  # below speech. It plays for the rest of the run.
+  # ("active_no_data"). vol 0.025 measures about RMS 0.005 (-46 dBFS; vol 0.005 measured
+  # RMS 0.0011, at the floor): a quiet room, far below speech. It plays for the whole run.
   command -v sox >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install sox
   # Re-launched every 20 s: another program opening the device can reconfigure it under a
   # long-running sox, which then keeps running while the device hears zeros (run 5). A
   # fresh sox picks the device up again well inside screenpipe's 30 s window.
-  nohup bash -c "while true; do sox -q -n -t coreaudio '$MIC_A' synth 20 pinknoise vol 0.005 || echo \"\$(date -u +%T) sox exited \$?\"; done" > "$OUT/room-tone.log" 2>&1 &
+  nohup bash -c "while true; do sox -q -n -t coreaudio '$MIC_A' synth 20 pinknoise vol 0.025 || echo \"\$(date -u +%T) sox exited \$?\"; done" > "$OUT/room-tone.log" 2>&1 &
   echo $! > "$OUT/room-tone.pid"
   sleep 1
   kill -0 "$(cat "$OUT/room-tone.pid")" 2>/dev/null || { echo "room tone did not start:"; cat "$OUT/room-tone.log"; return 1; }
@@ -203,8 +207,25 @@ screenpipe() {
     sleep 2
   done
   echo "health: $(curl -s -m 3 http://localhost:3030/health | head -c 400)"
-  # One transcription row, so the live-SQL suites have something to read.
-  say -a "$MIC_A" "This is the runner checking that screenpipe hears the virtual microphone."
+  # One transcription row, so the live-SQL suites have something to read: spoken once
+  # screenpipe records the mic (it starts that a while after /health answers), then seen.
+  local until=$((SECONDS + 240))
+  until grep -q "starting continuous recording for ${MIC_A}" "$OUT/screenpipe.log"; do
+    [ $SECONDS -lt $until ] || { echo "screenpipe never started recording $MIC_A"; return 1; }
+    sleep 2
+  done
+  local rows=0 n
+  for attempt in 1 2 3; do
+    say -a "$MIC_A" "This is the runner checking that screenpipe hears the virtual microphone."
+    for _ in $(seq 1 20); do
+      n="$(curl -s -m 5 -X POST http://localhost:3030/raw_sql -H 'content-type: application/json' \
+        -d '{"query":"SELECT count(*) AS n FROM audio_transcriptions"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["n"])' 2>/dev/null || echo 0)"
+      [ "${n:-0}" -gt 0 ] && { rows=$n; break 2; }
+      sleep 3
+    done
+  done
+  echo "audio_transcriptions rows: $rows"
+  [ "$rows" -gt 0 ] || { echo "screenpipe stored no transcription of the spoken line"; return 1; }
 }
 
 # learner-server's own pairing harness on the runner, for the heavy lane's pairing and
@@ -217,7 +238,11 @@ server() {
   [ -d "$dir/scripts" ] || { echo "no learner-server checkout in $dir"; return 1; }
   echo "learner-server at $(git -C "$dir" rev-parse --short HEAD) (pinned: $(cut -c1-7 config/learner-server.ref))"
   command -v bun >/dev/null || { echo "bun is not on PATH"; return 1; }
-  HOMEBREW_NO_AUTO_UPDATE=1 brew install postgresql@17 >/dev/null
+  # nginx: the remote topology runs the SHIPPED deploy/nginx config in front of the API.
+  # shellcheck: the light lane's script check. The hosts entry: remote pairing advertises a
+  # non-loopback name that resolves here (PairingE2E's remote case).
+  HOMEBREW_NO_AUTO_UPDATE=1 brew install postgresql@17 nginx shellcheck >/dev/null
+  grep -q "learner-pairing.test" /etc/hosts || echo "127.0.0.1 learner-pairing.test" | sudo tee -a /etc/hosts >/dev/null
   local pg; pg="$(brew --prefix postgresql@17)/bin"
   rm -rf "$HOME/learner-pg"
   "$pg/initdb" -D "$HOME/learner-pg" -U learner --auth=trust >/dev/null
@@ -240,7 +265,7 @@ server() {
     echo "LEARNER_BASE_URL=http://127.0.0.1:3019"
   } > "$HOME/.learner-ci-secrets.env"
   umask 022
-  set -a; . "$OUT/server.env"; . "$HOME/.learner-ci-secrets.env"; set +a
+  set -a; . "$OUT/server.env"; set +a
   # Each server start runs pikku's code generation first: done once here, so a start in the
   # heavy lane fits the harness's 180 s wait on 3 busy cores.
   ( cd "$dir" && bun install --frozen-lockfile && bun packages/server/src/db/migrate.ts --test && bun run build:web \
@@ -322,9 +347,11 @@ mic_e2e() {
   # The app names the input by its format; BlackHole 2ch and 16ch differ in channel count.
   wait_log "listening on .* 2-channel input" 90 "$from" || ok=1
   from=$(log_lines)
-  echo "2. speech played into $MIC_A is heard"
+  echo "2. speech played into $MIC_A is heard, as the owner's own turn with its words"
   speak_into "$MIC_A"
   wait_log "\[Coach\] heard " 30 "$from" || ok=1
+  # The turn ends on silence (not "someone else spoke"), with the words screenpipe heard.
+  wait_log "turn [0-9]+ ended \(silent[^)]*\): [0-9.]+ s, [1-9][0-9]* words" 60 "$from" || ok=1
   from=$(log_lines)
   echo "3. the default input switches to $MIC_B; the app reopens the microphone on it"
   SwitchAudioSource -t input -s "$MIC_B"
@@ -335,11 +362,12 @@ mic_e2e() {
   sleep 15   # the previous turn ends after 14 s of silence, so this one is a new turn
   speak_into "$MIC_B"
   wait_log "\[Coach\] heard " 30 "$from" || { ok=1; diagnose_input "$MIC_B"; }
+  # Its own turn too (screenpipe records only $MIC_A, so no word count here).
+  wait_log "turn [0-9]+ ended \(silent" 60 "$from" || ok=1
   SwitchAudioSource -t input -s "$MIC_A" >/dev/null
   return $ok
 }
 
-# The server phase's exports, read again here: in `ci.sh all` it ran in a subshell.
 # What the virtual mic carries right now (diagnosis for screenpipe's audio health).
 audio_check() {
   echo "room tone: $(pgrep -f "synth 20 pinknoise" >/dev/null && echo "playing" || echo "NOT PLAYING") (loop $(kill -0 "$(cat "$OUT/room-tone.pid" 2>/dev/null)" 2>/dev/null && echo alive || echo dead))"
@@ -349,10 +377,13 @@ audio_check() {
   tail -3 "$OUT/room-tone.log" 2>/dev/null
 }
 
+# The server phase's exports, read again here (in `ci.sh all` it ran in a subshell). Its
+# secrets are not: only the harness reads them (LEARNER_SERVER_SECRETS), so no test
+# process carries them.
 lane() {
   [ "$1" = heavy ] && audio_check
   if [ -f "$OUT/server.env" ]; then set -a; . "$OUT/server.env"; set +a; fi
-  if [ -f "$HOME/.learner-ci-secrets.env" ]; then set -a; . "$HOME/.learner-ci-secrets.env"; set +a; fi
+  export LEARNER_SERVER_SECRETS="$HOME/.learner-ci-secrets.env"
   scripts/test.sh "$1"
 }
 
@@ -372,6 +403,11 @@ report() {
   local failed=0 skips nskips
   [ -f "$RESULTS" ] && grep -q '^FAIL' "$RESULTS" && failed=1
   [ -f "$RESULTS" ] || failed=1
+  # A phase that never reported (its step skipped or killed) is a failure, not a gap.
+  local p missing=""
+  for p in fetch virtual-mic grant fixtures screenpipe server speech install mic-e2e light medium heavy updater uninstall; do
+    grep -q "	$p	" "$RESULTS" 2>/dev/null || { missing="$missing $p"; failed=1; }
+  done
   # Swift Testing names every skip and cancellation: `➜ Test x() skipped: "why"`.
   skips="$(cat "$OUT"/light.log "$OUT"/medium.log "$OUT"/heavy.log 2>/dev/null \
     | grep -E '^➜ (Test|Suite) .* (skipped|was cancelled)' | sed -E 's/^➜ //' | sort -u)"
@@ -381,6 +417,7 @@ report() {
     echo
     echo "Test environment: **runner** (a clean Mac; no owner accounts or live data)."
     echo
+    [ -n "$missing" ] && { echo "❌ phases that never reported:$missing"; echo; }
     echo "| | phase | time | note |"
     echo "|---|---|---|---|"
     [ -f "$RESULTS" ] && while IFS=$'\t' read -r verdict name took note; do

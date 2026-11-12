@@ -157,7 +157,9 @@ struct CoachAudioLatencyTests {
         // anything about the Mac: on the runner the test proves the pipeline end to end (the
         // warning comes, never early) and prints the delay; the 6 s budget is the Mac's only.
         if TestEnvironment.isRunner {
-            print("RUNNER audio benchmark: warning \(String(format: "%.1f", delay)) s after the 30 s mark (not asserted on the runner; the Mac's budget is 6 s)")
+            // stderr: the suite's quiet log swallows print(). 90 s only catches a broken pipeline.
+            FileHandle.standardError.write(Data("RUNNER audio benchmark: warning \(String(format: "%.1f", delay)) s after the 30 s mark (the Mac's budget is 6 s)\n".utf8))
+            #expect(delay < 90, "warning came \(delay) s after the 30 s mark: the pipeline is stuck, not slow")
         } else {
             #expect(delay < 6, "warning came \(delay) s after the 30 s mark")
         }
