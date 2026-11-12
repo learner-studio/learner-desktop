@@ -49,6 +49,7 @@ MIC_B="BlackHole 16ch"
 
 # What the server phase exported for later phases (each workflow step is its own shell).
 if [ -f "$OUT/server.env" ]; then set -a; . "$OUT/server.env"; set +a; fi
+if [ -f "$HOME/.learner-ci-secrets.env" ]; then set -a; . "$HOME/.learner-ci-secrets.env"; set +a; fi
 
 RESULTS="$OUT/results.tsv"   # PASS|FAIL <TAB> phase <TAB> seconds <TAB> note
 
@@ -105,6 +106,10 @@ virtual_mic() {
     sleep 1
   done
   SwitchAudioSource -t input -s "$MIC_A"
+  # A real default output, so screenpipe's system-audio capture has something to tap (with
+  # none, its device check times out and /health reports degraded).
+  SwitchAudioSource -t output -s "$MIC_B"
+  echo "default output: $(SwitchAudioSource -c -t output)"
   echo "inputs:"; SwitchAudioSource -a -t input | sed 's/^/  /'
   echo "default input: $(SwitchAudioSource -c -t input)"
   [ "$(SwitchAudioSource -c -t input)" = "$MIC_A" ]
@@ -171,11 +176,12 @@ screenpipe() {
   local mic; mic="$("$bin" audio list 2>/dev/null | grep -o "${MIC_A} (input)" | head -1)"
   [ -n "$mic" ] || mic="${MIC_A} (input)"
   # The owner's settings: realtime transcription, 5 s chunks, whisper-tiny-quantized,
-  # system audio through Core Audio, no PII removal (config/screenpipe-settings.json).
+  # system audio through Core Audio, no PII removal, no API auth (the app's apiAuth: false;
+  # the engine's own default is on, and every query the app makes then gets 403).
   SCREENPIPE_NO_REMINDERS=1 SCREENPIPE_NO_UPDATE_CHECK=1 nohup "$bin" record --port 3030 \
     -a whisper-tiny-quantized -d 5 --transcription-mode realtime \
     -i "$mic" -i "System Audio (output)" --experimental-coreaudio-system-audio \
-    --use-pii-removal false --disable-telemetry > "$OUT/screenpipe.log" 2>&1 &
+    --use-pii-removal false --disable-telemetry --api-auth false > "$OUT/screenpipe.log" 2>&1 &
   echo $! > "$OUT/screenpipe.pid"
   local until=$((SECONDS + 240))
   until curl -sf -m 3 http://localhost:3030/health >/dev/null; do
@@ -213,8 +219,19 @@ server() {
     echo "LEARNER_PAIRING_E2E=1"
     echo "LEARNER_MASTERY_E2E=1"
   } > "$OUT/server.env"
-  set -a; . "$OUT/server.env"; set +a
-  ( cd "$dir" && bun install --frozen-lockfile && bun packages/server/src/db/migrate.ts --test && bun run build:web ) 2>&1 | tail -15
+  # Throwaway secrets the server needs (on ovh they come from /etc/learner/learner.env): made
+  # here, kept out of ci-out (its logs are a public artifact), gone with the runner.
+  umask 077
+  {
+    echo "LEARNER_AUTH_SECRET=$(openssl rand -hex 32)"
+    echo "LEARNER_BASE_URL=http://127.0.0.1:3019"
+  } > "$HOME/.learner-ci-secrets.env"
+  umask 022
+  set -a; . "$OUT/server.env"; . "$HOME/.learner-ci-secrets.env"; set +a
+  # Each server start runs pikku's code generation first: done once here, so a start in the
+  # heavy lane fits the harness's 180 s wait on 3 busy cores.
+  ( cd "$dir" && bun install --frozen-lockfile && bun packages/server/src/db/migrate.ts --test && bun run build:web \
+      && bun run prepare:runtime ) 2>&1 | tail -15
   [ -f "$dir/apps/web/dist/index.html" ] || { echo "learner-server's web build is missing"; return 1; }
   echo "ready: Postgres 17 (learner_test migrated), web built; the heavy lane runs the pairing harness locally"
 }
@@ -297,6 +314,7 @@ mic_e2e() {
 # The server phase's exports, read again here: in `ci.sh all` it ran in a subshell.
 lane() {
   if [ -f "$OUT/server.env" ]; then set -a; . "$OUT/server.env"; set +a; fi
+  if [ -f "$HOME/.learner-ci-secrets.env" ]; then set -a; . "$HOME/.learner-ci-secrets.env"; set +a; fi
   scripts/test.sh "$1"
 }
 

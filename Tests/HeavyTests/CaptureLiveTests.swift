@@ -87,7 +87,8 @@ struct CaptureLiveTests {
         #expect(off.isEmpty, "rows whose stamp is neither the chunk start nor chunk start + start_time: \(off.prefix(3))")
     }
 
-    @Test(.enabled(if: FileManager.default.fileExists(atPath: NSHomeDirectory() + "/.screenpipe/store.bin"), "no ~/.screenpipe/store.bin"))
+    @Test(.enabled(if: !Live.ci, "runner: the store.bin there is the engine's, not the screenpipe app's settings"),
+          .enabled(if: FileManager.default.fileExists(atPath: NSHomeDirectory() + "/.screenpipe/store.bin"), "no ~/.screenpipe/store.bin"))
     func liveSettingsMatchTheCommittedCapture() throws {
         let live = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: NSHomeDirectory() + "/.screenpipe/store.bin"))) as? [String: Any])["settings"] as? [String: Any] ?? [:]
         let expected = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: toolsRepoRoot() + "/config/screenpipe-settings.json"))) as? [String: Any])["settings"] as? [String: Any] ?? [:]
