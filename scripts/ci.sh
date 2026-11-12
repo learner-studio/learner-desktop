@@ -13,6 +13,8 @@
 #   mic-e2e        speech played into the virtual mic is heard by the installed app; the
 #                  default input is switched and the app follows it and hears again
 #   light/medium/heavy   scripts/test.sh, with LEARNER_TEST_ENV=runner (owner-only suites skip, by name)
+#   prod-device    a throwaway test device on the owner's REAL learner-server, with a seeded gain
+#   prod-revoke    that device and everything it wrote, removed (always runs)
 #   updater        scripts/install-updater.sh: the automatic updater's LaunchAgent loads
 #   uninstall      scripts/uninstall-app.sh with PURGE_DATA=1: nothing may be left behind,
 #                  the updater included
@@ -388,8 +390,57 @@ lane() {
   fi
   if [ -f "$OUT/server.env" ]; then set -a; . "$OUT/server.env"; set +a; fi
   export LEARNER_SERVER_SECRETS="$HOME/.learner-ci-secrets.env"
+  export LEARNER_PROD_DEVICE_FILE="$PROD_DEVICE"
   if [ "$1" != light ]; then ensure_say || return 1; fi
   scripts/test.sh "$1"
+}
+
+# The owner's REAL learner-server, through one throwaway test device per run. The CI
+# minter's key (secret LEARNER_CI_MINT_KEY, scope ci-mint: create, seed and revoke test
+# devices only) is given to these two steps alone. The device's pairing code stays in a
+# mode-600 file outside ci-out (its logs are public); the device sees only its own seeded
+# data and dies at its TTL even if prod-revoke never ran.
+PROD_API="https://dev.biztoolz.app/learner-api"
+PROD_DEVICE="$HOME/.learner-prod-device.json"
+
+# rpc NAME JSON: one RPC with the minter's key; prints the reply's `data`, exit 1 on non-200.
+prod_rpc() {
+  local reply status
+  reply="$(curl -s -m 30 -w '\n%{http_code}' -X POST "$PROD_API/rpc/$1" -H 'content-type: application/json' \
+    -H "x-api-key: $LEARNER_CI_MINT_KEY" -d "{\"data\":$2}")"
+  status="${reply##*$'\n'}"
+  reply="${reply%$'\n'*}"
+  if [ "$status" != 200 ]; then echo "$1: HTTP $status $(head -c 300 <<< "$reply")" >&2; return 1; fi
+  python3 -c 'import json,sys; o=json.load(sys.stdin); print(json.dumps(o.get("data", o)))' <<< "$reply"
+}
+
+prod_device() {
+  rm -f "$PROD_DEVICE"
+  if [ -z "${LEARNER_CI_MINT_KEY:-}" ]; then
+    echo "::warning title=production server::no LEARNER_CI_MINT_KEY (a fork, or not set): the production-server suite skips"
+    return 0
+  fi
+  local run="gh-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}" device seeded
+  device="$(prod_rpc createTestDevice "{\"runId\":\"$run\",\"ttlMinutes\":120}")" || return 1
+  seeded="$(prod_rpc seedMasteryGain "{\"clientId\":$(python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["clientId"]))' <<< "$device")}")" || {
+    echo "seeding failed; revoking the device"; prod_revoke; return 1; }
+  umask 077
+  python3 -c 'import json,sys; d=json.loads(sys.argv[1]); g=json.loads(sys.argv[2]); json.dump({"clientId": d["clientId"], "pairingCode": d["pairingCode"], "expiresAt": d["expiresAt"], "runId": g["runId"], "conceptId": g["conceptId"]}, open(sys.argv[3], "w"))' \
+    "$device" "$seeded" "$PROD_DEVICE"
+  umask 022
+  # Ids only (no key, no code).
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("test device %s on %s (expires %s); seeded gain run %s, concept %s" % (d["clientId"], sys.argv[2], d["expiresAt"], d["runId"], d["conceptId"]))' "$PROD_DEVICE" "$PROD_API"
+}
+
+prod_revoke() {
+  [ -f "$PROD_DEVICE" ] || { echo "no production test device to revoke"; return 0; }
+  [ -n "${LEARNER_CI_MINT_KEY:-}" ] || { echo "no LEARNER_CI_MINT_KEY to revoke with; the device expires at its TTL"; return 1; }
+  local id out
+  id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["clientId"])' "$PROD_DEVICE")"
+  out="$(prod_rpc revokeTestDevice "{\"clientId\":\"$id\"}")" || return 1
+  rm -f "$PROD_DEVICE"
+  echo "revoked $id: $out"
+  python3 -c 'import json,sys; sys.exit(0 if json.loads(sys.argv[1]).get("revoked") else 1)' "$out"
 }
 
 # The automatic updater installs and loads (on the runner it finds no GitHub token and
@@ -410,7 +461,7 @@ report() {
   [ -f "$RESULTS" ] || failed=1
   # A phase that never reported (its step skipped or killed) is a failure, not a gap.
   local p missing=""
-  for p in fetch virtual-mic grant fixtures screenpipe server speech install mic-e2e light medium heavy updater uninstall; do
+  for p in fetch virtual-mic grant fixtures screenpipe server speech install mic-e2e light medium prod-device heavy prod-revoke updater uninstall; do
     grep -q "	$p	" "$RESULTS" 2>/dev/null || { missing="$missing $p"; failed=1; }
   done
   # Swift Testing names every skip and cancellation: `➜ Test x() skipped: "why"`.
@@ -464,14 +515,16 @@ run() {
     install) phase install install ;;
     mic-e2e) phase mic-e2e mic_e2e ;;
     light|medium|heavy) phase "$1" lane "$1" ;;
+    prod-device) phase prod-device prod_device ;;
+    prod-revoke) phase prod-revoke prod_revoke ;;
     updater) phase updater updater ;;
     uninstall) keep_app_log; phase uninstall uninstall ;;
     report) report ;;
     all)
       rm -f "$RESULTS"
-      for p in fetch virtual-mic grant fixtures screenpipe server speech install mic-e2e light medium heavy updater uninstall; do run "$p" || true; done
+      for p in fetch virtual-mic grant fixtures screenpipe server speech install mic-e2e light medium prod-device heavy prod-revoke updater uninstall; do run "$p" || true; done
       report ;;
-    *) echo "usage: scripts/ci.sh fetch|virtual-mic|grant|fixtures|screenpipe|server|speech|install|mic-e2e|light|medium|heavy|updater|uninstall|report|all" >&2; return 2 ;;
+    *) echo "usage: scripts/ci.sh fetch|virtual-mic|grant|fixtures|screenpipe|server|speech|prod-device|prod-revoke|install|mic-e2e|light|medium|heavy|updater|uninstall|report|all" >&2; return 2 ;;
   esac
 }
 
