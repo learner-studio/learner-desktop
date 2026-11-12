@@ -3,6 +3,8 @@ set -euo pipefail
 
 # BUNDLE_ONLY=1 builds and signs the bundle into OUT_DIR (default menu-bar-app/) and
 # stops there: no install, no launchctl. The heavy test lane uses it.
+# LEARNER_APP_BUNDLE=<path to .app> skips the build: that bundle (the one CI tested, from
+# scripts/install-latest.sh) is re-signed with this Mac's identity and installed.
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="Learner Desktop.app"
 OUT_DIR="${OUT_DIR:-${PROJECT_DIR}/menu-bar-app}"
@@ -12,11 +14,18 @@ TARGET_APP="${HOME}/Applications/${APP_NAME}"
 # Voice ID's speaker model, and (to compile) sherpa-onnx's static libraries: both come from
 # scripts/fetch-voice-id.sh, not git. Checked first, so a missing one fails before the build.
 VOICE_MODEL="${PROJECT_DIR}/menu-bar-app/Models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx"
-if [ ! -f "${VOICE_MODEL}" ] || { [ -z "${LEARNER_BINARY:-}" ] && [ ! -d "${PROJECT_DIR}/third_party/sherpa-onnx/artifacts/sherpa-onnx.xcframework" ]; }; then
+if [ -z "${LEARNER_APP_BUNDLE:-}" ] && { [ ! -f "${VOICE_MODEL}" ] || { [ -z "${LEARNER_BINARY:-}" ] && [ ! -d "${PROJECT_DIR}/third_party/sherpa-onnx/artifacts/sherpa-onnx.xcframework" ]; }; }; then
   echo "Voice ID's model or sherpa-onnx is missing: run scripts/fetch-voice-id.sh first" >&2
   exit 1
 fi
 
+if [ -n "${LEARNER_APP_BUNDLE:-}" ]; then
+  [ -x "${LEARNER_APP_BUNDLE}/Contents/MacOS/learner-desktop" ] || { echo "LEARNER_APP_BUNDLE is not a Learner Desktop bundle: ${LEARNER_APP_BUNDLE}" >&2; exit 1; }
+  echo "Using the prebuilt bundle ${LEARNER_APP_BUNDLE} (not compiling)..."
+  rm -rf "${BUNDLE_DIR}"
+  mkdir -p "$(dirname "${BUNDLE_DIR}")"
+  ditto "${LEARNER_APP_BUNDLE}" "${BUNDLE_DIR}"
+else
 # LEARNER_BINARY: package an already-built binary instead of compiling (the heavy test
 # lane uses the debug build, so checking the bundle takes seconds, not a release build).
 if [ -n "${LEARNER_BINARY:-}" ]; then
@@ -80,6 +89,7 @@ cat << 'EOF' > "${BUNDLE_DIR}/Contents/Info.plist"
 </dict>
 </plist>
 EOF
+fi
 
 # Sign with a real Apple-issued identity so the app keeps the same identity across
 # rebuilds. Ad-hoc signing (-) changes the code hash every build, and macOS TCC keys

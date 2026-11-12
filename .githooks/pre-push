@@ -1,7 +1,23 @@
 #!/usr/bin/env bash
-# Pushing to main is this repo's merge: the medium and heavy lanes first. The heavy lane
-# also checks the deployed GrowthBook design (read-only, over ssh ovh).
+# Before a push: the secret scan over every commit being pushed. No tests: CI runs them on
+# the pull request, and main only takes a pull request whose CI passed.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-scripts/test.sh medium
-LEARNER_REMOTE_E2E=1 scripts/test.sh heavy
+
+command -v gitleaks >/dev/null || { echo "pre-push: gitleaks is not installed (brew install gitleaks)" >&2; exit 1; }
+zero=0000000000000000000000000000000000000000
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue   # a deleted branch
+  if [ "$remote_sha" = "$zero" ]; then
+    range="origin/main..$local_sha"        # a new branch: what main does not have yet
+  else
+    range="$remote_sha..$local_sha"
+  fi
+  [ -n "$(git rev-list "$range" 2>/dev/null | head -1)" ] || continue
+  if ! gitleaks git . --log-opts="$range" --redact --no-banner >/dev/null 2>&1; then
+    echo "pre-push: gitleaks found a possible secret in $range ($remote_ref):" >&2
+    gitleaks git . --log-opts="$range" --redact --no-banner >&2 || true
+    exit 1
+  fi
+  echo "pre-push: $(git rev-list --count "$range") commit(s) to $remote_ref scanned, no secrets; CI tests the pull request"
+done

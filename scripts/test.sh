@@ -41,6 +41,11 @@ run_lane() {
   local target
   target="$(tr '[:lower:]' '[:upper:]' <<< "${lane:0:1}")${lane:1}Tests"
   printf '\n\033[1m==> %s lane (%s)\033[0m\n' "$lane" "$target"
+  if [ "${LEARNER_TEST_ENV:-}" = runner ]; then
+    echo "TEST ENVIRONMENT: runner (GitHub, clean Mac; fixtures and snapshots, no owner accounts)"
+  else
+    echo "TEST ENVIRONMENT: mac (the owner's Mac; live screenpipe, ai-vault and logins)"
+  fi
   # Voice ID links sherpa-onnx from local binaries git does not hold.
   if [ ! -d third_party/sherpa-onnx/artifacts/sherpa-onnx.xcframework ]; then
     echo "sherpa-onnx is not fetched: run scripts/fetch-voice-id.sh once (it also fetches Voice ID's model)"; return 1
@@ -86,7 +91,7 @@ run_lane() {
   took=$((end - start))
   read -r _ max <<< "$(budget "$lane")"
   # A shared CI runner (3 slow cores) is not this Mac: its time says nothing about a test.
-  if [ "${LEARNER_CI:-0}" = 1 ] && [ "$max" -gt 0 ]; then
+  if [ "${LEARNER_TEST_ENV:-}" = runner ] && [ "$max" -gt 0 ]; then
     echo "($lane lane: ${took}s; the ${max}s budget is not enforced on a CI runner)"
     max=0
   fi

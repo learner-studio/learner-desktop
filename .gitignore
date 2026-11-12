@@ -33,3 +33,4 @@ UITests/*.xcodeproj/
 third_party/sherpa-onnx/artifacts/
 menu-bar-app/Models/*.onnx
 ci-out/
+ci-app/
