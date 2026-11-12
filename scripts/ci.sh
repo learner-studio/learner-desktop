@@ -406,8 +406,9 @@ PROD_DEVICE="$HOME/.learner-prod-device.json"
 # rpc NAME JSON: one RPC with the minter's key; prints the reply's `data`, exit 1 on non-200.
 prod_rpc() {
   local reply status
-  reply="$(curl -s -m 30 -w '\n%{http_code}' -X POST "$PROD_API/rpc/$1" -H 'content-type: application/json' \
-    -H "x-api-key: $LEARNER_CI_MINT_KEY" -d "{\"data\":$2}")"
+  # The key reaches curl on stdin (-H @-), never in its arguments.
+  reply="$(printf 'x-api-key: %s\n' "$LEARNER_CI_MINT_KEY" | curl -s -m 30 -w '\n%{http_code}' -X POST "$PROD_API/rpc/$1" \
+    -H 'content-type: application/json' -H @- -d "{\"data\":$2}")"
   status="${reply##*$'\n'}"
   reply="${reply%$'\n'*}"
   if [ "$status" != 200 ]; then echo "$1: HTTP $status $(head -c 300 <<< "$reply")" >&2; return 1; fi
@@ -417,17 +418,24 @@ prod_rpc() {
 prod_device() {
   rm -f "$PROD_DEVICE"
   if [ -z "${LEARNER_CI_MINT_KEY:-}" ]; then
-    echo "::warning title=production server::no LEARNER_CI_MINT_KEY (a fork, or not set): the production-server suite skips"
-    return 0
+    # Only a fork's pull request may go without it (GitHub gives forks no secrets).
+    if [ "${LEARNER_FORK_PR:-false}" = true ]; then
+      echo "::warning title=production server::a fork's pull request gets no LEARNER_CI_MINT_KEY: the production-server suite skips"
+      return 0
+    fi
+    echo "LEARNER_CI_MINT_KEY is not set for this repository's own run: the production-server suite cannot run"
+    return 1
   fi
   local run="gh-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}" device seeded
   device="$(prod_rpc createTestDevice "{\"runId\":\"$run\",\"ttlMinutes\":120}")" || return 1
-  seeded="$(prod_rpc seedMasteryGain "{\"clientId\":$(python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["clientId"]))' <<< "$device")}")" || {
-    echo "seeding failed; revoking the device"; prod_revoke; return 1; }
+  # Written at once (mode 600, outside ci-out), so prod-revoke finds the device whatever
+  # fails next. The reply goes to python on stdin, never in its arguments.
   umask 077
-  python3 -c 'import json,sys; d=json.loads(sys.argv[1]); g=json.loads(sys.argv[2]); json.dump({"clientId": d["clientId"], "pairingCode": d["pairingCode"], "expiresAt": d["expiresAt"], "runId": g["runId"], "conceptId": g["conceptId"]}, open(sys.argv[3], "w"))' \
-    "$device" "$seeded" "$PROD_DEVICE"
+  python3 -c 'import json,sys; d=json.load(sys.stdin); json.dump({k: d[k] for k in ("clientId", "pairingCode", "expiresAt")}, open(sys.argv[1], "w"))' "$PROD_DEVICE" <<< "$device"
   umask 022
+  seeded="$(prod_rpc seedMasteryGain "{\"clientId\":$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["clientId"]))' "$PROD_DEVICE")}")" || {
+    echo "seeding failed; revoking the device"; prod_revoke; return 1; }
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); g=json.load(sys.stdin); d.update({k: g[k] for k in ("runId", "conceptId", "completedAt")}); json.dump(d, open(p, "w"))' "$PROD_DEVICE" <<< "$seeded"
   # Ids only (no key, no code).
   python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("test device %s on %s (expires %s); seeded gain run %s, concept %s" % (d["clientId"], sys.argv[2], d["expiresAt"], d["runId"], d["conceptId"]))' "$PROD_DEVICE" "$PROD_API"
 }
@@ -464,6 +472,10 @@ report() {
   for p in fetch virtual-mic grant fixtures screenpipe server speech install mic-e2e light medium prod-device heavy prod-revoke updater uninstall; do
     grep -q "	$p	" "$RESULTS" 2>/dev/null || { missing="$missing $p"; failed=1; }
   done
+  # A production device was made but its suite did not run: not a pass.
+  if grep -q "^test device ci-" "$OUT/prod-device.log" 2>/dev/null && grep -qE 'Suite "Production learner-server.*" skipped' "$OUT/heavy.log" 2>/dev/null; then
+    failed=1; missing="$missing production-suite-skipped"
+  fi
   # Swift Testing names every skip and cancellation: `➜ Test x() skipped: "why"`.
   skips="$(cat "$OUT"/light.log "$OUT"/medium.log "$OUT"/heavy.log 2>/dev/null \
     | grep -E '^➜ (Test|Suite) .* (skipped|was cancelled)' | sed -E 's/^➜ //' | sort -u)"

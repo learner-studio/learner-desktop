@@ -110,6 +110,7 @@ jobs:
         if: ${{ !cancelled() }}
         env:
           LEARNER_CI_MINT_KEY: ${{ secrets.LEARNER_CI_MINT_KEY }}
+          LEARNER_FORK_PR: ${{ github.event.pull_request.head.repo.fork == true }}
         run: scripts/ci.sh prod-device
       - name: heavy lane
         if: ${{ !cancelled() }}

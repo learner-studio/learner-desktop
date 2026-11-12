@@ -26,10 +26,12 @@ enum Pairing {
             ?? NSHomeDirectory() + "/Library/Application Support/Learner/desktop-pairing.json"
     }
 
-    struct Payload: Equatable {
+    struct Payload: Equatable, CustomStringConvertible {
         let apiUrl: String
         let clientId: String
         let apiKey: String
+        /// Never the key: payloads end up in logs and in test failure output.
+        var description: String { "Payload(apiUrl: \(apiUrl), clientId: \(clientId), apiKey: <\(apiKey.count) characters>)" }
     }
 
     /// The contract's DesktopClientId.

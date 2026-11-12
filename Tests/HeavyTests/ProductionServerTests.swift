@@ -11,17 +11,26 @@ import TestSupport
 // failed #expect prints its operands, and these logs are public.
 //
 // GitHub runner only, and only when prod-device made a device (no secret on forks).
-private struct ProdDevice {
-    let code: String, clientId: String, runId: String, conceptId: String
+private struct ProdDevice: CustomStringConvertible {
+    let code: String, clientId: String, runId: String, conceptId: String, completedAt: Date
+    /// Never the code (it carries the device key): a failed #expect prints its operands.
+    var description: String { "ProdDevice(\(clientId), run \(runId))" }
 
     static let loaded: ProdDevice? = {
         guard TestEnvironment.isRunner, Live.env["GITHUB_ACTIONS"] == "true",
               let path = Live.env["LEARNER_PROD_DEVICE_FILE"], let data = FileManager.default.contents(atPath: path),
               let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let code = o["pairingCode"] as? String, let id = o["clientId"] as? String,
-              let run = o["runId"] as? String, let concept = o["conceptId"] as? String else { return nil }
-        return ProdDevice(code: code, clientId: id, runId: run, conceptId: concept)
+              let run = o["runId"] as? String, let concept = o["conceptId"] as? String,
+              let completed = (o["completedAt"] as? String).flatMap(ProdDevice.parseDate) else { return nil }
+        return ProdDevice(code: code, clientId: id, runId: run, conceptId: concept, completedAt: completed)
     }()
+
+    static func parseDate(_ s: String) -> Date? {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f.date(from: s) ?? ISO8601DateFormatter().date(from: s)
+    }
 }
 
 @Suite("Production learner-server (a throwaway test device)", .tags(.heavy, .outbox), .quietLog, .serialized,
@@ -38,7 +47,8 @@ struct ProductionServerTests {
         let result = Pairing.importCode(device.code, defaults: defaults, transport: URLSessionTransport(),
                                         store: { _, k in key.value = k; return .success(()) })
         guard case .success(let p) = result else { throw ToolError("the pairing code did not import: \(result)") }
-        #expect(p.clientId == device.clientId)
+        let (pairedId, deviceId) = (p.clientId, device.clientId)
+        #expect(pairedId == deviceId)
         let pinned = try #require(Pairing.pinned(defaults))
         let dir = TempDir("prod-device")
         let rpc = LearnerRPC(baseURL: pinned.apiUrl, clientId: pinned.clientId, key: { _ in key.value })
@@ -46,7 +56,8 @@ struct ProductionServerTests {
     }
 
     @Test func theDevicePairsHeartbeatsAndIsConfinedToItself() throws {
-        let (rpc, _, link, _) = try paired()
+        let (rpc, _, link, dir) = try paired()
+        _ = dir   // keeps the scratch folder (endpoints.json) for the whole test
         let first = link.refresh(rpc: rpc)
         try #require(first.kind == .ok, "getPairingEndpoints: \(first.describe) \(first.message ?? "")")
         let e = try #require(link.held)
@@ -62,15 +73,20 @@ struct ProductionServerTests {
         link.refresh(rpc: rpc)
         #expect(link.held?.pairingState == "ok", "pairing state \(link.held?.pairingState ?? "?")")
 
-        // Confined: another device's endpoints, and a call outside a test device's allowance.
+        // Confined: another device's endpoints, and a (read-only) RPC outside a test device's
+        // allowance. (getBaselineStatus is inside it: the feed calls it.)
         #expect(rpc.call("getPairingEndpoints", ["clientId": "not-this-device"]).status == 403)
-        let outside = rpc.call("getBaselineStatus", [:])
-        #expect(outside.status == 403, "a test device's key reached getBaselineStatus: HTTP \(outside.status)")
+        let outside = rpc.call("getMasteryProgress", [:])
+        #expect(outside.status == 403, "a test device's key reached getMasteryProgress: HTTP \(outside.status)")
     }
 
     @Test func theSeededGainIsAnnouncedAndItsFeedbackRecordedOnce() throws {
         let device = try #require(ProdDevice.loaded)
         let (rpc, defaults, _, dir) = try paired()
+        // As if installed just before the gain was seeded: however long the lanes before this
+        // took, the feed's first look reaches it (it keeps gains completed after install).
+        defaults.set(device.completedAt.addingTimeInterval(-60), forKey: MasteryFeed.Key.installedAt)
+        defaults.set(device.completedAt.addingTimeInterval(-60), forKey: MasteryFeed.Key.since)
         let feed = MasteryFeed(rpc: rpc, defaults: defaults, jobName: "prod-device-\(UUID().uuidString.prefix(8))",
                                stateDir: dir.file("jobs"), sendFeedbackAtOnce: false)
         let outcome = feed.runOnce()
