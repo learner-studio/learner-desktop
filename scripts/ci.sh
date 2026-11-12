@@ -5,6 +5,7 @@
 #   fetch          Voice ID's model and sherpa-onnx (scripts/fetch-voice-id.sh)
 #   virtual-mic    two BlackHole loopback devices; "BlackHole 2ch" becomes the default input
 #   grant          microphone + speech-recognition grants for the app's bundle id (TCC.db)
+#   fixtures       the synthetic sample (Tests/Fixtures/sample) as ~/ai-vault-data + its ledger
 #   speech         Siri and Dictation on, which Apple's speech recognizer needs
 #   install        release build, installed and started by scripts/build-app.sh
 #   mic-e2e        speech played into the virtual mic is heard by the installed app; the
@@ -115,6 +116,20 @@ grant() {
   echo "granted in the user TCC.db:"
   sqlite3 "$db" "SELECT service, client, auth_value FROM access WHERE client='$BUNDLE_ID';" | sed 's/^/  /'
   [ "$(sqlite3 "$db" "SELECT count(*) FROM access WHERE client='$BUNDLE_ID' AND auth_value=2;")" = 2 ]
+}
+
+# The synthetic sample (Tests/Fixtures/sample) where the owner's real data lives, so the
+# heavy lane's export and ledger suites run on the runner as they do on the owner's Mac.
+fixtures() {
+  set -e
+  local sample="$PWD/Tests/Fixtures/sample"
+  rm -rf "$HOME/ai-vault-data"
+  cp -R "$sample/ai-vault-data" "$HOME/ai-vault-data"
+  mkdir -p "$HOME/.ai-aggregator"
+  rm -f "$HOME/.ai-aggregator/sync-ledger.sqlite"
+  sed "s#@HOME@#$HOME#g" "$sample/sync-ledger.sql" | sqlite3 "$HOME/.ai-aggregator/sync-ledger.sqlite"
+  echo "installed $(find "$HOME/ai-vault-data" -name conversation.md | wc -l | tr -d ' ') synthetic conversations into ~/ai-vault-data"
+  echo "ledger: $(sqlite3 "$HOME/.ai-aggregator/sync-ledger.sqlite" "select sync_status || ' ' || count(*) from archive_ledger group by sync_status;" | paste -sd, -)"
 }
 
 speech() {
@@ -247,6 +262,7 @@ run() {
     fetch) phase fetch fetch ;;
     virtual-mic) phase virtual-mic virtual_mic ;;
     grant) phase grant grant ;;
+    fixtures) phase fixtures fixtures ;;
     speech) phase speech speech ;;
     install) phase install install ;;
     mic-e2e) phase mic-e2e mic_e2e ;;
@@ -256,9 +272,9 @@ run() {
     report) report ;;
     all)
       rm -f "$RESULTS"
-      for p in fetch virtual-mic grant speech install mic-e2e light medium heavy updater uninstall; do run "$p" || true; done
+      for p in fetch virtual-mic grant fixtures speech install mic-e2e light medium heavy updater uninstall; do run "$p" || true; done
       report ;;
-    *) echo "usage: scripts/ci.sh fetch|virtual-mic|grant|speech|install|mic-e2e|light|medium|heavy|updater|uninstall|report|all" >&2; return 2 ;;
+    *) echo "usage: scripts/ci.sh fetch|virtual-mic|grant|fixtures|speech|install|mic-e2e|light|medium|heavy|updater|uninstall|report|all" >&2; return 2 ;;
   esac
 }
 

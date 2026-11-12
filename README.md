@@ -237,6 +237,25 @@ skipped test, with its reason, to the run's summary page. The logs, including th
 also keeps the exact bundle it tested as `learner-desktop-app` for 30 days; that is what
 `scripts/install-latest.sh` installs. `scripts/ci.sh` refuses to run without `CI=true`.
 
+**Synthetic sample.** On the runner, the heavy lane reads `Tests/Fixtures/sample` where the
+owner's Mac has its real data:
+
+- the sample is installed as `~/ai-vault-data`;
+- `sync-ledger.sql` becomes the archive ledger.
+
+`scripts/fixtures/make-sample.py` builds the sample on the owner's Mac from the real
+export's *shapes* only:
+
+- It keeps structure: headers, timestamps, roles, separators, empty and voice-only
+  sections, attachment blocks and the metadata block.
+- Every word of content is generated: fake people, companies and industries.
+- A few conversations per shape the parser handles, about 200 KB in all.
+
+The parser sees each synthetic conversation exactly as it sees its original. After a
+refresh, `LEARNER_WRITE_SAMPLE_LEDGER=1 swift test --filter FixtureLedgerExport` rewrites
+the ledger. `FixtureSampleTests` (light) fails if any word in the sample is missing from
+the generator's `vocabulary.txt`.
+
 Nothing of the owner's goes to CI: no secrets and no logins. Suites that need the owner's
 live machine skip by name on the runner:
 
