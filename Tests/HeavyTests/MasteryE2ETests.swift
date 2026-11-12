@@ -41,7 +41,7 @@ private final class Recording: HTTPTransport, @unchecked Sendable {
 }
 
 @MainActor
-@Suite("Mastery end to end (learner-server harness on ovh)", .tags(.heavy, .mastery), .quietLog, .serialized,
+@Suite("Mastery end to end (learner-server's pairing harness)", .tags(.heavy, .mastery), .quietLog, .serialized,
        .timeLimit(.minutes(3)),
        .enabled(if: Live.heavy && Live.env["LEARNER_MASTERY_E2E"] == "1", "opt-in: set LEARNER_HEAVY=1 LEARNER_MASTERY_E2E=1"))
 struct MasteryE2ETests {

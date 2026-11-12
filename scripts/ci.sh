@@ -7,6 +7,7 @@
 #   grant          microphone + speech-recognition grants for the app's bundle id (TCC.db)
 #   fixtures       the synthetic sample (Tests/Fixtures/sample) as ~/ai-vault-data + its ledger
 #   screenpipe     screenpipe's engine (the pinned version, the owner's audio settings) on :3030
+#   server         learner-server's pairing harness ready to run (Postgres 17, its test database, web build)
 #   speech         Siri and Dictation on, which Apple's speech recognizer needs
 #   install        release build, installed and started by scripts/build-app.sh
 #   mic-e2e        speech played into the virtual mic is heard by the installed app; the
@@ -45,6 +46,9 @@ APP_LOG="$HOME/.ai-aggregator/logs/menubar.log"
 BUNDLE_ID="com.benpollack.ai-aggregator-menubar"
 MIC_A="BlackHole 2ch"
 MIC_B="BlackHole 16ch"
+
+# What the server phase exported for later phases (each workflow step is its own shell).
+if [ -f "$OUT/server.env" ]; then set -a; . "$OUT/server.env"; set +a; fi
 
 RESULTS="$OUT/results.tsv"   # PASS|FAIL <TAB> phase <TAB> seconds <TAB> note
 
@@ -184,6 +188,37 @@ screenpipe() {
   say -a "$MIC_A" "This is the runner checking that screenpipe hears the virtual microphone."
 }
 
+# learner-server's own pairing harness on the runner, for the heavy lane's pairing and
+# mastery end-to-end suites: the checkout at config/learner-server.ref (the workflow checks
+# it out into ./learner-server; learner-server is public), Postgres 17 with its migrated
+# TEST database, and its web build. Exported for the lanes through $OUT/server.env.
+server() {
+  set -e
+  local dir="$PWD/learner-server"
+  [ -d "$dir/scripts" ] || { echo "no learner-server checkout in $dir"; return 1; }
+  echo "learner-server at $(git -C "$dir" rev-parse --short HEAD) (pinned: $(cut -c1-7 config/learner-server.ref))"
+  command -v bun >/dev/null || { echo "bun is not on PATH"; return 1; }
+  HOMEBREW_NO_AUTO_UPDATE=1 brew install postgresql@17 >/dev/null
+  local pg; pg="$(brew --prefix postgresql@17)/bin"
+  rm -rf "$HOME/learner-pg"
+  "$pg/initdb" -D "$HOME/learner-pg" -U learner --auth=trust >/dev/null
+  "$pg/pg_ctl" -D "$HOME/learner-pg" -l "$OUT/postgres.log" -o "-p 5432 -k /tmp" -w start
+  "$pg/createdb" -h 127.0.0.1 -U learner learner_test
+  "$pg/createdb" -h 127.0.0.1 -U learner learner_dev
+  {
+    echo "TEST_DATABASE_URL=postgres://learner@127.0.0.1:5432/learner_test"
+    echo "DATABASE_URL=postgres://learner@127.0.0.1:5432/learner_dev"
+    echo "LEARNER_SERVER_DIR=$dir"
+    echo "LEARNER_BUN=$(command -v bun)"
+    echo "LEARNER_PAIRING_E2E=1"
+    echo "LEARNER_MASTERY_E2E=1"
+  } > "$OUT/server.env"
+  set -a; . "$OUT/server.env"; set +a
+  ( cd "$dir" && bun install --frozen-lockfile && bun packages/server/src/db/migrate.ts --test && bun run build:web ) 2>&1 | tail -15
+  [ -f "$dir/apps/web/dist/index.html" ] || { echo "learner-server's web build is missing"; return 1; }
+  echo "ready: Postgres 17 (learner_test migrated), web built; the heavy lane runs the pairing harness locally"
+}
+
 speech() {
   # Apple's speech recognizer refuses with "Siri and Dictation are disabled" until one of
   # them is on; the owner's Mac has Siri on ("Assistant Enabled"). Both, for the runner.
@@ -259,7 +294,11 @@ mic_e2e() {
   return $ok
 }
 
-lane() { scripts/test.sh "$1"; }
+# The server phase's exports, read again here: in `ci.sh all` it ran in a subshell.
+lane() {
+  if [ -f "$OUT/server.env" ]; then set -a; . "$OUT/server.env"; set +a; fi
+  scripts/test.sh "$1"
+}
 
 # The automatic updater installs and loads (on the runner it finds no GitHub token and
 # waits); uninstall must then remove it with everything else.
@@ -316,6 +355,7 @@ run() {
     grant) phase grant grant ;;
     fixtures) phase fixtures fixtures ;;
     screenpipe) phase screenpipe screenpipe ;;
+    server) phase server server ;;
     speech) phase speech speech ;;
     install) phase install install ;;
     mic-e2e) phase mic-e2e mic_e2e ;;
@@ -325,9 +365,9 @@ run() {
     report) report ;;
     all)
       rm -f "$RESULTS"
-      for p in fetch virtual-mic grant fixtures screenpipe speech install mic-e2e light medium heavy updater uninstall; do run "$p" || true; done
+      for p in fetch virtual-mic grant fixtures screenpipe server speech install mic-e2e light medium heavy updater uninstall; do run "$p" || true; done
       report ;;
-    *) echo "usage: scripts/ci.sh fetch|virtual-mic|grant|fixtures|screenpipe|speech|install|mic-e2e|light|medium|heavy|updater|uninstall|report|all" >&2; return 2 ;;
+    *) echo "usage: scripts/ci.sh fetch|virtual-mic|grant|fixtures|screenpipe|server|speech|install|mic-e2e|light|medium|heavy|updater|uninstall|report|all" >&2; return 2 ;;
   esac
 }
 
