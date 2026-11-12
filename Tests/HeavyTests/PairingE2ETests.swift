@@ -4,7 +4,7 @@ import Testing
 import TestSupport
 
 // Pairing end to end against a real learner-server: learner-server's own harness
-// (scripts/pairing-server.ts, on ovh, its TEST database and a throwaway gate-* device that
+// (scripts/pairing-server.ts, on ovh, its TEST database and a throwaway device (gate-* or ci-*) that
 // its teardown revokes), reached through one `ssh -L 3019:127.0.0.1:3019 ovh` session.
 // The app's real code does everything: the pairing import (health check first), the
 // endpoints, and a heartbeat carrying the pairing report, after which the server must call
@@ -21,7 +21,7 @@ struct PairingE2ETests {
     static let remoteHost = "learner-pairing.test"
 
     /// learner-server's own pairing harness (scripts/pairing-server.ts: its TEST database, a
-    /// throwaway `gate-` device it revokes at teardown), stopped through that teardown
+    /// throwaway device (`gate-` or `ci-`) it revokes at teardown), stopped through that teardown
     /// (SIGTERM). Two places it runs:
     ///   local  LEARNER_SERVER_DIR names a learner-server checkout on this machine (the
     ///          GitHub runner: scripts/ci.sh's server phase installs Postgres, bun and the
