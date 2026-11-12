@@ -31,6 +31,17 @@ final class VoiceTranscripts: Sendable {
         case rateLimited = "rate-limited"
         case loginExpired = "login-expired"
         case unreachable
+
+        /// Why a conversation read stops the run, or nil when its status is the conversation's
+        /// own answer (200, 404) or a plain failure. Shared with the heavy lane's live check,
+        /// which skips (never passes) on an expired login.
+        static func forRead(_ status: Int) -> Stop? {
+            switch status {
+            case 401, 403: return .loginExpired
+            case 429: return .rateLimited
+            default: return nil
+            }
+        }
     }
 
     struct Summary: Equatable {
@@ -244,8 +255,11 @@ final class VoiceTranscripts: Sendable {
             if cancelled() { break }
             log.noisy("\(i + 1)/\(candidates.count) \(c.id)")
             let r = fetchConversation(c.id, cookie: cookie, token: token)
-            if r.status == 429 { summary.stopped = .rateLimited; break }
-            if r.status == 401 || r.status == 403 { summary.stopped = .loginExpired; summary.detail = "HTTP \(r.status)"; break }
+            if let stop = Stop.forRead(r.status) {
+                summary.stopped = stop
+                if stop == .loginExpired { summary.detail = "HTTP \(r.status)" }
+                break
+            }
             if r.status == 404 {
                 // Deleted on ChatGPT: there is nothing to fetch until the export changes.
                 memo[c.id] = c.hash

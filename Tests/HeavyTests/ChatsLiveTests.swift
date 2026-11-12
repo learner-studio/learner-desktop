@@ -75,9 +75,9 @@ struct ChatGPTLiveTests {
         let cookie = try #require(voice.savedCookieHeader())
         let session = voice.openSession(cookie: cookie)
         guard let token = session.token else {
-            // An expired login is the user's to renew (menu: Sign In Again), and a rate limit
-            // passes: both are reported as known issues (not a pass, not a failure).
-            #expect(session.stop == .loginExpired || session.stop == .rateLimited, "unexpected: \(session.detail ?? "")")
+            if session.stop == .loginExpired { try skipLoginExpired(session.detail ?? "no session") }
+            // A rate limit passes as a known issue (not a pass, not a failure); anything else fails.
+            #expect(session.stop == .rateLimited, "unexpected: \(session.detail ?? "")")
             withKnownIssue("ChatGPT session not available; the conversation read was not checked") {
                 Issue.record("\(session.stop?.rawValue ?? "?"): \(session.detail ?? "")")
             }
@@ -86,15 +86,29 @@ struct ChatGPTLiveTests {
         let id = try #require(ConversationParser.findConversationFiles(vaultRoot, provider: "chatgpt").last
             .map { (($0 as NSString).deletingLastPathComponent as NSString).lastPathComponent })
         let r = voice.fetchConversation(id, cookie: cookie, token: token)
-        if r.status == 429 {
+        // The same reading the app's own run makes: a 401/403 here is an expired login
+        // (ChatGPT still hands out a session token for stale cookies).
+        switch VoiceTranscripts.Stop.forRead(r.status) {
+        case .loginExpired?: try skipLoginExpired("conversation read HTTP \(r.status)")
+        case .rateLimited?:
             withKnownIssue("ChatGPT rate limit; the conversation read was not checked") {
                 Issue.record("HTTP 429 from chatgpt.com")
             }
             return
+        default: break
         }
         #expect(r.status == 200 || r.status == 404, "HTTP \(r.status) \(r.error ?? "")")
         if r.status == 200 { #expect(r.body?["mapping"] is [String: Any]) }
     }
+}
+
+/// The owner's expired ChatGPT login must not block a push: this one live check is
+/// reported as SKIPPED, by name, and counted as skipped (never passed). Every other check
+/// still runs. A signed-in session that fails the read still fails.
+private func skipLoginExpired(_ detail: String) throws -> Never {
+    let line = "SKIPPED live check ChatGPTLiveTests.theSavedCookiesOpenASessionAndOneConversationLoads: ChatGPT login expired (\(detail)); renew it from the menu: Sign In Again"
+    FileHandle.standardError.write(Data(("\n*** " + line + " ***\n").utf8))
+    try Test.cancel(Comment(rawValue: line))
 }
 
 @Suite("Live learner-server (health only)", .tags(.heavy, .outbox), .quietLog, .timeLimit(.minutes(2)), .enabled(if: heavy, "heavy lane only (LEARNER_HEAVY=1)"))

@@ -212,3 +212,23 @@ enum VoiceFixture {
         _ = dir
     }
 }
+
+// The heavy lane's live ChatGPT check and the app's run read a conversation's status the
+// same way: only an expired login (401/403) may turn the live check into a skip; a
+// signed-in failure (500, an unreachable host) stays a failure.
+@Suite("ChatGPT read status", .tags(.chats))
+struct ChatGPTReadStatusTests {
+    @Test func a401Or403IsAnExpiredLoginSoTheLiveCheckSkips() {
+        #expect(VoiceTranscripts.Stop.forRead(401) == .loginExpired)
+        #expect(VoiceTranscripts.Stop.forRead(403) == .loginExpired)
+    }
+
+    @Test func a429IsARateLimit() {
+        #expect(VoiceTranscripts.Stop.forRead(429) == .rateLimited)
+    }
+
+    @Test(arguments: [200, 404, 500, 502, 0])
+    func anythingElseIsNotASkip(_ status: Int) {
+        #expect(VoiceTranscripts.Stop.forRead(status) == nil)
+    }
+}

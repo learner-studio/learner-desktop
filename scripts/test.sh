@@ -69,12 +69,24 @@ run_lane() {
   # running dozens at once makes timing tests flaky. Light stays parallel.
   local parallel=()
   [ "$lane" != light ] && parallel=(--no-parallel)
-  swift test --skip-build --filter "$target" ${parallel[@]+"${parallel[@]}"} "$@"
-  status=$?
+  local out
+  out="$(mktemp "${TMPDIR:-/tmp}/learner-${lane}-out.XXXXXX")"
+  swift test --skip-build --filter "$target" ${parallel[@]+"${parallel[@]}"} "$@" 2>&1 | tee "$out"
+  status=${PIPESTATUS[0]}
+  # A live check skipped for an expired login (ChatsLiveTests) is counted and named here:
+  # skipped, never passed. It does not fail the lane; everything else still does.
+  local skipped
+  skipped="$(grep -o '^\*\*\* SKIPPED live check [^:]*' "$out" | sed 's/^\*\*\* SKIPPED live check //' | sort -u)"
+  rm -f "$out"
+  if [ -n "$skipped" ]; then
+    printf '\033[1;33m!!! %s live check(s) SKIPPED, not passed:\033[0m\n' "$(wc -l <<< "$skipped" | tr -d ' ')"
+    sed 's/^/!!!   /' <<< "$skipped"
+  fi
   end=$(date +%s)
   took=$((end - start))
   read -r _ max <<< "$(budget "$lane")"
-  printf '\033[1m<== %s lane: %s in %ss\033[0m\n' "$lane" "$([ $status -eq 0 ] && echo passed || echo FAILED)" "$took"
+  printf '\033[1m<== %s lane: %s%s in %ss\033[0m\n' "$lane" "$([ $status -eq 0 ] && echo passed || echo FAILED)" \
+    "$([ -n "$skipped" ] && echo " ($(wc -l <<< "$skipped" | tr -d ' ') live check skipped)")" "$took"
   if [ "$status" -eq 0 ] && [ "$max" -gt 0 ] && [ "$took" -gt "$max" ]; then
     echo "The $lane lane took ${took}s; its budget is ${max}s. Move slow tests to a heavier lane."
     return 1
