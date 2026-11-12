@@ -196,9 +196,10 @@ screenpipe() {
   echo "health: $(curl -s -m 3 http://localhost:3030/health | head -c 400)"
   # One transcription row, so the live-SQL suites have something to read: spoken once
   # screenpipe records the mic (it starts that a while after /health answers), then seen.
-  local until=$((SECONDS + 240))
+  # It starts the mic after loading its model: 4+ minutes on a busy runner (run 14).
+  local until=$((SECONDS + 420))
   until grep -q "starting continuous recording for ${MIC_A}" "$OUT/screenpipe-engine.log"; do
-    [ $SECONDS -lt $until ] || { echo "screenpipe never started recording $MIC_A"; return 1; }
+    [ $SECONDS -lt $until ] || { echo "::warning title=screenpipe::not recording $MIC_A after 7 min; the capture suites will say what is missing"; return 0; }
     sleep 2
   done
   local rows=0 n
@@ -280,14 +281,15 @@ speech() {
 # plainly if it stays broken.
 ensure_say() {
   local wav="$OUT/say-check.wav" n=0 attempt
-  for attempt in 1 2 3; do
+  # Up to a minute: it has come back by itself within a phase (run 14).
+  for attempt in 1 2 3 4 5 6; do
     rm -f "$wav"
     say -o "$wav" --file-format=WAVE --data-format=LEI16@16000 "The quick brown fox checks the speech synthesizer." 2>&1 | tail -2
     n=$(( ( $(stat -f %z "$wav" 2>/dev/null || echo 0) - 44 ) / 2 ))
     echo "say check, attempt $attempt: $n samples"
     [ "$n" -gt 16000 ] && break
     killall speechsynthesisd SpeechSynthesisServer com.apple.speech.speechsynthesisd 2>/dev/null || true
-    sleep 3
+    sleep 10
   done
   rm -f "$wav"
   [ "$n" -gt 16000 ] || { echo "the runner's speech synthesizer is broken (say makes silence); every check that speaks would fail"; return 1; }
