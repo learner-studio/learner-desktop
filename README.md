@@ -83,13 +83,18 @@ Requires macOS 14+, Xcode (Swift 6), screenpipe, and for chats the `ai-vault` CL
 ```bash
 security add-generic-password -s learner-server -a ben-mbp -w   # store the device key (prompts)
 scripts/fetch-voice-id.sh                                       # sherpa-onnx + Voice ID's model (pinned, SHA-checked; not in git)
-scripts/install-hooks.sh                                        # test lanes on commit and push
-scripts/build-app.sh                                            # build and install Learner Desktop
+scripts/install-hooks.sh                                        # the secret scan on commit and push
+scripts/install-latest.sh                                       # install the build CI tested (main's newest green run)
+scripts/build-app.sh                                            # or: build and install from this checkout
 ```
 
 `build-app.sh` builds with `swift build -c release`, installs `~/Applications/Learner
 Desktop.app` and its LaunchAgent (`com.benpollack.learner-desktop`), then restarts it.
 `BUNDLE_ONLY=1 OUT_DIR=<dir>` builds and signs the bundle without installing it.
+`LEARNER_APP_BUNDLE=<.app>` installs a prebuilt bundle instead of compiling, re-signed with
+this Mac's identity; `scripts/install-latest.sh` uses it for CI's tested build. Changes
+reach `main` only through a pull request whose CI passed: see
+[docs/development-workflow.md](docs/development-workflow.md).
 
 **Voice ID** (`menu-bar-app/VoiceID.swift`, tray 🎙 Voice ID) shows a small pill, "am I
 talking?", from the coach's own microphone frames: while Silero hears speech, a 1.5 s window is
@@ -142,16 +147,22 @@ The installed app answers the same (`".../Learner Desktop.app/Contents/MacOS/lea
 
 ## Tests
 
+All testing runs on a GitHub macOS runner, for every pull request (see "CI on a clean
+Mac" below); nothing runs on the owner's Mac by hook. The lanes still run anywhere by hand.
+Every lane prints its test environment: `runner` (`LEARNER_TEST_ENV=runner`, set by
+`scripts/ci.sh`) or `mac` (the owner's Mac, live data); tests read it as
+`TestEnvironment.current`.
+
 Everything is Swift (Swift Testing, `swift test`). Every workflow — the speaking coach,
 the trial outbox, the chat export → voice transcripts → archive, the helpers, status and
 shutdown, the owner tools — has end-to-end tests in three lanes:
 
 ```bash
-scripts/test.sh light     # fixtures and stand-ins only; under 60 s (pre-commit hook)
+scripts/test.sh light     # fixtures and stand-ins only; under 60 s
 scripts/test.sh medium    # real child processes, the built binary, local HTTP stand-ins; 60-180 s
 scripts/test.sh heavy     # the live machine (screenpipe, ai-vault, learner-server); read-only
 scripts/test.sh all
-scripts/install-hooks.sh  # pre-commit runs light (+ gitleaks); pre-push runs medium + heavy
+scripts/install-hooks.sh  # pre-commit and pre-push: gitleaks only (no tests)
 ```
 
 - **Light** (`Tests/LightTests`) runs in parallel against fixtures, injected clocks and
@@ -203,9 +214,10 @@ Nothing is recorded while they run. Do not run them during a call.
 
 ### CI on a clean Mac
 
-Every push to `main` also runs `.github/workflows/ci.yml` on a GitHub macOS runner (free
-for this public repo), which calls `scripts/ci.sh`. That script refuses to run anywhere
-but a throwaway CI machine. Each run works through these phases in order:
+`.github/workflows/ci.yml` runs on every pull request into `main` and again on `main` after
+each merge, on a GitHub macOS runner (free for this public repo; the full Xcode toolchain,
+so `lldb`, the sanitizers and `xctrace` are there too). It calls `scripts/ci.sh`, one
+workflow step per phase, so the run's page shows each phase pass or fail as it happens:
 
 1. Fetch Voice ID's model.
 2. Install two BlackHole loopback devices to act as microphones.
@@ -215,23 +227,23 @@ but a throwaway CI machine. Each run works through these phases in order:
 6. Check the microphone end to end through the installed app's own log:
    - speech played into the default input is heard;
    - when the default input is switched, the app reopens on the new input and hears again.
-7. Run the light, medium and heavy lanes with `LEARNER_CI=1`.
+7. Run the light, medium and heavy lanes with `LEARNER_TEST_ENV=runner`.
 8. Run `scripts/uninstall-app.sh` with `PURGE_DATA=1`, which must leave nothing behind.
 
-Every phase runs even after a failure. The run's summary page lists each phase as PASS
-or FAIL, and every skipped test with its reason. The logs, including the app's
-`menubar.log`, are kept as the `ci-out` artifact.
+Every phase runs even after a failure. The last step writes the PASS/FAIL table and every
+skipped test, with its reason, to the run's summary page. The logs, including the app's
+`menubar.log`, are kept as the `ci-out` artifact for 14 days. A run that passed every phase
+also keeps the exact bundle it tested as `learner-desktop-app` for 30 days; that is what
+`scripts/install-latest.sh` installs. `scripts/ci.sh` refuses to run without `CI=true`.
 
 Nothing of the owner's goes to CI: no secrets and no logins. Suites that need the owner's
-live stack skip by name there:
+live machine skip by name on the runner:
 
 - screenpipe;
 - the ChatGPT session and ai-vault;
 - the ovh server harness;
 - the CLI sessions uploader;
 - the wristband.
-
-Those still run in the pre-push heavy lane on the owner's Mac.
 
 `scripts/uninstall-app.sh` also works on the owner's Mac. Without `PURGE_DATA` it keeps
 `~/.ai-aggregator` and the app's settings.

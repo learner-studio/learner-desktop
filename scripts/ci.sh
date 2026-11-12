@@ -9,12 +9,19 @@
 #   install        release build, installed and started by scripts/build-app.sh
 #   mic-e2e        speech played into the virtual mic is heard by the installed app; the
 #                  default input is switched and the app follows it and hears again
-#   light/medium/heavy   scripts/test.sh, with LEARNER_CI=1 (owner-only suites skip, by name)
+#   light/medium/heavy   scripts/test.sh, with LEARNER_TEST_ENV=runner (owner-only suites skip, by name)
 #   uninstall      scripts/uninstall-app.sh with PURGE_DATA=1: nothing may be left behind
 #
-# Every phase runs even when an earlier one failed, so one run reports everything. The
-# summary names each phase PASS/FAIL and every skipped test with its reason; it goes to
-# stdout and, on GitHub, to the run's summary page. Exit 1 when any phase failed.
+# Usage: scripts/ci.sh PHASE   one phase (the workflow runs each as its own step, so the
+#                              Actions page shows them pass or fail live); exit = its verdict
+#        scripts/ci.sh report  the PASS/FAIL table and every skipped test with its reason, to
+#                              stdout and the run's summary page; exit 1 if any phase failed
+#        scripts/ci.sh all     every phase, then the report
+#
+# Every phase runs even when an earlier one failed, so one run reports everything. Verdicts
+# collect in $OUT/results.tsv across steps. The test lanes run with LEARNER_TEST_ENV=runner:
+# every lane prints which environment it is in, and suites that need the owner's live
+# machine say so when they skip.
 #
 # Only for a throwaway machine: it installs audio drivers, writes TCC.db, and deletes
 # ~/.ai-aggregator at the end. It refuses to run without CI=true.
@@ -26,7 +33,7 @@ if [ "${CI:-}" != "true" ]; then
   echo "ci.sh is for CI runners only (it writes TCC.db and deletes ~/.ai-aggregator); set CI=true on a throwaway Mac" >&2
   exit 2
 fi
-export LEARNER_CI=1
+export LEARNER_TEST_ENV=runner
 
 OUT="${CI_OUT:-$PWD/ci-out}"
 mkdir -p "$OUT"
@@ -35,8 +42,7 @@ BUNDLE_ID="com.benpollack.ai-aggregator-menubar"
 MIC_A="BlackHole 2ch"
 MIC_B="BlackHole 16ch"
 
-results=()   # "PASS|FAIL<TAB>phase<TAB>seconds<TAB>note"
-failed=0
+RESULTS="$OUT/results.tsv"   # PASS|FAIL <TAB> phase <TAB> seconds <TAB> note
 
 banner() { printf '\n\033[1;36m######## %s ########\033[0m\n' "$*"; }
 
@@ -49,12 +55,12 @@ phase() {
   local status=${PIPESTATUS[0]}
   local took=$((SECONDS - start))
   if [ "$status" -eq 0 ]; then
-    results+=("PASS	$name	$took	")
+    printf 'PASS\t%s\t%s\t\n' "$name" "$took" >> "$RESULTS"
   else
-    results+=("FAIL	$name	$took	exit $status")
-    failed=1
+    printf 'FAIL\t%s\t%s\texit %s\n' "$name" "$took" "$status" >> "$RESULTS"
     echo "::error title=CI phase failed::$name failed (exit $status); see $name.log"
   fi
+  return "$status"
 }
 
 # wait_log PATTERN SECONDS FROM_LINE: the app's log, from line FROM_LINE on, matches PATTERN.
@@ -128,6 +134,12 @@ install() {
     sleep 1
   done
   echo "running: pid $(pgrep -f "Learner Desktop.app/Contents/MacOS/learner-desktop")"
+  # The exact bundle under test, kept for scripts/install-latest.sh on the owner's Mac
+  # (uploaded only when every phase passes).
+  mkdir -p "$PWD/ci-app"
+  ditto -c -k --keepParent "menu-bar-app/Learner Desktop.app" "$PWD/ci-app/Learner-Desktop.zip"
+  printf 'commit %s\nrun %s\nbuilt %s\n' "$(git rev-parse HEAD)" "${GITHUB_RUN_ID:-local}" "$(date -u +%FT%TZ)" > "$PWD/ci-app/BUILD.txt"
+  echo "packaged ci-app/Learner-Desktop.zip"
 }
 
 # What reaches DEVICE's input while speech is played into it: per-channel peak and RMS.
@@ -178,51 +190,61 @@ lane() { scripts/test.sh "$1"; }
 
 uninstall() { PURGE_DATA=1 scripts/uninstall-app.sh; }
 
-# ---- run --------------------------------------------------------------------------------
-
-phase fetch fetch
-phase virtual-mic virtual_mic
-phase grant grant
-phase speech speech
-phase install install
-phase mic-e2e mic_e2e
-phase light lane light
-phase medium lane medium
-phase heavy lane heavy
-[ -f "$APP_LOG" ] && cp "$APP_LOG" "$OUT/menubar.log"
-phase uninstall uninstall
-
 # ---- report -----------------------------------------------------------------------------
 
-# Swift Testing names every skip and cancellation: `➜ Test x() skipped: "why"`.
-skips="$(cat "$OUT"/light.log "$OUT"/medium.log "$OUT"/heavy.log 2>/dev/null \
-  | grep -E '^➜ (Test|Suite) .* (skipped|was cancelled)' | sed -E 's/^➜ //' | sort -u)"
-nskips=$( [ -n "$skips" ] && wc -l <<< "$skips" | tr -d ' ' || echo 0)
-
 report() {
-  echo "## Learner Desktop CI: $([ $failed -eq 0 ] && echo '✅ PASSED' || echo '❌ FAILED')"
-  echo
-  echo "| | phase | time | note |"
-  echo "|---|---|---|---|"
-  for r in "${results[@]}"; do
-    IFS=$'\t' read -r verdict name took note <<< "$r"
-    echo "| $([ "$verdict" = PASS ] && echo ✅ || echo ❌) $verdict | $name | ${took}s | $note |"
-  done
-  echo
-  echo "### $nskips test(s) skipped, not passed"
-  if [ "$nskips" -gt 0 ]; then
+  local failed=0 skips nskips
+  [ -f "$RESULTS" ] && grep -q '^FAIL' "$RESULTS" && failed=1
+  [ -f "$RESULTS" ] || failed=1
+  # Swift Testing names every skip and cancellation: `➜ Test x() skipped: "why"`.
+  skips="$(cat "$OUT"/light.log "$OUT"/medium.log "$OUT"/heavy.log 2>/dev/null \
+    | grep -E '^➜ (Test|Suite) .* (skipped|was cancelled)' | sed -E 's/^➜ //' | sort -u)"
+  nskips=$( [ -n "$skips" ] && wc -l <<< "$skips" | tr -d ' ' || echo 0)
+  {
+    echo "## Learner Desktop CI on the GitHub runner: $([ $failed -eq 0 ] && echo '✅ PASSED' || echo '❌ FAILED')"
     echo
-    echo '```'
-    echo "$skips"
-    echo '```'
+    echo "Test environment: **runner** (a clean Mac; no owner accounts or live data)."
+    echo
+    echo "| | phase | time | note |"
+    echo "|---|---|---|---|"
+    [ -f "$RESULTS" ] && while IFS=$'\t' read -r verdict name took note; do
+      echo "| $([ "$verdict" = PASS ] && echo ✅ || echo ❌) $verdict | $name | ${took}s | $note |"
+    done < "$RESULTS"
+    echo
+    echo "### $nskips test(s) skipped, not passed"
+    if [ "$nskips" -gt 0 ]; then echo; echo '```'; echo "$skips"; echo '```'; fi
+  } > "$OUT/summary.md"
+  banner "SUMMARY"
+  cat "$OUT/summary.md"
+  [ -n "${GITHUB_STEP_SUMMARY:-}" ] && cat "$OUT/summary.md" >> "$GITHUB_STEP_SUMMARY"
+  if [ $failed -ne 0 ]; then
+    printf '\n\033[1;31m!!!!!!!! CI FAILED: %s !!!!!!!!\033[0m\n' "$(awk -F'\t' '$1=="FAIL"{print $2}' "$RESULTS" 2>/dev/null | paste -sd, -)"
+    return 1
   fi
+  printf '\n\033[1;32m======== CI PASSED (%s skipped) ========\033[0m\n' "$nskips"
 }
 
-banner "SUMMARY"
-report | tee "$OUT/summary.md"
-[ -n "${GITHUB_STEP_SUMMARY:-}" ] && report >> "$GITHUB_STEP_SUMMARY"
-if [ $failed -ne 0 ]; then
-  printf '\n\033[1;31m!!!!!!!! CI FAILED: %s !!!!!!!!\033[0m\n' "$(printf '%s\n' "${results[@]}" | awk -F'\t' '$1=="FAIL"{print $2}' | paste -sd, -)"
-  exit 1
-fi
-printf '\n\033[1;32m======== CI PASSED (%s skipped) ========\033[0m\n' "$nskips"
+# ---- run --------------------------------------------------------------------------------
+
+keep_app_log() { [ -f "$APP_LOG" ] && cp "$APP_LOG" "$OUT/menubar.log"; return 0; }
+
+run() {
+  case "$1" in
+    fetch) phase fetch fetch ;;
+    virtual-mic) phase virtual-mic virtual_mic ;;
+    grant) phase grant grant ;;
+    speech) phase speech speech ;;
+    install) phase install install ;;
+    mic-e2e) phase mic-e2e mic_e2e ;;
+    light|medium|heavy) phase "$1" lane "$1" ;;
+    uninstall) keep_app_log; phase uninstall uninstall ;;
+    report) report ;;
+    all)
+      rm -f "$RESULTS"
+      for p in fetch virtual-mic grant speech install mic-e2e light medium heavy uninstall; do run "$p" || true; done
+      report ;;
+    *) echo "usage: scripts/ci.sh fetch|virtual-mic|grant|speech|install|mic-e2e|light|medium|heavy|uninstall|report|all" >&2; return 2 ;;
+  esac
+}
+
+run "${1:-all}"

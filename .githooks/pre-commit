@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Every commit: the secret scan and the light lane, run against exactly what is being
-# committed (unstaged changes and untracked files are set aside while the lane runs).
+# Every commit: the secret scan. No tests run on this Mac: all testing is CI's, on a GitHub
+# macOS runner, for every pull request into main (.github/workflows/ci.yml). The repo is
+# public, so the scan stays here: a pushed secret cannot be taken back.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
@@ -13,24 +14,3 @@ gitleaks git --staged . --redact --no-banner >/dev/null 2>&1 || {
   gitleaks git --staged . --redact --no-banner >&2 || true
   exit 1
 }
-
-# The stash list is shared by every worktree of this repo, so the stash is found by its
-# own unique message, never popped blindly as stash@{0}.
-tag="pre-commit $$ $(date +%s) $(git rev-parse --show-toplevel)"
-stashed=0
-if ! git diff --quiet || [ -n "$(git ls-files --others --exclude-standard)" ]; then
-  git stash push --keep-index --include-untracked --quiet --message "$tag" && stashed=1
-fi
-restore() {
-  [ "$stashed" = 1 ] || return 0
-  local ref
-  ref="$(git stash list --format='%gd %gs' | grep -F -- "$tag" | head -1 | cut -d' ' -f1)"
-  if [ -n "$ref" ]; then
-    git stash pop --quiet "$ref" || echo "pre-commit: could not restore unstaged changes; they are in $ref" >&2
-  else
-    echo "pre-commit: the stash '$tag' is missing; check 'git stash list'" >&2
-  fi
-}
-trap restore EXIT
-
-scripts/test.sh light

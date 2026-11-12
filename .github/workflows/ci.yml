@@ -1,12 +1,18 @@
-# The whole app on a clean GitHub macOS runner: install, a virtual microphone (play speech,
-# switch inputs), the light/medium/heavy lanes, uninstall. scripts/ci.sh does the work and
-# writes the PASS/FAIL/skip report to this run's summary page.
+# The whole app on a clean GitHub macOS runner. All testing happens here: every pull
+# request into main must pass this job before it merges (branch protection), and main is
+# checked again after each merge so the app it keeps is main's own build.
 #
-# Nothing of the owner's goes here: no secrets, no logins. Suites that need the owner's
-# live stack (screenpipe, ChatGPT, ai-vault, the ovh server harness) skip by name.
+# Each phase of scripts/ci.sh is its own step, so this run's page shows them pass or fail
+# as they happen; a failed phase does not stop the rest. The last step writes the
+# PASS/FAIL table and every skipped test, with its reason, to the run's summary page.
+#
+# Nothing of the owner's goes here: no secrets, no logins. The test environment is
+# LEARNER_TEST_ENV=runner, and every lane says so in its output.
 name: CI
 
 on:
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
   workflow_dispatch:
@@ -15,11 +21,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
+
+env:
+  LEARNER_TEST_ENV: runner
 
 jobs:
   mac:
+    name: mac
     runs-on: macos-26
     timeout-minutes: 90
     steps:
@@ -40,13 +50,52 @@ jobs:
             menu-bar-app/Models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx
           key: voice-id-${{ hashFiles('scripts/fetch-voice-id.sh') }}
 
-      - name: Install, microphone, all lanes, uninstall
-        run: scripts/ci.sh
+      - name: fetch (Voice ID model, sherpa-onnx)
+        run: scripts/ci.sh fetch
+      - name: virtual-mic (BlackHole 2ch + 16ch)
+        if: ${{ !cancelled() }}
+        run: scripts/ci.sh virtual-mic
+      - name: grant (microphone, speech recognition)
+        if: ${{ !cancelled() }}
+        run: scripts/ci.sh grant
+      - name: speech (Siri and Dictation on)
+        if: ${{ !cancelled() }}
+        run: scripts/ci.sh speech
+      - name: install (release build, started by launchd)
+        if: ${{ !cancelled() }}
+        run: scripts/ci.sh install
+      - name: mic-e2e (hear speech, switch inputs, hear again)
+        if: ${{ !cancelled() }}
+        run: scripts/ci.sh mic-e2e
+      - name: light lane
+        if: ${{ !cancelled() }}
+        run: scripts/ci.sh light
+      - name: medium lane
+        if: ${{ !cancelled() }}
+        run: scripts/ci.sh medium
+      - name: heavy lane
+        if: ${{ !cancelled() }}
+        run: scripts/ci.sh heavy
+      - name: uninstall (nothing left behind)
+        if: ${{ !cancelled() }}
+        run: scripts/ci.sh uninstall
+      - name: report
+        if: ${{ !cancelled() }}
+        run: scripts/ci.sh report
 
       - name: Keep the logs
-        if: always()
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: ci-out
           path: ci-out/
           retention-days: 14
+
+      # Only a build that passed every phase; scripts/install-latest.sh installs main's.
+      - name: Keep the tested app
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: learner-desktop-app
+          path: ci-app/
+          retention-days: 30
