@@ -256,6 +256,21 @@ speech() {
   defaults write com.apple.assistant.support "Dictation Enabled" -bool true
   killall assistantd corespeechd 2>/dev/null || true   # they reread the settings on relaunch
   defaults read com.apple.assistant.support | grep -E '"(Assistant|Dictation) Enabled"' | sed 's/^ */  /'
+  # Many checks speak with `say` (the mic end to end, the speech model, screenpipe's rows,
+  # the audio benchmark). Run 8's machine synthesized silence (85 samples for a sentence):
+  # check it here, restart the synthesizer if needed, and fail plainly if it stays broken.
+  local wav="$OUT/say-check.wav" n=0
+  for attempt in 1 2 3; do
+    rm -f "$wav"
+    say -o "$wav" --file-format=WAVE --data-format=LEI16@16000 "The quick brown fox checks the speech synthesizer." 2>&1 | tail -2
+    n=$(( ( $(stat -f %z "$wav" 2>/dev/null || echo 0) - 44 ) / 2 ))
+    echo "say attempt $attempt: $n samples"
+    [ "$n" -gt 16000 ] && break
+    killall speechsynthesisd SpeechSynthesisServer com.apple.speech.speechsynthesisd 2>/dev/null || true
+    sleep 3
+  done
+  rm -f "$wav"
+  [ "$n" -gt 16000 ] || { echo "the runner's speech synthesizer is broken (say makes silence); every check that speaks would fail"; return 1; }
 }
 
 install() {
