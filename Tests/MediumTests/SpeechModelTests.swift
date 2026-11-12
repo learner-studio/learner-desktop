@@ -69,14 +69,19 @@ struct SpeechModelTests {
     // must still hear speech. In this serialized suite: `say` fails when run concurrently.
     /// Speech through the real callback, from a mono file and from a 16-channel input whose
     /// voice is only on channel 3 (as CI's BlackHole 16ch delivered it, 11-12).
+    /// Synthesized once for both layouts (`say` costs seconds; the lane has a budget).
+    static let speech48k: (path: String, failure: String?) = {
+        let path = NSTemporaryDirectory() + "learner-mic-speech48k-\(ProcessInfo.processInfo.processIdentifier).wav"
+        let r = ChildProcess.run("/usr/bin/say", ["-r", "180", "-o", path, "--file-format=WAVE", "--data-format=LEF32@48000",
+                                                  "We should look at the plan for next week and decide who does what."], timeout: 60, stderr: true)
+        return (path, r.ok ? nil : "say failed: \(r.output)")
+    }()
+
     @Test(arguments: [1, 16] as [AVAudioChannelCount])
     func theTapRunsOffTheMainThreadAndHearsSpeech(channels: AVAudioChannelCount) throws {
-        let dir = TempDir("mic")
-        let wav = dir.file("speech48k.wav")
-        let r = ChildProcess.run("/usr/bin/say", ["-r", "180", "-o", wav, "--file-format=WAVE", "--data-format=LEF32@48000",
-                                                  "We should look at the plan for next week and decide who does what."], timeout: 60, stderr: true)
-        try #require(r.ok, "say failed: \(r.output)")
-        let file = try AVAudioFile(forReading: URL(fileURLWithPath: wav))
+        let speech = Self.speech48k
+        try #require(speech.failure == nil, "\(speech.failure ?? "")")
+        let file = try AVAudioFile(forReading: URL(fileURLWithPath: speech.path))
         let fileFormat = file.processingFormat
         let format = try #require(channels == 1 ? fileFormat
             : AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: fileFormat.sampleRate, interleaved: false,
