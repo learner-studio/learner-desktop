@@ -243,6 +243,11 @@ server() {
   ( cd "$dir" && bun install --frozen-lockfile && bun packages/server/src/db/migrate.ts --test && bun run build:web \
       && bun run prepare:runtime ) 2>&1 | tail -15
   [ -f "$dir/apps/web/dist/index.html" ] || { echo "learner-server's web build is missing"; return 1; }
+  # learner-server's own proof of the pairing and the seeded mastery gain, server side only
+  # (its --check mode). Printed for diagnosis; the heavy lane's suites are the gate.
+  echo "learner-server's own check (pairing-server.ts --seed-mastery-gain --check):"
+  ( cd "$dir" && perl -e 'alarm shift; exec @ARGV' 300 bun scripts/pairing-server.ts --topology same-machine --port 3029 --seed-mastery-gain --check ) 2>&1 \
+    | grep -E '"event"|proven|must|Error' | tail -12 | cut -c1-400 || true
   echo "ready: Postgres 17 (learner_test migrated), web built; the heavy lane runs the pairing harness locally"
 }
 
