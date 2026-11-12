@@ -244,6 +244,7 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
             add("   ⚠️ learner-server says its API moved to \(moved)")
             _ = add("   Switch to \(URL(string: moved)?.host ?? moved)...", #selector(switchToAdvertisedServer))
         }
+        _ = add("   🔗 Pair with a Learner Server (paste a pairing code)...", #selector(pairWithServer))
         live { t in "   └─ 📤 \(t.status.loaded ? "\(t.status.outboxDepth) queued" : Self.loading) | last: \(outbox.lastStatus)" }
         if status.archiveParked > 0 { add("   ⚠️ \(status.archiveParked) chat(s) refused by the server (see menubar.log)") }
         live { t in
@@ -486,6 +487,94 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Pairing.pin(apiUrl: moved, clientId: LearnerAPI.clientId)
         log.info("switching learner-server to \(moved) at the owner's word; restarting")
         _ = ChildProcess.run("/bin/launchctl", ["kickstart", "-k", "gui/\(getuid())/com.benpollack.learner-desktop"], timeout: 10)
+    }
+
+    // MARK: One-paste pairing
+
+    /// Before launch completes, so a `learner-desktop://pair?code=` link that launched the app
+    /// is not lost.
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        NSAppleEventManager.shared().setEventHandler(self, andSelector: #selector(handleGetURL(_:withReplyEvent:)),
+                                                     forEventClass: AEEventClass(kInternetEventClass), andEventID: AEEventID(kAEGetURL))
+    }
+
+    /// `learner-desktop://pair?code=<pairing code>`, the one-click link learner-server shows.
+    @objc func handleGetURL(_ event: NSAppleEventDescriptor, withReplyEvent reply: NSAppleEventDescriptor) {
+        guard let s = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue, let c = URLComponents(string: s),
+              c.scheme == "learner-desktop", c.host == "pair",
+              let code = c.queryItems?.first(where: { $0.name == "code" })?.value else { return }
+        confirmAndPair(code, from: "a pairing link")
+    }
+
+    /// The tray item: a pairing code already on the clipboard is used (one click); otherwise
+    /// it asks for one to be pasted.
+    @objc func pairWithServer() {
+        if let code = Pairing.findCode(in: NSPasteboard.general.string(forType: .string) ?? "") {
+            confirmAndPair(code, from: "the clipboard")
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Pair with a Learner Server"
+        alert.informativeText = "Paste the pairing code learner-server gave you. It starts with \(Pairing.codePrefix)"
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 380, height: 24))
+        field.placeholderString = Pairing.codePrefix + "..."
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Continue")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard let code = Pairing.findCode(in: field.stringValue) else {
+            pairingMessage("That is not a pairing code", "A pairing code starts with \(Pairing.codePrefix)")
+            return
+        }
+        confirmAndPair(code, from: "your paste")
+    }
+
+    /// Every route ends here: whoever made the code or link, the owner sees which server the
+    /// device key will go to and says yes first. Then the shared import (server identity,
+    /// Keychain, pin) and a restart onto the new pairing.
+    func confirmAndPair(_ code: String, from source: String) {
+        let p: Pairing.Payload
+        switch Pairing.payload(fromCode: code) {
+        case .failure(let e): pairingMessage("That pairing code can't be used", "\(e)"); return
+        case .success(let payload): p = payload
+        }
+        let current = Pairing.pinned()
+        let alert = NSAlert()
+        alert.messageText = "Pair this Mac with \(URL(string: p.apiUrl)?.host ?? p.apiUrl)?"
+        alert.informativeText = """
+            From \(source): learner-server at \(p.apiUrl), as device "\(p.clientId)". \
+            Its key goes into your Keychain\(current.map { " and replaces the pairing with \($0.apiUrl)" } ?? ""). \
+            Pair only with a server you run: it receives this Mac's coaching data. Learner Desktop restarts to use it.
+            """
+        alert.addButton(withTitle: "Pair")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = Pairing.importCode(code, transport: URLSessionTransport())
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch result {
+                case .failure(let e):
+                    self.pairingMessage("Not paired", "\(e)")
+                case .success(let paired):
+                    // The key is in the Keychain now; it should not linger on the clipboard.
+                    if Pairing.findCode(in: NSPasteboard.general.string(forType: .string) ?? "") == code { NSPasteboard.general.clearContents() }
+                    self.log.info("paired with \(paired.apiUrl) as \(paired.clientId) from \(source); restarting onto it")
+                    _ = ChildProcess.run("/bin/launchctl", ["kickstart", "-k", "gui/\(getuid())/com.benpollack.learner-desktop"], timeout: 10)
+                }
+            }
+        }
+    }
+
+    private func pairingMessage(_ title: String, _ text: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = text
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 
     @objc func signInToVault(_ sender: NSMenuItem) {

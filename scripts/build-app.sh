@@ -76,7 +76,18 @@ cat << 'EOF' > "${BUNDLE_DIR}/Contents/Info.plist"
     <string>13.0</string>
     <key>LSUIElement</key>
     <true/>
-    <key>NSHighResolutionCapable</key>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>Learner Desktop pairing link</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>learner-desktop</string>
+            </array>
+        </dict>
+    </array>
+        <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>Learner Desktop listens for your own speech on the microphone, on this Mac only (no audio is stored or sent), to time how long you have been talking and, with Voice ID on, to tell your voice from others'.</string>

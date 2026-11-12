@@ -191,4 +191,55 @@ struct PairingTests {
         #expect(beats().count == 2, "an unchanged version sends no more")
         withExtendedLifetime(link) {}
     }
+
+    // MARK: One-paste pairing
+
+    static var goodPayload: Pairing.Payload { Pairing.Payload(apiUrl: api, clientId: "test-mac", apiKey: key) }
+
+    @Test func aPairingCodeCarriesThePayloadAndIsFoundInAnyText() throws {
+        let code = Pairing.code(for: Self.goodPayload)
+        #expect(code.hasPrefix("learner-pair-v1:"))
+        #expect(!code.contains("+") && !code.contains("/") && !code.contains("="), "base64url, one word: \(code)")
+        guard case .success(let p) = Pairing.payload(fromCode: code) else { Issue.record("not decoded"); return }
+        #expect(p == Self.goodPayload)
+        // A clipboard often holds more: the code is picked out, whitespace and all.
+        #expect(Pairing.findCode(in: "Your code:\n  \(code)  \n(keep it private)") == code)
+        #expect(Pairing.findCode(in: "nothing here") == nil)
+    }
+
+    @Test func aDamagedOrForeignCodeIsRefusedBeforeAnythingIsContacted() {
+        let fields = Self.good.merging(["apiKey": "short"]) { $1 }
+        let weak = "learner-pair-v1:" + Self.payload(fields).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        for bad in ["learner-pair-v2:abc", "learner-pair-v1:@@@@", weak, "learner-pair-v1:" + Data("not json".utf8).base64EncodedString()] {
+            guard case .failure(.refused) = Pairing.payload(fromCode: bad) else { Issue.record("accepted: \(bad)"); continue }
+        }
+    }
+
+    @Test func importingACodeChecksTheServerStoresTheKeyAndPins() throws {
+        let defaults = scratchDefaults()
+        var stored: [(String, String)] = []
+        let result = Pairing.importCode(Pairing.code(for: Self.goodPayload), defaults: defaults, transport: Self.health(),
+                                        store: { stored.append(($0, $1)); return .success(()) })
+        guard case .success = result else { Issue.record("not imported: \(result)"); return }
+        #expect(stored.count == 1 && stored[0] == ("test-mac", Self.key))
+        #expect(Pairing.pinned(defaults)?.apiUrl == Self.api)
+        // Not a learner-server: nothing stored, nothing pinned.
+        let other = scratchDefaults()
+        var none = 0
+        let refused = Pairing.importCode(Pairing.code(for: Self.goodPayload), defaults: other, transport: Self.health(product: "something-else"),
+                                         store: { _, _ in none += 1; return .success(()) })
+        guard case .failure(.notLearnerServer) = refused else { Issue.record("imported from a stranger: \(refused)"); return }
+        #expect(none == 0 && Pairing.pinned(other) == nil)
+    }
+
+    @Test func toolPairReadsTheCodeFromStdinNeverFromArguments() {
+        var out: [String] = [], err: [String] = []
+        let io = ToolIO(out: { out.append($0) }, err: { err.append($0) })
+        let ok = PairTool.main(input: Data("\(Pairing.code(for: Self.goodPayload))\n".utf8), io: io, transport: Self.health(),
+                               defaults: scratchDefaults(), store: { _, _ in .success(()) })
+        #expect(ok == 0 && out.first?.hasPrefix("paired with \(Self.api) as test-mac") == true, "\(out) \(err)")
+        #expect(!(out + err).joined().contains(Self.key), "the key is never printed")
+        #expect(PairTool.main(input: Data(), io: io, transport: Self.health(), defaults: scratchDefaults(), store: { _, _ in .success(()) }) == 2)
+    }
 }
