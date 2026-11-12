@@ -170,6 +170,43 @@ enum Pairing {
         return .success(data)
     }
 
+    /// Whether a URL keeps the key on this Mac or the local network: loopback, a private-range
+    /// address, or a .local name. Anything else over plain http sends the key unencrypted,
+    /// and the confirmation says so.
+    static func isLocal(_ url: String) -> Bool {
+        guard let host = URLComponents(string: url)?.host?.lowercased() else { return false }
+        if host == "localhost" || host == "::1" || host.hasPrefix("127.") || host.hasSuffix(".local") { return true }
+        return host.range(of: #"^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)"#, options: .regularExpression) != nil
+    }
+
+    static func isUnencryptedRemote(_ url: String) -> Bool {
+        URLComponents(string: url)?.scheme?.lowercased() == "http" && !isLocal(url)
+    }
+
+    /// What a new pairing leaves behind of the old one, to clean up once it succeeded: the old
+    /// device's key in this Mac's Keychain (a different client id), and the endpoints the old
+    /// server advertised (a different URL). The old server still accepts the old key until it
+    /// is revoked there; the confirmation says so.
+    struct Leftovers: Equatable {
+        var keyFor: String?
+        var endpoints: Bool
+    }
+
+    static func leftovers(previous: (apiUrl: String, clientId: String)?, paired p: Payload) -> Leftovers {
+        guard let previous else { return Leftovers(keyFor: nil, endpoints: false) }
+        return Leftovers(keyFor: previous.clientId == p.clientId ? nil : previous.clientId,
+                         endpoints: normalized(previous.apiUrl) != normalized(p.apiUrl))
+    }
+
+    /// Removes those leftovers (after a successful pairing only).
+    static func clean(_ l: Leftovers, endpointsPath: String = Paths.data + "/pairing-endpoints.json", log: Log = Log("Pairing")) {
+        if let old = l.keyFor {
+            _ = ChildProcess.run("/usr/bin/security", ["delete-generic-password", "-s", keychainService, "-a", old], timeout: 15)
+            log.info("removed the previous device's key (\(old)) from the Keychain; revoke it on its server too")
+        }
+        if l.endpoints { try? FileManager.default.removeItem(atPath: endpointsPath) }
+    }
+
     /// Imports a pairing code: the same checks and steps as a pairing file.
     static func importCode(_ code: String, defaults: UserDefaults = .standard, transport: HTTPTransport,
                            store: (String, String) -> Result<Void, PairingError> = { keychainStore(clientId: $0, key: $1) },

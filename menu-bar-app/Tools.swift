@@ -239,13 +239,17 @@ enum SpeechSelfTest {
 /// running app picks the new pairing up when it restarts.
 enum PairTool {
     static func main(input: Data, io: ToolIO, transport: HTTPTransport = URLSessionTransport(), defaults: UserDefaults = .standard,
-                     store: (String, String) -> Result<Void, Pairing.PairingError> = { Pairing.keychainStore(clientId: $0, key: $1) }) -> Int32 {
+                     store: (String, String) -> Result<Void, Pairing.PairingError> = { Pairing.keychainStore(clientId: $0, key: $1) },
+                     clean: Bool = true) -> Int32 {
         guard let code = Pairing.findCode(in: String(decoding: input, as: UTF8.self)) else {
             io.err("pair: no pairing code on stdin (it starts with \(Pairing.codePrefix))")
             return 2
         }
+        let previous = Pairing.pinned(defaults)
         switch Pairing.importCode(code, defaults: defaults, transport: transport, store: store) {
         case .success(let p):
+            if clean { Pairing.clean(Pairing.leftovers(previous: previous, paired: p)) }
+            if Pairing.isUnencryptedRemote(p.apiUrl) { io.err("warning: \(p.apiUrl) is plain http to another machine: the key travels unencrypted") }
             io.out("paired with \(p.apiUrl) as \(p.clientId); restart Learner Desktop to use it")
             return 0
         case .failure(let e):

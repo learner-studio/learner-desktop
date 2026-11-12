@@ -93,6 +93,8 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     var handledPavlokRequests = Set<String>()
+    /// A pairing confirmation is open or its import is running.
+    var pairingInProgress = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // First, before anything talks to learner-server: a pairing file the server's installer
@@ -500,9 +502,13 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// `learner-desktop://pair?code=<pairing code>`, the one-click link learner-server shows.
     @objc func handleGetURL(_ event: NSAppleEventDescriptor, withReplyEvent reply: NSAppleEventDescriptor) {
-        guard let s = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue, let c = URLComponents(string: s),
-              c.scheme == "learner-desktop", c.host == "pair",
-              let code = c.queryItems?.first(where: { $0.name == "code" })?.value else { return }
+        // Exactly learner-desktop://pair?code=<code>: no path, no other parameters, bounded.
+        guard let s = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue, s.count <= 4096,
+              let c = URLComponents(string: s), c.scheme == "learner-desktop", c.host == "pair", c.path.isEmpty || c.path == "/",
+              let items = c.queryItems, items.count == 1, items[0].name == "code", let code = items[0].value else {
+            log.warn("ignored a learner-desktop link that is not a pairing link")
+            return
+        }
         confirmAndPair(code, from: "a pairing link")
     }
 
@@ -535,38 +541,69 @@ final class TrayAppManager: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// device key will go to and says yes first. Then the shared import (server identity,
     /// Keychain, pin) and a restart onto the new pairing.
     func confirmAndPair(_ code: String, from source: String) {
+        // One pairing dialog at a time: a page firing links repeatedly gets one question.
+        guard !pairingInProgress else { log.warn("a pairing is already being confirmed; ignored another from \(source)"); return }
         let p: Pairing.Payload
         switch Pairing.payload(fromCode: code) {
         case .failure(let e): pairingMessage("That pairing code can't be used", "\(e)"); return
         case .success(let payload): p = payload
         }
-        let current = Pairing.pinned()
+        pairingInProgress = true
+        let previous = Pairing.pinned()
+        // The server in use now, pinned or not (unpinned, the app talks to its built-in default).
+        let inUse = LearnerRPC.configuredBaseURL
         let alert = NSAlert()
         alert.messageText = "Pair this Mac with \(URL(string: p.apiUrl)?.host ?? p.apiUrl)?"
-        alert.informativeText = """
-            From \(source): learner-server at \(p.apiUrl), as device "\(p.clientId)". \
-            Its key goes into your Keychain\(current.map { " and replaces the pairing with \($0.apiUrl)" } ?? ""). \
-            Pair only with a server you run: it receives this Mac's coaching data. Learner Desktop restarts to use it.
-            """
+        var text = "From \(source): learner-server at \(p.apiUrl), as device \"\(p.clientId)\". Its key goes into your Keychain."
+        if Pairing.normalized(inUse) != Pairing.normalized(p.apiUrl) {
+            text += "\n\nThis replaces the server in use now, \(inUse)."
+            if let previous, previous.clientId != p.clientId {
+                text += " The old device key (\(previous.clientId)) is removed from this Mac; it stays valid on that server until you revoke it there."
+            }
+        }
+        if Pairing.isUnencryptedRemote(p.apiUrl) {
+            text += "\n\n⚠️ This address is plain http on another machine: the key and your coaching data would travel unencrypted."
+        }
+        text += "\n\nPair only with a server you run: it receives this Mac's coaching data. Learner Desktop restarts to use it."
+        alert.informativeText = text
         alert.addButton(withTitle: "Pair")
         alert.addButton(withTitle: "Cancel")
         NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            pairingInProgress = false
+            if Pairing.findCode(in: NSPasteboard.general.string(forType: .string) ?? "") == code { NSPasteboard.general.clearContents() }
+            return
+        }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = Pairing.importCode(code, transport: URLSessionTransport())
+            if case .success(let paired) = result { Pairing.clean(Pairing.leftovers(previous: previous, paired: paired)) }
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.pairingInProgress = false
+                // The code is spent either way; it should not linger on the clipboard.
+                if Pairing.findCode(in: NSPasteboard.general.string(forType: .string) ?? "") == code { NSPasteboard.general.clearContents() }
                 switch result {
                 case .failure(let e):
                     self.pairingMessage("Not paired", "\(e)")
                 case .success(let paired):
-                    // The key is in the Keychain now; it should not linger on the clipboard.
-                    if Pairing.findCode(in: NSPasteboard.general.string(forType: .string) ?? "") == code { NSPasteboard.general.clearContents() }
                     self.log.info("paired with \(paired.apiUrl) as \(paired.clientId) from \(source); restarting onto it")
-                    _ = ChildProcess.run("/bin/launchctl", ["kickstart", "-k", "gui/\(getuid())/com.benpollack.learner-desktop"], timeout: 10)
+                    self.restartOntoNewPairing()
                 }
             }
         }
+    }
+
+    /// launchd's copy restarts onto the new pin. A copy LaunchServices started (a link
+    /// clicked while the app was quit) quits once launchd's copy is up, so only one runs.
+    private func restartOntoNewPairing() {
+        let label = "com.benpollack.learner-desktop"
+        let r = ChildProcess.run("/bin/launchctl", ["kickstart", "-k", "gui/\(getuid())/\(label)"], timeout: 10, stderr: true)
+        guard r.status == 0 else {
+            log.warn("could not restart through launchd (\(r.output.trimmingCharacters(in: .whitespacesAndNewlines))); asking the owner to")
+            pairingMessage("Paired", "Quit and reopen Learner Desktop to use the new pairing.")
+            return
+        }
+        if ProcessInfo.processInfo.environment["XPC_SERVICE_NAME"] != label { NSApp.terminate(nil) }
     }
 
     private func pairingMessage(_ title: String, _ text: String) {

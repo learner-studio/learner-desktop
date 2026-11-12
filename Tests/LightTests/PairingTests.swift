@@ -237,9 +237,27 @@ struct PairingTests {
         var out: [String] = [], err: [String] = []
         let io = ToolIO(out: { out.append($0) }, err: { err.append($0) })
         let ok = PairTool.main(input: Data("\(Pairing.code(for: Self.goodPayload))\n".utf8), io: io, transport: Self.health(),
-                               defaults: scratchDefaults(), store: { _, _ in .success(()) })
+                               defaults: scratchDefaults(), store: { _, _ in .success(()) }, clean: false)
         #expect(ok == 0 && out.first?.hasPrefix("paired with \(Self.api) as test-mac") == true, "\(out) \(err)")
         #expect(!(out + err).joined().contains(Self.key), "the key is never printed")
-        #expect(PairTool.main(input: Data(), io: io, transport: Self.health(), defaults: scratchDefaults(), store: { _, _ in .success(()) }) == 2)
+        #expect(PairTool.main(input: Data(), io: io, transport: Self.health(), defaults: scratchDefaults(), store: { _, _ in .success(()) }, clean: false) == 2)
+    }
+
+    @Test func plainHttpToAnotherMachineIsCalledOutLocalAddressesAreNot() {
+        for local in ["http://127.0.0.1:3010", "http://localhost:3010", "http://192.168.1.20/learner-api", "http://10.0.0.5", "http://172.20.1.1", "http://studio.local:3010"] {
+            #expect(!Pairing.isUnencryptedRemote(local), "\(local)")
+        }
+        for remote in ["http://learner.example.test/learner-api", "http://172.32.0.1", "http://8.8.8.8"] {
+            #expect(Pairing.isUnencryptedRemote(remote), "\(remote)")
+        }
+        #expect(!Pairing.isUnencryptedRemote("https://learner.example.test/learner-api"))
+    }
+
+    @Test func aNewPairingCleansUpTheOldKeyAndEndpointsOnlyWhenTheyChange() {
+        let p = Self.goodPayload
+        #expect(Pairing.leftovers(previous: nil, paired: p) == .init(keyFor: nil, endpoints: false))
+        #expect(Pairing.leftovers(previous: (Self.api + "/", "test-mac"), paired: p) == .init(keyFor: nil, endpoints: false))
+        #expect(Pairing.leftovers(previous: ("https://old.example.test/learner-api", "old-mac"), paired: p) == .init(keyFor: "old-mac", endpoints: true))
+        #expect(Pairing.leftovers(previous: (Self.api, "old-mac"), paired: p) == .init(keyFor: "old-mac", endpoints: false))
     }
 }
