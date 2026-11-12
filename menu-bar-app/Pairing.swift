@@ -108,22 +108,113 @@ enum Pairing {
                               store: (String, String) -> Result<Void, PairingError> = { keychainStore(clientId: $0, key: $1) },
                               log: Log = Log("Pairing")) -> Result<Payload, PairingError>? {
         guard let data = FileManager.default.contents(atPath: path) else { return nil }
-        let outcome: Result<Payload, PairingError> = {
-            switch parse(data) {
-            case .failure(let e): return .failure(e)
-            case .success(let p):
-                if case .failure(let e) = checkServer(p.apiUrl, transport: transport) { return .failure(e) }
-                if case .failure(let e) = store(p.clientId, p.apiKey) { return .failure(e) }
-                pin(apiUrl: p.apiUrl, clientId: p.clientId, defaults)
-                return .success(p)
-            }
-        }()
+        let outcome = importData(data, defaults: defaults, transport: transport, store: store)
         switch outcome {
         case .success(let p):
             try? FileManager.default.removeItem(atPath: path)
             log.info("paired with \(p.apiUrl) as \(p.clientId); the key is in the Keychain and the pairing file is deleted")
         case .failure(let e):
             log.warn("pairing file \(path) not imported: \(e); left in place")
+        }
+        return outcome
+    }
+
+    /// The one import every route shares (file, pairing code, link, `tool pair`): the payload
+    /// checked field by field, then the server's identity, then the Keychain, then the pin.
+    static func importData(_ data: Data, defaults: UserDefaults = .standard, transport: HTTPTransport,
+                           store: (String, String) -> Result<Void, PairingError> = { keychainStore(clientId: $0, key: $1) }) -> Result<Payload, PairingError> {
+        switch parse(data) {
+        case .failure(let e): return .failure(e)
+        case .success(let p):
+            if case .failure(let e) = checkServer(p.apiUrl, transport: transport) { return .failure(e) }
+            if case .failure(let e) = store(p.clientId, p.apiKey) { return .failure(e) }
+            pin(apiUrl: p.apiUrl, clientId: p.clientId, defaults)
+            return .success(p)
+        }
+    }
+
+    // MARK: One-paste pairing
+
+    /// A pairing code: the payload in one line a person can copy and paste
+    /// (`learner-pair-v1:` + base64url of `{apiUrl, clientId, apiKey}`). learner-server prints
+    /// one (`mint-api-key.ts --pairing-code`) or shows it with a `learner-desktop://pair?code=`
+    /// link; the tray takes it from the clipboard; CI pipes it to `tool pair`.
+    static let codePrefix = "learner-pair-v1:"
+    private static let codePattern = JSRegex(#"learner-pair-v1:[A-Za-z0-9_-]{20,}={0,2}"#)
+
+    static func code(for p: Payload) -> String {
+        let json = try! JSONSerialization.data(withJSONObject: ["apiUrl": p.apiUrl, "clientId": p.clientId, "apiKey": p.apiKey], options: [.sortedKeys])
+        return codePrefix + json.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+    }
+
+    /// The first pairing code in `text` (a clipboard may hold more than the code).
+    static func findCode(in text: String) -> String? {
+        codePattern.match(text)?.first ?? nil
+    }
+
+    /// The payload a code carries, checked field by field; nothing stored, nothing contacted.
+    static func payload(fromCode code: String) -> Result<Payload, PairingError> {
+        codeData(code).flatMap(parse)
+    }
+
+    /// The JSON a code carries, before any field check.
+    static func codeData(_ code: String) -> Result<Data, PairingError> {
+        let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix(codePrefix) else { return .failure(.refused("not a pairing code (it starts with \(codePrefix))")) }
+        var b64 = String(trimmed.dropFirst(codePrefix.count))
+            .replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        b64 = b64.trimmingCharacters(in: CharacterSet(charactersIn: "="))
+        b64 += String(repeating: "=", count: (4 - b64.count % 4) % 4)
+        guard let data = Data(base64Encoded: b64) else { return .failure(.refused("the pairing code is damaged (not base64url)")) }
+        return .success(data)
+    }
+
+    /// Whether a URL keeps the key on this Mac or the local network: loopback, a private-range
+    /// address, or a .local name. Anything else over plain http sends the key unencrypted,
+    /// and the confirmation says so.
+    static func isLocal(_ url: String) -> Bool {
+        guard let host = URLComponents(string: url)?.host?.lowercased() else { return false }
+        if host == "localhost" || host == "::1" || host.hasPrefix("127.") || host.hasSuffix(".local") { return true }
+        return host.range(of: #"^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)"#, options: .regularExpression) != nil
+    }
+
+    static func isUnencryptedRemote(_ url: String) -> Bool {
+        URLComponents(string: url)?.scheme?.lowercased() == "http" && !isLocal(url)
+    }
+
+    /// What a new pairing leaves behind of the old one, to clean up once it succeeded: the old
+    /// device's key in this Mac's Keychain (a different client id), and the endpoints the old
+    /// server advertised (a different URL). The old server still accepts the old key until it
+    /// is revoked there; the confirmation says so.
+    struct Leftovers: Equatable {
+        var keyFor: String?
+        var endpoints: Bool
+    }
+
+    static func leftovers(previous: (apiUrl: String, clientId: String)?, paired p: Payload) -> Leftovers {
+        guard let previous else { return Leftovers(keyFor: nil, endpoints: false) }
+        return Leftovers(keyFor: previous.clientId == p.clientId ? nil : previous.clientId,
+                         endpoints: normalized(previous.apiUrl) != normalized(p.apiUrl))
+    }
+
+    /// Removes those leftovers (after a successful pairing only).
+    static func clean(_ l: Leftovers, endpointsPath: String = Paths.data + "/pairing-endpoints.json", log: Log = Log("Pairing")) {
+        if let old = l.keyFor {
+            _ = ChildProcess.run("/usr/bin/security", ["delete-generic-password", "-s", keychainService, "-a", old], timeout: 15)
+            log.info("removed the previous device's key (\(old)) from the Keychain; revoke it on its server too")
+        }
+        if l.endpoints { try? FileManager.default.removeItem(atPath: endpointsPath) }
+    }
+
+    /// Imports a pairing code: the same checks and steps as a pairing file.
+    static func importCode(_ code: String, defaults: UserDefaults = .standard, transport: HTTPTransport,
+                           store: (String, String) -> Result<Void, PairingError> = { keychainStore(clientId: $0, key: $1) },
+                           log: Log = Log("Pairing")) -> Result<Payload, PairingError> {
+        let outcome = codeData(code).flatMap { importData($0, defaults: defaults, transport: transport, store: store) }
+        switch outcome {
+        case .success(let p): log.info("paired with \(p.apiUrl) as \(p.clientId) from a pairing code; the key is in the Keychain")
+        case .failure(let e): log.warn("pairing code not imported: \(e)")
         }
         return outcome
     }

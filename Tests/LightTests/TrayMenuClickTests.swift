@@ -20,6 +20,7 @@ struct TrayMenuClickTests {
         "openAppLog": "opens menubar.log",
         "openLearnerWeb": "opens Learner's web UI when the server publishes one",
         "switchToAdvertisedServer": "asks, then switches to the API URL the server now advertises",
+        "pairWithServer": "takes a pairing code from the clipboard or a paste, asks, then pairs",
         "openLoginItemsSettings": "opens System Settings > Login Items",
         "signInToVault:": "starts an ai-vault sign-in in the chosen browser",
         "pullVaultChats": "runs the export now",

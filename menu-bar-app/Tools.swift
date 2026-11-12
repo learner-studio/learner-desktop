@@ -36,6 +36,7 @@ enum Tools {
           vault-report [ROOT]                                ai-vault conversation counts (never text)
           preflight [--quiet]                                the capture stack still matches config/screenpipe-settings.json
           speech-selftest                                    start the microphone + Silero as the app does, for 3 s
+          pair                                               pair with learner-server: a pairing code on stdin (never an argument)
         """
 
     /// Dispatches `args` (what follows `tool`) and returns the exit status.
@@ -49,6 +50,7 @@ enum Tools {
             case "vault-report": return VaultReport.main(rest, io: io, parse: VaultReport.defaultParser)
             case "preflight": return try Preflight.main(rest, io: io)
             case "speech-selftest": return MainActor.assumeIsolated { SpeechSelfTest.main(io: io) }
+            case "pair": return PairTool.main(input: FileHandle.standardInput.readDataToEndOfFile(), io: io)
             case "-h", "--help", "help": io.out(usage); return 0
             default: io.err("unknown tool: \(name)\n\(usage)"); return 2
             }
@@ -226,5 +228,33 @@ enum SpeechSelfTest {
         source.stop()
         io.out("speech-selftest: \(frames) frames scored in 3 s")
         return frames > 50 ? 0 : 1
+    }
+}
+
+
+// MARK: - tool pair
+
+/// Pairs without a person at the menu (CI, scripts): the pairing code comes on stdin, so it
+/// never shows in a process list, and goes through the same import as the tray's. The
+/// running app picks the new pairing up when it restarts.
+enum PairTool {
+    static func main(input: Data, io: ToolIO, transport: HTTPTransport = URLSessionTransport(), defaults: UserDefaults = .standard,
+                     store: (String, String) -> Result<Void, Pairing.PairingError> = { Pairing.keychainStore(clientId: $0, key: $1) },
+                     clean: Bool = true) -> Int32 {
+        guard let code = Pairing.findCode(in: String(decoding: input, as: UTF8.self)) else {
+            io.err("pair: no pairing code on stdin (it starts with \(Pairing.codePrefix))")
+            return 2
+        }
+        let previous = Pairing.pinned(defaults)
+        switch Pairing.importCode(code, defaults: defaults, transport: transport, store: store) {
+        case .success(let p):
+            if clean { Pairing.clean(Pairing.leftovers(previous: previous, paired: p)) }
+            if Pairing.isUnencryptedRemote(p.apiUrl) { io.err("warning: \(p.apiUrl) is plain http to another machine: the key travels unencrypted") }
+            io.out("paired with \(p.apiUrl) as \(p.clientId); restart Learner Desktop to use it")
+            return 0
+        case .failure(let e):
+            io.err("pair: \(e)")
+            return 1
+        }
     }
 }
