@@ -114,19 +114,6 @@ virtual_mic() {
   # the run plays into the mics must not also reach system audio as "someone else".
   SwitchAudioSource -t output -s "$SPEAKER"
   echo "default output: $(SwitchAudioSource -c -t output)"
-  # Room tone on the virtual microphone: a real mic never delivers digital silence, and
-  # screenpipe marks an input whose level stays under RMS 0.001 for 30 s as no data
-  # ("active_no_data"). vol 0.025 measures about RMS 0.005 (-46 dBFS; vol 0.005 measured
-  # RMS 0.0011, at the floor): a quiet room, far below speech. It plays for the whole run.
-  command -v sox >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install sox
-  # Re-launched every 20 s: another program opening the device can reconfigure it under a
-  # long-running sox, which then keeps running while the device hears zeros (run 5). A
-  # fresh sox picks the device up again well inside screenpipe's 30 s window.
-  nohup bash -c "while true; do sox -q -n -t coreaudio '$MIC_A' synth 20 pinknoise vol 0.025 || echo \"\$(date -u +%T) sox exited \$?\"; done" > "$OUT/room-tone.log" 2>&1 &
-  echo $! > "$OUT/room-tone.pid"
-  sleep 1
-  kill -0 "$(cat "$OUT/room-tone.pid")" 2>/dev/null || { echo "room tone did not start:"; cat "$OUT/room-tone.log"; return 1; }
-  echo "room tone playing into $MIC_A (pid $(cat "$OUT/room-tone.pid"))"
   echo "inputs:"; SwitchAudioSource -a -t input | sed 's/^/  /'
   echo "default input: $(SwitchAudioSource -c -t input)"
   [ "$(SwitchAudioSource -c -t input)" = "$MIC_A" ]
@@ -198,19 +185,19 @@ screenpipe() {
   SCREENPIPE_NO_REMINDERS=1 SCREENPIPE_NO_UPDATE_CHECK=1 nohup "$bin" record --port 3030 \
     -a whisper-tiny-quantized -d 5 --transcription-mode realtime \
     -i "$mic" -i "System Audio (output)" --experimental-coreaudio-system-audio \
-    --use-pii-removal false --disable-telemetry --api-auth false > "$OUT/screenpipe.log" 2>&1 &
+    --use-pii-removal false --disable-telemetry --api-auth false > "$OUT/screenpipe-engine.log" 2>&1 &
   echo $! > "$OUT/screenpipe.pid"
   local until=$((SECONDS + 240))
   until curl -sf -m 3 http://localhost:3030/health >/dev/null; do
-    if ! kill -0 "$(cat "$OUT/screenpipe.pid")" 2>/dev/null; then echo "screenpipe exited:"; tail -40 "$OUT/screenpipe.log"; return 1; fi
-    [ $SECONDS -lt $until ] || { echo "screenpipe did not answer /health in 240 s:"; tail -40 "$OUT/screenpipe.log"; return 1; }
+    if ! kill -0 "$(cat "$OUT/screenpipe.pid")" 2>/dev/null; then echo "screenpipe exited:"; tail -40 "$OUT/screenpipe-engine.log"; return 1; fi
+    [ $SECONDS -lt $until ] || { echo "screenpipe did not answer /health in 240 s:"; tail -40 "$OUT/screenpipe-engine.log"; return 1; }
     sleep 2
   done
   echo "health: $(curl -s -m 3 http://localhost:3030/health | head -c 400)"
   # One transcription row, so the live-SQL suites have something to read: spoken once
   # screenpipe records the mic (it starts that a while after /health answers), then seen.
   local until=$((SECONDS + 240))
-  until grep -q "starting continuous recording for ${MIC_A}" "$OUT/screenpipe.log"; do
+  until grep -q "starting continuous recording for ${MIC_A}" "$OUT/screenpipe-engine.log"; do
     [ $SECONDS -lt $until ] || { echo "screenpipe never started recording $MIC_A"; return 1; }
     sleep 2
   done
@@ -225,7 +212,9 @@ screenpipe() {
     done
   done
   echo "audio_transcriptions rows: $rows"
-  [ "$rows" -gt 0 ] || { echo "screenpipe stored no transcription of the spoken line"; return 1; }
+  # Loud, not fatal: the runner's virtual loopback can go dead (runs 7, 11, 13), and the heavy
+  # lane's raw_sql suite fails by itself if screenpipe has no rows.
+  [ "$rows" -gt 0 ] || echo "::warning title=screenpipe::no transcription row from the spoken line (the virtual loopback may be dead); the raw_sql suite will say if rows are missing"
 }
 
 # learner-server's own pairing harness on the runner, for the heavy lane's pairing and
@@ -377,11 +366,9 @@ mic_e2e() {
 
 # What the virtual mic carries right now (diagnosis for screenpipe's audio health).
 audio_check() {
-  echo "room tone: $(pgrep -f "synth 20 pinknoise" >/dev/null && echo "playing" || echo "NOT PLAYING") (loop $(kill -0 "$(cat "$OUT/room-tone.pid" 2>/dev/null)" 2>/dev/null && echo alive || echo dead))"
   echo "default input: $(SwitchAudioSource -c -t input 2>/dev/null), output: $(SwitchAudioSource -c -t output 2>/dev/null)"
   echo "level on $MIC_A over 2 s: $(sox -q -t coreaudio "$MIC_A" -n trim 0 2 stat 2>&1 | awk -F: '/RMS +amplitude/{gsub(/ /,"",$2); print "RMS " $2}')"
   echo "screenpipe audio: $(curl -s -m 3 http://localhost:3030/health | python3 -c 'import json,sys; h=json.load(sys.stdin); print(h.get("status"), h.get("audio_status"))' 2>/dev/null)"
-  tail -3 "$OUT/room-tone.log" 2>/dev/null
 }
 
 # The server phase's exports, read again here (in `ci.sh all` it ran in a subshell). Its

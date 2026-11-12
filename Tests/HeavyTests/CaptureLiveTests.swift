@@ -46,7 +46,7 @@ struct CaptureLiveTests {
     /// The owner's Mac only. On the runner BlackHole's loopback goes dead mid-run: the
     /// virtual mic read RMS 0.000000 with the room tone playing (runs 7 and 11, at two tone
     /// levels), so screenpipe's 30 s no-data rule cannot be met there.
-    @Test(.enabled(if: !Live.ci, "runner: BlackHole's loopback goes dead mid-run (RMS 0.000000 with the room tone playing, runs 7 and 11)"))
+    @Test(.enabled(if: !Live.ci, "runner: BlackHole's loopback goes dead mid-run (RMS 0.000000 measured on the virtual mic in runs 7 and 11), so screenpipe's 30 s no-data rule cannot be met there"))
     func audioIsFlowingAndHealthy() {
         #expect(health["status"] as? String == "healthy")
         #expect(health["audio_status"] as? String == "ok")
