@@ -118,7 +118,7 @@ virtual_mic() {
   # Re-launched every 20 s: another program opening the device can reconfigure it under a
   # long-running sox, which then keeps running while the device hears zeros (run 5). A
   # fresh sox picks the device up again well inside screenpipe's 30 s window.
-  nohup bash -c "while true; do sox -q -n -t coreaudio '$MIC_A' synth 20 pinknoise vol 0.005; done" > "$OUT/room-tone.log" 2>&1 &
+  nohup bash -c "while true; do sox -q -n -t coreaudio '$MIC_A' synth 20 pinknoise vol 0.005 || echo \"\$(date -u +%T) sox exited \$?\"; done" > "$OUT/room-tone.log" 2>&1 &
   echo $! > "$OUT/room-tone.pid"
   sleep 1
   kill -0 "$(cat "$OUT/room-tone.pid")" 2>/dev/null || { echo "room tone did not start:"; cat "$OUT/room-tone.log"; return 1; }
@@ -325,7 +325,17 @@ mic_e2e() {
 }
 
 # The server phase's exports, read again here: in `ci.sh all` it ran in a subshell.
+# What the virtual mic carries right now (diagnosis for screenpipe's audio health).
+audio_check() {
+  echo "room tone: $(pgrep -f "synth 20 pinknoise" >/dev/null && echo "playing" || echo "NOT PLAYING") (loop $(kill -0 "$(cat "$OUT/room-tone.pid" 2>/dev/null)" 2>/dev/null && echo alive || echo dead))"
+  echo "default input: $(SwitchAudioSource -c -t input 2>/dev/null), output: $(SwitchAudioSource -c -t output 2>/dev/null)"
+  echo "level on $MIC_A over 2 s: $(sox -q -t coreaudio "$MIC_A" -n trim 0 2 stat 2>&1 | awk -F: '/RMS +amplitude/{gsub(/ /,"",$2); print "RMS " $2}')"
+  echo "screenpipe audio: $(curl -s -m 3 http://localhost:3030/health | python3 -c 'import json,sys; h=json.load(sys.stdin); print(h.get("status"), h.get("audio_status"))' 2>/dev/null)"
+  tail -3 "$OUT/room-tone.log" 2>/dev/null
+}
+
 lane() {
+  [ "$1" = heavy ] && audio_check
   if [ -f "$OUT/server.env" ]; then set -a; . "$OUT/server.env"; set +a; fi
   if [ -f "$HOME/.learner-ci-secrets.env" ]; then set -a; . "$HOME/.learner-ci-secrets.env"; set +a; fi
   scripts/test.sh "$1"
