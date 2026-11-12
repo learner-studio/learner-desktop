@@ -110,6 +110,16 @@ virtual_mic() {
   # none, its device check times out and /health reports degraded).
   SwitchAudioSource -t output -s "$MIC_B"
   echo "default output: $(SwitchAudioSource -c -t output)"
+  # Room tone on the virtual microphone: a real mic never delivers digital silence, and
+  # screenpipe marks an input whose level stays under RMS 0.001 for 30 s as no data
+  # ("active_no_data"). Pink noise at about -46 dBFS is a quiet room: above that floor, far
+  # below speech. It plays for the rest of the run.
+  command -v sox >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install sox
+  nohup sox -q -n -t coreaudio "$MIC_A" synth pinknoise vol 0.005 > "$OUT/room-tone.log" 2>&1 &
+  echo $! > "$OUT/room-tone.pid"
+  sleep 1
+  kill -0 "$(cat "$OUT/room-tone.pid")" 2>/dev/null || { echo "room tone did not start:"; cat "$OUT/room-tone.log"; return 1; }
+  echo "room tone playing into $MIC_A (pid $(cat "$OUT/room-tone.pid"))"
   echo "inputs:"; SwitchAudioSource -a -t input | sed 's/^/  /'
   echo "default input: $(SwitchAudioSource -c -t input)"
   [ "$(SwitchAudioSource -c -t input)" = "$MIC_A" ]

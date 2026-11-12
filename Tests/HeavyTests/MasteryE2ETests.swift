@@ -75,7 +75,11 @@ struct MasteryE2ETests {
         // One run of the feed job: the seeded gain, and the live baseline.
         let feed = MasteryFeed(rpc: rpc, defaults: defaults, jobName: "mastery-e2e-\(UUID().uuidString.prefix(8))",
                                stateDir: local.file("jobs"), sendFeedbackAtOnce: false)
-        if case let .ok(summary, _) = feed.runOnce() { #expect(summary == "1 new") } else { Issue.record("the feed run did not succeed") }
+        let outcome = feed.runOnce()
+        if case let .ok(summary, _) = outcome { #expect(summary == "1 new") } else {
+            // What the server said (no keys travel in a job outcome), plus the RPCs it made.
+            Issue.record("the feed run did not succeed: \(outcome); calls: \(["getMasteryNotifications", "getBaselineStatus"].map { "\($0) \(wire.raw($0).prefix(2))" })")
+        }
         let gain = try #require(feed.pending.first)
         #expect(feed.pending.map(\.runId) == [runId], "exactly the seeded gain")
         #expect(gain.conceptId == conceptId)
