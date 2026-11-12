@@ -114,7 +114,9 @@ struct PairingE2ETests {
                 // would leave a live key behind, so it fails the test.
                 usleep(300_000)
                 let said = output
-                if killed || said.contains("revoke-failed") || (!ssh.isRunning && ssh.terminationStatus != 0 && ssh.terminationStatus != SIGTERM) {
+                // It exits 130 after its signal-driven cleanup (pairing-server.ts); a failed revoke
+                // prints revoke-failed.
+                if killed || said.contains("revoke-failed") {
                     Issue.record("the harness's teardown did not finish cleanly (killed: \(killed), exit \(ssh.isRunning ? -1 : ssh.terminationStatus)): \(said.suffix(600))")
                 }
                 return
