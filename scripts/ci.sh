@@ -434,7 +434,7 @@ prod_device() {
   # Written at once (mode 600, outside ci-out), so prod-revoke finds the device whatever
   # fails next. The reply goes to python on stdin, never in its arguments.
   umask 077
-  python3 -c 'import json,sys; d=json.load(sys.stdin); json.dump({k: d[k] for k in ("clientId", "pairingCode", "expiresAt")}, open(sys.argv[1], "w"))' "$PROD_DEVICE" <<< "$device"
+  python3 -c 'import json,sys; d=json.load(sys.stdin); o={k: d[k] for k in ("clientId", "pairingCode", "expiresAt")}; o["apiUrl"]=sys.argv[2]; json.dump(o, open(sys.argv[1], "w"))' "$PROD_DEVICE" "$PROD_API" <<< "$device"
   umask 022
   seeded="$(prod_rpc seedMasteryGain "{\"clientId\":$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["clientId"]))' "$PROD_DEVICE")}")" || {
     echo "seeding failed; revoking the device"; prod_revoke; return 1; }

@@ -12,7 +12,7 @@ import TestSupport
 //
 // GitHub runner only, and only when prod-device made a device (no secret on forks).
 private struct ProdDevice: CustomStringConvertible {
-    let code: String, clientId: String, runId: String, conceptId: String, completedAt: Date
+    let code: String, clientId: String, runId: String, conceptId: String, completedAt: Date, apiUrl: String
     /// Never the code (it carries the device key): a failed #expect prints its operands.
     var description: String { "ProdDevice(\(clientId), run \(runId))" }
 
@@ -22,8 +22,9 @@ private struct ProdDevice: CustomStringConvertible {
               let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let code = o["pairingCode"] as? String, let id = o["clientId"] as? String,
               let run = o["runId"] as? String, let concept = o["conceptId"] as? String,
-              let completed = (o["completedAt"] as? String).flatMap(ProdDevice.parseDate) else { return nil }
-        return ProdDevice(code: code, clientId: id, runId: run, conceptId: concept, completedAt: completed)
+              let completed = (o["completedAt"] as? String).flatMap(ProdDevice.parseDate),
+              let api = o["apiUrl"] as? String else { return nil }
+        return ProdDevice(code: code, clientId: id, runId: run, conceptId: concept, completedAt: completed, apiUrl: api)
     }()
 
     static func parseDate(_ s: String) -> Date? {
@@ -50,6 +51,11 @@ struct ProductionServerTests {
         let (pairedId, deviceId) = (p.clientId, device.clientId)
         #expect(pairedId == deviceId)
         let pinned = try #require(Pairing.pinned(defaults))
+        // Production itself, not the runner's own local learner-server (which would pass the
+        // same identity check): the code pins the URL prod-device created the device on.
+        let (pinnedURL, prodURL) = (Pairing.normalized(pinned.apiUrl), Pairing.normalized(device.apiUrl))
+        #expect(pinnedURL == prodURL)
+        FileHandle.standardError.write(Data("PRODUCTION: paired with \(URL(string: pinnedURL)?.host ?? pinnedURL) as \(deviceId)\n".utf8))
         let dir = TempDir("prod-device")
         let rpc = LearnerRPC(baseURL: pinned.apiUrl, clientId: pinned.clientId, key: { _ in key.value })
         return (rpc, defaults, PairingLink(path: dir.file("endpoints.json")), dir)
@@ -94,12 +100,28 @@ struct ProductionServerTests {
         #expect(feed.pending.map(\.runId) == [device.runId], "exactly the seeded gain")
         #expect(feed.pending.first?.conceptId == device.conceptId)
 
-        // Opened, as a click records it; then twice more by hand: one row, the app's own.
+        // The server's idempotence (not the app's click path, which the local harness covers):
+        // opened twice, one row.
         let first = rpc.call("recordNotificationFeedback", ["runId": device.runId, "action": "opened"])
         let r1 = try #require(first.body as? [String: Any], "feedback: \(first.describe)")
         #expect(r1["recorded"] as? Bool == true)
         let at = try #require(r1["at"] as? String)
         let again = rpc.call("recordNotificationFeedback", ["runId": device.runId, "action": "opened"]).body as? [String: Any]
         #expect(again?["at"] as? String == at, "a replay made a second row")
+    }
+
+    /// The confinement that matters: a test device cannot read the owner's mastery. Asked for
+    /// everything since 1970, the server answers only this device's seeded run. Counts only
+    /// in any message: a failure must not print the owner's rows into a public log.
+    @Test func theDeviceCannotSeeTheOwnersMastery() throws {
+        let device = try #require(ProdDevice.loaded)
+        let (rpc, _, _, dir) = try paired()
+        _ = dir
+        let reply = rpc.call("getMasteryNotifications", ["since": "1970-01-01T00:00:00.000Z", "limit": 50])
+        try #require(reply.kind == .ok, "getMasteryNotifications: HTTP \(reply.status)")
+        let rows = (reply.body as? [String: Any])?["notifications"] as? [[String: Any]] ?? []
+        let foreign = rows.filter { ($0["runId"] as? String) != device.runId }.count
+        #expect(foreign == 0, "\(foreign) of \(rows.count) notification(s) since 1970 are not this test device's seed")
+        #expect(rows.count == 1, "\(rows.count) notification(s) since 1970; want exactly the seed")
     }
 }
