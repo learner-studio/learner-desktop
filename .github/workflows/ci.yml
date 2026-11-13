@@ -104,9 +104,22 @@ jobs:
       - name: medium lane
         if: ${{ !cancelled() }}
         run: scripts/ci.sh medium
+      # The real learner-server, through one throwaway test device. The minter's key goes
+      # to these two steps only; pull requests from forks get no secrets and skip by name.
+      - name: prod-device (a throwaway test device on the real server)
+        if: ${{ !cancelled() }}
+        env:
+          LEARNER_CI_MINT_KEY: ${{ secrets.LEARNER_CI_MINT_KEY }}
+          LEARNER_FORK_PR: ${{ github.event.pull_request.head.repo.fork == true }}
+        run: scripts/ci.sh prod-device
       - name: heavy lane
         if: ${{ !cancelled() }}
         run: scripts/ci.sh heavy
+      - name: prod-revoke (the test device and all it wrote, removed)
+        if: ${{ always() }}
+        env:
+          LEARNER_CI_MINT_KEY: ${{ secrets.LEARNER_CI_MINT_KEY }}
+        run: scripts/ci.sh prod-revoke
       - name: updater (automatic updates' LaunchAgent loads)
         if: ${{ !cancelled() }}
         run: scripts/ci.sh updater
