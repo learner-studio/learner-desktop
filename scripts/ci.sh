@@ -271,9 +271,12 @@ speech() {
   # them is on; the owner's Mac has Siri on ("Assistant Enabled"). Both, for the runner.
   defaults write com.apple.assistant.support "Assistant Enabled" -bool true
   defaults write com.apple.assistant.support "Dictation Enabled" -bool true
-  killall assistantd corespeechd 2>/dev/null || true   # they reread the settings on relaunch
+  killall assistantd 2>/dev/null || true   # it rereads the settings on relaunch
   defaults read com.apple.assistant.support | grep -E '"(Assistant|Dictation) Enabled"' | sed 's/^ */  /'
-  ensure_say
+  # Checked here for the record only: every phase that speaks checks again and fails then.
+  # Right after the daemons restart, say can stay silent for a minute (PR #7's run) and be
+  # fine by the next phase.
+  ensure_say || echo "::warning title=say::silent right after the speech daemons restarted; each phase that speaks checks again"
 }
 
 # Many checks speak with `say` (the mic end to end, the speech model, screenpipe's rows,
