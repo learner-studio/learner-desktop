@@ -280,7 +280,8 @@ struct PairingE2ETests {
 
         // One prompt, through the command Claude Code would run.
         let command = try #require(((hooks["UserPromptSubmit"]?.first?["hooks"] as? [[String: Any]])?.first)?["command"] as? String)
-        let session = "e2e-\(UUID().uuidString.lowercased())"
+        // A bare UUID: the hook validates session_id as one and stays silent (fails open) otherwise.
+        let session = UUID().uuidString.lowercased()
         let prompt = try JSONSerialization.data(withJSONObject: ["hook_event_name": "UserPromptSubmit", "session_id": session,
                                                                  "prompt": "Explain why a B-tree index speeds up this lookup."])
         let turn = ChildProcess.run("/bin/sh", ["-c", command], timeout: 30,
