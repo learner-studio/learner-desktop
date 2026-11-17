@@ -243,7 +243,8 @@ struct PairingE2ETests {
         let harness = try Harness(["--topology", "same-machine"])
         defer { harness.stop() }
         let ready = try #require(harness.ready(), "the harness did not start: \(harness.output.suffix(1500))")
-        let data = try #require(harness.pairingFile(try #require(ready["pairingFile"] as? String)))
+        let pairingPath = try #require(ready["pairingFile"] as? String)
+        let data = try #require(harness.pairingFile(pairingPath))
         guard case .success(let p) = Pairing.parse(data) else { Issue.record("the harness's payload does not parse"); return }
 
         // The key reaches the hook from a mode-600 file in the scratch folder (the Keychain's
