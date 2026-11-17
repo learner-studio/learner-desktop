@@ -24,6 +24,16 @@ Codex CLI and Claude Code sessions are captured by learner-server's `clients/upl
 (learner-upload), not by this app (yet): it tails `~/.codex/sessions` and
 `~/.claude/projects` and uploads the raw session files with the same device key and client id.
 
+The app also wires learner-server's live hook into Claude Code on this Mac (job `ClaudeHook`,
+at launch and every 6 hours): it runs learner-server's `clients/hook/src/install.ts` from the
+same checkout as the uploader, pointed at the paired server and at the Keychain lookup for the
+device key (the key is never passed or written), then the installer's `--check`. That puts the
+hook in the user-level `~/.claude/settings.json`, so it runs in every Claude Code session in
+any folder: the terminal CLI and the Code tab of the Claude desktop app, which runs the same
+Claude Code. A chat in the Claude desktop app or on claude.ai runs no hooks; those
+conversations reach the server afterwards through the chat archive. A checkout from before
+the installer existed is fast-forwarded once (only when it has no local changes).
+
 ## Pairing with learner-server
 
 Everything goes to learner-server over HTTPS as `POST ${LEARNER_API_URL}/rpc/<name>` with body
