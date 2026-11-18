@@ -210,12 +210,14 @@ enum LearnerAPI {
 /// registers them with the Scheduler, whose ticks run them) before `Scheduler.start()`.
 enum ChatAndOutboxJobs {
     /// Export (hourly), Archive (launch, after each export, hourly), Outbox (8 s), Heartbeat
-    /// (5 min, `heartbeat` builds its input only when one is due), UpdateCheck (1 min).
+    /// (5 min, `heartbeat` builds its input only when one is due), UpdateCheck (1 min),
+    /// ClaudeHook (launch, then every 6 h).
     static func install(heartbeat: @escaping @Sendable () -> [String: Any]) {
         _ = VaultExport.shared
         _ = Archive.shared
         OutboxSender.shared.setHeartbeatInput(heartbeat)
         _ = ScreenpipeUpdateCheck.shared
+        _ = ClaudeHook.shared
     }
 
     /// At quit, after the outbox drain: stop child programs that would outlive the app.

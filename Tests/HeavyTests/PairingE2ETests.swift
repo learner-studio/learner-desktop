@@ -232,6 +232,68 @@ struct PairingE2ETests {
         #expect(!keyLogged, "the key is never logged")
     }
 
+    /// The Claude Code hook, wired by the app's own job with learner-server's real installer
+    /// and a real device key, into a scratch ~/.claude (never the machine's own): the
+    /// installer's check passes against the server, and a prompt sent through the installed
+    /// hook command comes back carrying the live-feedback instructions. Needs the server
+    /// checkout on this machine (the runner), since the installer is run from it.
+    @Test(.enabled(if: Harness.localServer != nil, "needs the local harness (LEARNER_SERVER_DIR): the installer runs from that checkout"))
+    func theHookJobWiresClaudeCodeAndAPromptReachesTheServer() throws {
+        let server = try #require(Harness.localServer)
+        let harness = try Harness(["--topology", "same-machine"])
+        defer { harness.stop() }
+        let ready = try #require(harness.ready(), "the harness did not start: \(harness.output.suffix(1500))")
+        let pairingPath = try #require(ready["pairingFile"] as? String)
+        let data = try #require(harness.pairingFile(pairingPath))
+        guard case .success(let p) = Pairing.parse(data) else { Issue.record("the harness's payload does not parse"); return }
+
+        // The key reaches the hook from a mode-600 file in the scratch folder (the Keychain's
+        // stand-in here: LEARNER_HOOK_KEY_FILE outranks the configured Keychain lookup).
+        let home = TempDir("claude-hook-e2e")
+        let keyFile = home.write("device-key.env", "LEARNER_API_KEY=\(p.apiKey)\n", mode: 0o600)
+        let scratch = ["LEARNER_HOOK_CONFIG": home.file(".claude/learning-hook.json"),
+                       "LEARNER_HOOK_TRACE_DIR": home.file(".claude/learner-hook-traces"),
+                       "LEARNER_HOOK_KEY_FILE": keyFile]
+        var c = ClaudeHook.Config()
+        c.jobName = "test-claude-hook-e2e-\(UUID().uuidString.prefix(8))"
+        defer { try? FileManager.default.removeItem(atPath: Job.stateDir + "/\(c.jobName).json") }
+        c.repo = server
+        c.bun = Live.env["LEARNER_BUN"] ?? "/opt/homebrew/bin/bun"
+        c.serverURL = { p.apiUrl }
+        c.clientId = { p.clientId }
+        c.paired = { true }
+        c.environment = scratch
+        c.updateCheckout = false
+        let outcome = ClaudeHook(config: c).runOnce()
+        guard case .ok(let summary, _) = outcome else { Issue.record("the hook job did not finish ok: \(outcome)"); return }
+        #expect(summary.hasPrefix("wired into Claude Code"))
+
+        // What it wrote: user-level settings with the hook on every event, and a config that
+        // names the server and the Keychain lookup, not the key.
+        let settings = try #require(try? JSONSerialization.jsonObject(with: Data(home.read(".claude/settings.json").utf8)) as? [String: Any])
+        let hooks = try #require(settings["hooks"] as? [String: [[String: Any]]])
+        for event in ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"] { #expect(hooks[event]?.isEmpty == false, "no \(event) hook") }
+        let config = home.read(".claude/learning-hook.json")
+        #expect(config.contains(p.apiUrl) && config.contains("find-generic-password"))
+        let keyWritten = (config + home.read(".claude/settings.json")).contains(p.apiKey)
+        #expect(!keyWritten, "the key is never written into Claude Code's files")
+
+        // One prompt, through the command Claude Code would run.
+        let command = try #require(((hooks["UserPromptSubmit"]?.first?["hooks"] as? [[String: Any]])?.first)?["command"] as? String)
+        // A bare UUID: the hook validates session_id as one and stays silent (fails open) otherwise.
+        let session = UUID().uuidString.lowercased()
+        let prompt = try JSONSerialization.data(withJSONObject: ["hook_event_name": "UserPromptSubmit", "session_id": session,
+                                                                 "prompt": "Explain why a B-tree index speeds up this lookup."])
+        let turn = ChildProcess.run("/bin/sh", ["-c", command], timeout: 30,
+                                    env: ChildProcess.toolEnvironment.merging(scratch) { _, new in new }, input: prompt)
+        #expect(turn.status == 0)
+        // Bools first: a failed #expect prints its operands, and this log is public.
+        let taught = turn.output.contains("LEARNING LIVE FEEDBACK") && turn.output.contains(session)
+        #expect(taught, "the hook did not return live feedback for the prompt")
+        let keyPrinted = turn.output.contains(p.apiKey)
+        #expect(!keyPrinted, "the key is never printed")
+    }
+
     static let installedBinary = NSHomeDirectory() + "/Applications/Learner Desktop.app/Contents/MacOS/learner-desktop"
 
     @Test func pairsWithAServerOnTheSameMachine() throws {
